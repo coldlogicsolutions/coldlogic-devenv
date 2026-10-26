@@ -1,0 +1,59 @@
+# Copied into each project as .github/workflows/update-coldlogic-devenv.yaml.
+#
+# Moves the project's coldlogic-devenv pin forward and proposes it as a PR.
+# The project's own CI on that PR is the test.
+#
+# Needs the UPDATE_PR_TOKEN secret: a fine-grained token of derekjw's with
+# contents and pull-requests write on this repo and read on
+# coldlogicsolutions/coldlogic-devenv. The PR must be authored by derekjw:
+# CodeRabbit skips bot-authored PRs, and a PR opened with GITHUB_TOKEN
+# triggers no CI.
+name: Update coldlogic-devenv
+
+on:
+  schedule:
+    - cron: "17 6 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: update-coldlogic-devenv
+  cancel-in-progress: true
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.UPDATE_PR_TOKEN }}
+
+      - uses: cachix/install-nix-action@v31
+        with:
+          extra_nix_config: |
+            access-tokens = github.com=${{ secrets.UPDATE_PR_TOKEN }}
+
+      - name: Install devenv
+        run: nix profile install nixpkgs#devenv
+
+      - name: Update the pin
+        run: devenv update coldlogic-devenv
+
+      # Opens the PR, or refreshes the open one, only when devenv.lock moved.
+      # Ready for review, never a draft: CodeRabbit skips drafts.
+      - uses: peter-evans/create-pull-request@v7
+        with:
+          token: ${{ secrets.UPDATE_PR_TOKEN }}
+          branch: chore/update-coldlogic-devenv
+          add-paths: devenv.lock
+          commit-message: "chore(devenv): update coldlogic-devenv"
+          title: Update coldlogic-devenv
+          body: |
+            ## Summary
+            - Moves `coldlogic-devenv` in `devenv.lock` to the module's latest revision.
+
+            ## Test plan
+            - This project's CI runs on this PR in the updated shell.
+          draft: false
