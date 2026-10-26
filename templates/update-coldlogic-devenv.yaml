@@ -78,6 +78,7 @@ jobs:
           nar_hash=$(jq -er "$node.narHash" updated/devenv.lock)
           last_modified=$(jq -er "$node.lastModified" updated/devenv.lock)
           main=$(gh api repos/coldlogicsolutions/coldlogic-devenv/commits/main --jq .sha)
+          [[ $main =~ ^[0-9a-f]{40}$ ]] || { echo "could not resolve coldlogic-devenv's main" >&2; exit 1; }
           [[ $rev == "$main" ]] || { echo "revision $rev is not coldlogic-devenv's main ($main)" >&2; exit 1; }
           [[ $nar_hash =~ ^sha256-[A-Za-z0-9+/]+=*$ ]] || { echo "bad narHash" >&2; exit 1; }
           [[ $last_modified =~ ^[0-9]{1,12}$ ]] || { echo "bad lastModified" >&2; exit 1; }
