@@ -5,7 +5,7 @@
 # own CI on that PR is the test (an App token, unlike GITHUB_TOKEN, triggers
 # it).
 #
-# Needs the COLDLOGIC_AI_APP_ID variable and COLDLOGIC_AI_PRIVATE_KEY secret,
+# Needs the COLDLOGIC_AI_APP_ID and COLDLOGIC_AI_PRIVATE_KEY secrets,
 # which the infrastructure stack shares with every registered repository.
 name: Update coldlogic-devenv
 
@@ -41,7 +41,7 @@ jobs:
       - id: app-token
         uses: actions/create-github-app-token@v2
         with:
-          app-id: ${{ vars.COLDLOGIC_AI_APP_ID }}
+          app-id: ${{ secrets.COLDLOGIC_AI_APP_ID }}
           private-key: ${{ secrets.COLDLOGIC_AI_PRIVATE_KEY }}
           permission-contents: write
           permission-pull-requests: write
