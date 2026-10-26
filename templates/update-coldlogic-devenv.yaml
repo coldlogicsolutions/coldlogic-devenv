@@ -64,16 +64,20 @@ jobs:
           path: updated
 
       # The first job ran third-party code, so take nothing from it but a
-      # lock in which only the coldlogic-devenv node moved.
+      # lock that differs only in coldlogic-devenv's revision. Fails closed.
       - name: Check the updated lock
         run: |
-          others='.nodes | del(."coldlogic-devenv")'
-          if ! diff <(jq -S "$others" devenv.lock) <(jq -S "$others" updated/devenv.lock); then
-            echo "devenv.lock changed outside coldlogic-devenv" >&2
+          set -euo pipefail
+          rest='del(.nodes."coldlogic-devenv".locked | .rev, .narHash, .lastModified)'
+          jq -eS "$rest" devenv.lock > before.json
+          jq -eS "$rest" updated/devenv.lock > after.json
+          if ! diff before.json after.json; then
+            echo "devenv.lock changed beyond coldlogic-devenv's revision" >&2
             exit 1
           fi
+          jq -e '.nodes."coldlogic-devenv".locked.rev | test("^[0-9a-f]{40}$")' updated/devenv.lock >/dev/null
           mv updated/devenv.lock devenv.lock
-          rmdir updated
+          rm -r before.json after.json updated
 
       # Limited to this repository and to what opening a PR needs.
       - id: app-token
