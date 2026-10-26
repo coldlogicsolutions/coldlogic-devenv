@@ -20,18 +20,18 @@ permissions:
   contents: read
 
 concurrency:
-  group: update-coldlogic-devenv
+  group: update-coldlogic-devenv-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
   update:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 
-      - uses: cachix/install-nix-action@v31
+      - uses: cachix/install-nix-action@13d8dd58da0234aa297dedd986986ccb8e7f3e24 # v31.11.1
 
       - name: Install devenv
         run: nix profile install nixpkgs#devenv
@@ -39,7 +39,7 @@ jobs:
       - name: Update the pin
         run: devenv update coldlogic-devenv
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: devenv-lock
           path: devenv.lock
@@ -50,18 +50,20 @@ jobs:
     # Only main's copy of this workflow may use the App key.
     if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
+    # The App token does the writing; GITHUB_TOKEN needs nothing.
+    permissions: {}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: devenv-lock
 
       # Limited to this repository and to what opening a PR needs.
       - id: app-token
-        uses: actions/create-github-app-token@v2
+        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
         with:
           app-id: ${{ secrets.COLDLOGIC_AI_APP_ID }}
           private-key: ${{ secrets.COLDLOGIC_AI_PRIVATE_KEY }}
@@ -69,7 +71,7 @@ jobs:
           permission-pull-requests: write
 
       # Opens the PR, or refreshes the open one, only when devenv.lock moved.
-      - uses: peter-evans/create-pull-request@v7
+      - uses: peter-evans/create-pull-request@5f6978faf089d4d20b00c7766989d076bb2fc7f1 # v8.1.1
         with:
           token: ${{ steps.app-token.outputs.token }}
           branch: chore/update-coldlogic-devenv
