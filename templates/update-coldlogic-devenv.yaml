@@ -63,21 +63,31 @@ jobs:
           name: devenv-lock
           path: updated
 
-      # The first job ran third-party code, so take nothing from it but a
-      # lock that differs only in coldlogic-devenv's revision. Fails closed.
-      - name: Check the updated lock
+      # The first job ran third-party code, so its lock is only a source of
+      # three values, each checked: the revision must be the module's main as
+      # GitHub reports it, and the new lock is the repository's own with just
+      # those values replaced. Nix verifies narHash when it fetches the
+      # revision. Fails closed.
+      - name: Take the new revision from the updated lock
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          rest='del(.nodes."coldlogic-devenv".locked | .rev, .narHash, .lastModified)'
-          jq -eS "$rest" devenv.lock > before.json
-          jq -eS "$rest" updated/devenv.lock > after.json
-          if ! diff before.json after.json; then
-            echo "devenv.lock changed beyond coldlogic-devenv's revision" >&2
-            exit 1
-          fi
-          jq -e '.nodes."coldlogic-devenv".locked.rev | test("^[0-9a-f]{40}$")' updated/devenv.lock >/dev/null
-          mv updated/devenv.lock devenv.lock
-          rm -r before.json after.json updated
+          node='.nodes."coldlogic-devenv".locked'
+          rev=$(jq -er "$node.rev" updated/devenv.lock)
+          nar_hash=$(jq -er "$node.narHash" updated/devenv.lock)
+          last_modified=$(jq -er "$node.lastModified" updated/devenv.lock)
+          main=$(gh api repos/coldlogicsolutions/coldlogic-devenv/commits/main --jq .sha)
+          [[ $rev == "$main" ]] || { echo "revision $rev is not coldlogic-devenv's main ($main)" >&2; exit 1; }
+          [[ $nar_hash =~ ^sha256-[A-Za-z0-9+/]+=*$ ]] || { echo "bad narHash" >&2; exit 1; }
+          [[ $last_modified =~ ^[0-9]{1,12}$ ]] || { echo "bad lastModified" >&2; exit 1; }
+          # devenv writes the lock without a trailing newline; so does this.
+          new_lock=$(jq --arg rev "$rev" --arg hash "$nar_hash" --argjson modified "$last_modified" \
+            "$node |= (.rev = \$rev | .narHash = \$hash | .lastModified = \$modified)" devenv.lock)
+          printf '%s' "$new_lock" > devenv.lock.new
+          mv devenv.lock.new devenv.lock
+          rm updated/devenv.lock
+          rmdir updated
 
       # Limited to this repository and to what opening a PR needs.
       - id: app-token
