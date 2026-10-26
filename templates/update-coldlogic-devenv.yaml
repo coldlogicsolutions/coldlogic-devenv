@@ -1,14 +1,12 @@
 # Copied into each project as .github/workflows/update-coldlogic-devenv.yaml.
 #
-# Moves the project's coldlogic-devenv pin forward and proposes it as a PR.
-# The project's own CI on that PR is the test.
+# Moves the project's coldlogic-devenv pin forward and proposes it as a PR,
+# opened as the coldlogic-ai App like every other automated PR. The project's
+# own CI on that PR is the test (an App token, unlike GITHUB_TOKEN, triggers
+# it).
 #
-# Needs two fine-grained tokens of derekjw's as secrets:
-# - UPDATE_PR_TOKEN: contents and pull-requests write on this repo. The PR
-#   must be authored by derekjw: CodeRabbit skips bot-authored PRs, and a PR
-#   opened with GITHUB_TOKEN triggers no CI. Only the PR step sees it.
-# - MODULE_READ_TOKEN: contents read on coldlogicsolutions/coldlogic-devenv,
-#   for Nix to fetch the module. Not needed while that repo is public.
+# Needs the COLDLOGIC_AI_APP_ID variable and COLDLOGIC_AI_PRIVATE_KEY secret,
+# which the infrastructure stack shares with every registered repository.
 name: Update coldlogic-devenv
 
 on:
@@ -37,15 +35,21 @@ jobs:
         run: nix profile install nixpkgs#devenv
 
       - name: Update the pin
-        env:
-          NIX_CONFIG: ${{ secrets.MODULE_READ_TOKEN && format('access-tokens = github.com={0}', secrets.MODULE_READ_TOKEN) || '' }}
         run: devenv update coldlogic-devenv
 
+      # Minted only after the update ran, and limited to this repository.
+      - id: app-token
+        uses: actions/create-github-app-token@v2
+        with:
+          app-id: ${{ vars.COLDLOGIC_AI_APP_ID }}
+          private-key: ${{ secrets.COLDLOGIC_AI_PRIVATE_KEY }}
+          permission-contents: write
+          permission-pull-requests: write
+
       # Opens the PR, or refreshes the open one, only when devenv.lock moved.
-      # Ready for review, never a draft: CodeRabbit skips drafts.
       - uses: peter-evans/create-pull-request@v7
         with:
-          token: ${{ secrets.UPDATE_PR_TOKEN }}
+          token: ${{ steps.app-token.outputs.token }}
           branch: chore/update-coldlogic-devenv
           add-paths: devenv.lock
           commit-message: "chore(devenv): update coldlogic-devenv"
@@ -56,4 +60,5 @@ jobs:
 
             ## Test plan
             - This project's CI runs on this PR in the updated shell.
+          reviewers: derekjw
           draft: false

@@ -34,9 +34,10 @@ in
             "git switch *"
             "git branch *"
             "git worktree *"
-            "gh pr view *"
-            "gh pr checks *"
-            "gh pr create *"
+            # Sessions act on GitHub as the App (see gh-app).
+            "gh-app pr view *"
+            "gh-app pr checks *"
+            "gh-app pr create *"
             "openspec *"
           ];
           rules.Bash.deny = [

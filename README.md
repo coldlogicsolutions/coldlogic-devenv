@@ -37,7 +37,7 @@ profiles.developer.module = { config, ... }: {
 
 Each project sets its own default model in `devenv.nix` with `claude.code.model` (decided 2026-10-26); the module sets none.
 
-Copy `templates/update-coldlogic-devenv.yaml` to `.github/workflows/` and add the secrets it describes.
+Copy `templates/update-coldlogic-devenv.yaml` to `.github/workflows/` and register the repository in the infrastructure stack, which shares the App credentials it needs.
 
 ## What's here
 
