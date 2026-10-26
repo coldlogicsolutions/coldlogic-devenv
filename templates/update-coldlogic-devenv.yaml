@@ -3,11 +3,12 @@
 # Moves the project's coldlogic-devenv pin forward and proposes it as a PR.
 # The project's own CI on that PR is the test.
 #
-# Needs the UPDATE_PR_TOKEN secret: a fine-grained token of derekjw's with
-# contents and pull-requests write on this repo and read on
-# coldlogicsolutions/coldlogic-devenv. The PR must be authored by derekjw:
-# CodeRabbit skips bot-authored PRs, and a PR opened with GITHUB_TOKEN
-# triggers no CI.
+# Needs two fine-grained tokens of derekjw's as secrets:
+# - UPDATE_PR_TOKEN: contents and pull-requests write on this repo. The PR
+#   must be authored by derekjw: CodeRabbit skips bot-authored PRs, and a PR
+#   opened with GITHUB_TOKEN triggers no CI. Only the PR step sees it.
+# - MODULE_READ_TOKEN: contents read on coldlogicsolutions/coldlogic-devenv,
+#   for Nix to fetch the module. Not needed while that repo is public.
 name: Update coldlogic-devenv
 
 on:
@@ -28,17 +29,16 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          token: ${{ secrets.UPDATE_PR_TOKEN }}
+          persist-credentials: false
 
       - uses: cachix/install-nix-action@v31
-        with:
-          extra_nix_config: |
-            access-tokens = github.com=${{ secrets.UPDATE_PR_TOKEN }}
 
       - name: Install devenv
         run: nix profile install nixpkgs#devenv
 
       - name: Update the pin
+        env:
+          NIX_CONFIG: ${{ secrets.MODULE_READ_TOKEN && format('access-tokens = github.com={0}', secrets.MODULE_READ_TOKEN) || '' }}
         run: devenv update coldlogic-devenv
 
       # Opens the PR, or refreshes the open one, only when devenv.lock moved.

@@ -35,7 +35,9 @@ profiles.developer.module = { config, ... }: {
 };
 ```
 
-Copy `templates/update-coldlogic-devenv.yaml` to `.github/workflows/` and add the `UPDATE_PR_TOKEN` secret it describes.
+Each project sets its own default model in `devenv.nix` with `claude.code.model` (decided 2026-10-26); the module sets none.
+
+Copy `templates/update-coldlogic-devenv.yaml` to `.github/workflows/` and add the secrets it describes.
 
 ## What's here
 

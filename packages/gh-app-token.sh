@@ -64,8 +64,11 @@ api() {
 }
 
 installation_id=""
-if [[ -f "$INSTALLATION_CACHE" ]]; then
+if [[ -f "$INSTALLATION_CACHE" && ! -L "$INSTALLATION_CACHE" ]]; then
   installation_id=$(cat "$INSTALLATION_CACHE")
+  # It goes into an authenticated URL, so anything but a number is ignored
+  # and looked up again.
+  [[ "$installation_id" =~ ^[0-9]+$ ]] || installation_id=""
 fi
 
 if [[ -z "$installation_id" ]]; then

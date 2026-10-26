@@ -21,4 +21,6 @@ if ! token="$(GH_APP_KEY="$gh_app_key" gh-app-token)"; then
   exit 1
 fi
 
-exec env GH_TOKEN="$token" gh "$@"
+# Exported, not passed through `env`, so the token never appears in argv.
+export GH_TOKEN="$token"
+exec gh "$@"
