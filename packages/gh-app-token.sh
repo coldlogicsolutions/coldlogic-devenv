@@ -6,7 +6,7 @@
 # is untouched — that still uses the owner's SSH key.
 #
 # Flow:
-#   1. Build an RS256 JWT (iss=<App ID>, iat=now-60, exp=now+540) signed with
+#   1. Build an RS256 JWT (iss=<client ID>, iat=now-60, exp=now+540) signed with
 #      the App's private key, using openssl.
 #   2. GET /app/installations with the JWT to find the installation id for
 #      org coldlogicsolutions. Cached in
@@ -19,7 +19,7 @@
 #                (default: $HOME/.config/github/coldlogic-ai.pem —
 #                this directory is provisioned from 1Password by nix and is
 #                read-only by design; never write cache files there)
-#   GH_APP_ID    the App's numeric ID (default: 4680184)
+#   GH_APP_CLIENT_ID  the App's client ID (default: Iv23liSDFpgwRZQtnST9)
 #
 # Exit behavior: if the key file is missing, this prints nothing on stdout
 # and exits non-zero with a message on stderr. Callers that treat a missing
@@ -30,7 +30,7 @@
 set -euo pipefail
 
 GH_APP_KEY="${GH_APP_KEY:-$HOME/.config/github/coldlogic-ai.pem}"
-GH_APP_ID="${GH_APP_ID:-4680184}"
+GH_APP_CLIENT_ID="${GH_APP_CLIENT_ID:-Iv23liSDFpgwRZQtnST9}"
 ORG="coldlogicsolutions"
 
 CONFIG_DIR="${GH_APP_CONFIG_DIR:-${XDG_CACHE_HOME:-$HOME/.cache}/coldlogic-ai}"
@@ -50,7 +50,7 @@ iat=$((now - 60))
 exp=$((now + 540))
 
 header=$(printf '{"alg":"RS256","typ":"JWT"}' | b64url)
-payload=$(printf '{"iat":%d,"exp":%d,"iss":"%s"}' "$iat" "$exp" "$GH_APP_ID" | b64url)
+payload=$(printf '{"iat":%d,"exp":%d,"iss":"%s"}' "$iat" "$exp" "$GH_APP_CLIENT_ID" | b64url)
 signing_input="${header}.${payload}"
 signature=$(printf '%s' "$signing_input" | openssl dgst -sha256 -sign "$GH_APP_KEY" | b64url)
 jwt="${signing_input}.${signature}"
