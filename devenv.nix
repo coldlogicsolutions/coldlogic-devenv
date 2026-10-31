@@ -45,15 +45,27 @@ in
             "gh-app pr create *"
             "openspec *"
           ];
-          rules.Bash.deny = [
-            "git push --force *"
-            "git push -f *"
-            "wrangler deploy *"
-            # Tools come from the devenv shell, never a flake's dev shell.
-            "nix develop *"
-            # A backstop to auto mode's classifier.
-            "git reset --hard *"
-          ];
+          # A rule matches the start of the command, so each is repeated behind
+          # the devenv wrapper. A sandboxed command runs without a prompt unless
+          # one of these matches, and `bash -c` inside the wrapper still gets
+          # past them: they are a backstop, not a boundary. A project's own deny
+          # rules are not wrapped.
+          rules.Bash.deny =
+            let
+              denied = [
+                "git push --force *"
+                "git push -f *"
+                "git push * --force *"
+                "git push * -f *"
+                "wrangler deploy *"
+                "npx wrangler deploy *"
+                # Tools come from the devenv shell, never a flake's dev shell.
+                "nix develop *"
+                # A backstop to auto mode's classifier.
+                "git reset --hard *"
+              ];
+            in
+            denied ++ map (command: "devenv * -- ${command}") denied;
           # Covers Claude's file tools only; the sandbox below covers the shell.
           rules.Read.deny = [
             "./.env"
@@ -89,11 +101,53 @@ in
         # committed.
         sandbox = {
           enabled = true;
-          filesystem.denyRead = [
-            "${config.devenv.root}/.env"
-            "${config.devenv.root}/.env.*"
-            "${config.devenv.root}/**/secrets/**"
-          ];
+          filesystem = {
+            denyRead = [
+              "${config.devenv.root}/.env"
+              "${config.devenv.root}/.env.*"
+              "${config.devenv.root}/**/secrets/**"
+            ];
+            # What `devenv shell` and the toolchains inside it write to.
+            allowWrite = [
+              "~/.cache/nix"
+              "~/.cache/devenv"
+              "~/.local/share/devenv"
+              "~/.cargo/registry"
+              "~/.cargo/git"
+              "~/.cache/prek"
+              "~/.npm"
+              # wrangler's state and the Worker build tools' downloads, on
+              # macOS and Linux.
+              "~/Library/Preferences/.wrangler"
+              "~/.config/.wrangler"
+              "~/Library/Caches/worker-build"
+              "~/.cache/worker-build"
+              "~/Library/Caches/.wasm-pack"
+              "~/.cache/.wasm-pack"
+            ];
+          };
+          network = {
+            # `devenv shell` needs the daemon, and a build it runs happens
+            # outside this sandbox, so this limits a mistake, not an attacker.
+            allowUnixSockets = [ "/nix/var/nix/daemon-socket/socket" ];
+            # `wrangler dev` and the integration suites listen on localhost.
+            allowLocalBinding = true;
+            allowedDomains = [
+              "github.com"
+              "api.github.com"
+              "codeload.github.com"
+              "objects.githubusercontent.com"
+              "release-assets.githubusercontent.com"
+              "cache.nixos.org"
+              "cachix.org"
+              "*.cachix.org"
+              "crates.io"
+              "*.crates.io"
+              "static.rust-lang.org"
+              "registry.npmjs.org"
+              "workers.cloudflare.com"
+            ];
+          };
         };
       };
 
@@ -110,8 +164,14 @@ in
         exec = ''
           git_dir="$(git -C "$DEVENV_ROOT" rev-parse --absolute-git-dir 2>/dev/null)" || git_dir=""
           if [ -n "$git_dir" ]; then
-            git -C "$DEVENV_ROOT" config extensions.worktreeConfig true
-            git -C "$DEVENV_ROOT" config --worktree core.hooksPath "$git_dir/hooks"
+            # Writes only on a change: the sandbox can't write .git/config, and
+            # this runs on every `devenv shell` a session starts.
+            if [ "$(git -C "$DEVENV_ROOT" config --local --type=bool --get extensions.worktreeConfig)" != true ]; then
+              git -C "$DEVENV_ROOT" config extensions.worktreeConfig true
+            fi
+            if [ "$(git -C "$DEVENV_ROOT" config --worktree --get core.hooksPath)" != "$git_dir/hooks" ]; then
+              git -C "$DEVENV_ROOT" config --worktree core.hooksPath "$git_dir/hooks"
+            fi
           fi
         '';
         before = [ "devenv:git-hooks:install" ];

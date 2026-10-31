@@ -13,6 +13,12 @@
     developer.module =
       { config, ... }:
       {
+        # `wrangler dev` reads these, so the sandbox can't deny them too.
+        claude.code.permissions.rules.Read.deny = [
+          "./.dev.vars"
+          "./.dev.vars.*"
+        ];
+
         files."${config.claude.code.settingsPath}".json = {
           extraKnownMarketplaces.cloudflare.source = {
             source = "github";

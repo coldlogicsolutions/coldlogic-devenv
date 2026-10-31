@@ -43,7 +43,7 @@ Copy `templates/update-coldlogic-devenv.yaml` to `.github/workflows/` and regist
 
 | Path | What it adds |
 | --- | --- |
-| `devenv.nix` | `developer`: `git`, `openspec`, `gh-app`; the nixfmt hook; `claude.code` permissions and deny rules; the marketplace, plugin and sandbox settings; per-worktree `core.hooksPath`; the freshness warning |
+| `devenv.nix` | `developer`: `git`, `openspec`, `gh-app`; the nixfmt hook; `claude.code` permissions and deny rules; the marketplace, plugin and sandbox settings (what the shell may write and reach, and that `.env` it may not read); per-worktree `core.hooksPath`; the freshness warning |
 | `profiles/rust-lib` | Rust with wasm32 in `build`; the slimmed `ci` toolchain; rust-analyzer, docs and the check-only `rustfmt` and `clippy` hooks in `developer` |
 | `profiles/rust-worker` | `rust-lib` plus `worker-build`, `wasm-pack`, and the `cloudflare` plugin |
 | `packages/gh-app.nix` | `gh-app <gh args>`: one `gh` call as `coldlogic-ai[bot]`. The key path comes from `GH_APP_KEY` (default `~/.config/github/coldlogic-ai.pem`) |
