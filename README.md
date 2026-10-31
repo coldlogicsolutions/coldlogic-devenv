@@ -35,7 +35,7 @@ profiles.developer.module = { config, ... }: {
 };
 ```
 
-Each project sets its own default model in `devenv.nix` with `claude.code.model` (decided 2026-10-26); the module sets none.
+Sessions default to `opus`, which tracks the latest Opus, and subagents with no model of their own to `sonnet`. The plugin's `models.md` convention picks a model per subagent. To change a default, set `claude.code.model` or `claude.code.env.CLAUDE_CODE_SUBAGENT_MODEL` in the project.
 
 Copy `templates/update-coldlogic-devenv.yaml` to `.github/workflows/` and register the repository in the infrastructure stack, which shares the App credentials it needs.
 

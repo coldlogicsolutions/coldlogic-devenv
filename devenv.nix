@@ -8,7 +8,7 @@ let
 in
 {
   profiles.developer.module =
-    { config, ... }:
+    { config, lib, ... }:
     {
       packages = with pkgs; [
         git
@@ -20,7 +20,12 @@ in
 
       claude.code = {
         enable = true;
-        env.CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS = "1";
+        model = lib.mkDefault "opus";
+        env = {
+          CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS = "1";
+          # What a subagent runs on when nothing else picks a model.
+          CLAUDE_CODE_SUBAGENT_MODEL = lib.mkDefault "sonnet";
+        };
         permissions = {
           # A starting point. Anything broader belongs in the project.
           rules.Bash.allow = [
