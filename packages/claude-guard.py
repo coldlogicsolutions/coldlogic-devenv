@@ -714,9 +714,10 @@ def resolve(path):
     whatever prefix exists, so a link on the way to a path not yet created
     counts too."""
     cwd = WORKING["cwd"]
-    if not cwd or path.startswith("-") or path.startswith("/") or path.startswith("~"):
+    if not cwd or path.startswith("-"):
         return None
-    resolved = os.path.realpath(os.path.join(cwd, path))
+    path = os.path.expanduser(path)
+    resolved = os.path.realpath(path if os.path.isabs(path) else os.path.join(cwd, path))
     base = os.path.realpath(WORKING["root"] or cwd)
     if resolved == base:
         return resolved, "."
@@ -749,7 +750,7 @@ def away_from_root():
     if not cwd or not root:
         return False
     here, base = os.path.realpath(cwd), os.path.realpath(root)
-    return here != base and not own_worktree(here, base)
+    return here != base and not (here.startswith(base + os.sep) and own_worktree(here, base))
 
 
 def own_worktree(here, base):
@@ -772,10 +773,12 @@ def own_worktree(here, base):
 
 def plain_args(words):
     """Whether no argument, or option value, points outside the project or
-    names an output file."""
+    names an output file, and the program isn't a path out of it."""
+    if "/" in words[0] and outside(words[0]):
+        return False
     for w in words[1:]:
-        if (long_option(w, "--output", 5) or long_option(w, "--files0-from", 6)
-                or long_option(w, "--config", 5) or w == "-o"):
+        if (long_option(w, "--output", 4) or long_option(w, "--files0-from", 4)
+                or long_option(w, "--config", 4) or w == "-o"):
             # An output file, or configuration that can name a program
             # (`cargo --config build.rustc-wrapper=...`).
             return False
