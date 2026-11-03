@@ -43,30 +43,45 @@ in
             "gh-app pr view *"
             "gh-app pr checks *"
             "gh-app pr create *"
+            "gh-app issue create *"
             "openspec *"
           ];
-          # A rule matches the start of the command, so each is repeated behind
-          # the devenv wrapper. A sandboxed command runs without a prompt unless
-          # one of these matches, and `bash -c` inside the wrapper still gets
-          # past them: they are a backstop, not a boundary. A project's own deny
-          # rules are not wrapped.
+          # Each command is denied bare, with arguments, and behind the devenv
+          # wrapper, because a trailing ` *` is only optional in a rule with no
+          # other wildcard. The wrapper forms keep `--` or `shell` so that most
+          # commit messages mentioning a command aren't denied.
+          #
+          # Anything behind the wrapper runs without a prompt unless one of these
+          # matches. Other spellings and `bash -c` inside it get past them: they
+          # are a backstop, not a boundary. A project's own deny rules are not
+          # wrapped.
           rules.Bash.deny =
-            let
-              denied = [
-                "git push --force *"
-                "git push -f *"
-                "git push * --force *"
-                "git push * -f *"
-                "wrangler deploy *"
-                "npx wrangler deploy *"
+            lib.concatMap
+              (command: [
+                command
+                "${command} *"
+                "devenv * -- ${command}"
+                "devenv * -- ${command} *"
+                "devenv shell ${command}"
+                "devenv shell ${command} *"
+              ])
+              [
+                "git push --force"
+                "git push -f"
+                "git push * --force"
+                "git push * -f"
+                "wrangler deploy"
+                "npx wrangler deploy"
                 # Tools come from the devenv shell, never a flake's dev shell.
-                "nix develop *"
+                "nix develop"
                 # A backstop to auto mode's classifier.
-                "git reset --hard *"
+                "git reset --hard"
+                "git reset * --hard"
+                # Merging is the user's, and the App could do it unprompted.
+                "gh-app pr merge"
               ];
-            in
-            denied ++ map (command: "devenv * -- ${command}") denied;
-          # Covers Claude's file tools only; the sandbox below covers the shell.
+          # Claude Code also merges these into the sandbox's denyRead, so a file
+          # a tool in the shell needs, like wrangler's `.dev.vars`, can't go here.
           rules.Read.deny = [
             "./.env"
             "./.env.*"
@@ -96,11 +111,17 @@ in
         enabledPlugins."coldlogic@coldlogic-plugins" = true;
         enabledMcpjsonServers = [ "mcp.devenv.sh" ];
 
-        # Stops `cat .env` in the shell, which `Read` deny rules don't reach.
+        # Stops `cat .env` in the shell.
         # Paths are absolute: the file is generated per checkout and never
         # committed.
         sandbox = {
           enabled = true;
+          # Off so that commands outside the devenv wrapper need the allow list.
+          # Behind the wrapper, only the deny rules apply.
+          autoAllowBashIfSandboxed = false;
+          # `gh`, and so `gh-app`, can't verify TLS on macOS without trustd.
+          # Claude Code documents this as a possible way to exfiltrate data.
+          enableWeakerNetworkIsolation = true;
           filesystem = {
             denyRead = [
               "${config.devenv.root}/.env"
