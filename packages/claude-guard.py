@@ -778,7 +778,7 @@ def plain_args(words):
     names an output file, and the program isn't a path out of it."""
     if "/" in words[0] and outside(words[0]):
         return False
-    prog = os.path.basename(words[0])
+    prog = program(words[0])
     for w in words[1:]:
         # For any program: an output file, a list of paths, or configuration
         # that can name a program to run. Some programs take shorter
@@ -786,9 +786,9 @@ def plain_args(words):
         # whose build command runs).
         if (w == "-o" or long_option(w, "--output", 5) or long_option(w, "--config", 5)
                 or long_option(w, "--files0-from", 8)
-                or (prog == "wc" and long_option(w, "--files0-from", 3))
+                or (prog in ("wc", "sort", "du") and long_option(w, "--files0-from", 3))
                 or (prog == "cargo" and long_option(w, "--config", 4))
-                or (prog == "wrangler" and (w == "-c" or w.startswith("-c")))
+                or (prog == "wrangler" and re.match(r"^-[A-Za-z]*c", w))
                 # gh's jq and templates can read the environment, the App's
                 # GH_TOKEN included.
                 or (prog in ("gh", "gh-app") and (

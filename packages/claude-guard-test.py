@@ -223,6 +223,9 @@ BASH = [
     ("git add -f :/:.dev.vars", DENY),
     ("git add -f :0:.dev.vars", DENY),
     ("cat <<EOF\n\tEOF\ncat <<X\nEOF\ngit push --force\nX", DENY),
+    ("wrangler dev -jc other.toml", NONE),
+    ("node_modules/.bin/wrangler dev --config=x.toml", NONE),
+    ("git log --follow README.md", ALLOW),
     # Ordinary pushes and resets are left to the rules.
     ("git push -u origin feat", ASK),
     ("git reset --soft HEAD~1", NONE),
