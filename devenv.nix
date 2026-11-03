@@ -140,20 +140,28 @@ in
           # Claude Code documents this as a possible way to exfiltrate data.
           enableWeakerNetworkIsolation = true;
           filesystem = {
-            # No command reads a `.env` file at any depth, but `.env.example`
-            # stays readable. `**/` doesn't match the root here, so each is
-            # listed twice.
-            denyRead = [
-              "${config.devenv.root}/.env"
-              "${config.devenv.root}/**/.env"
-              "${config.devenv.root}/.env.*"
-              "${config.devenv.root}/**/.env.*"
-              "${config.devenv.root}/**/secrets/**"
-            ];
-            allowRead = [
-              "${config.devenv.root}/.env.example"
-              "${config.devenv.root}/**/.env.example"
-            ];
+            # No command reads a `.env` file, or its usual variants, at any
+            # depth. They are named rather than matched with `.env.*`: Claude
+            # Code applies these to its own tools too, ignoring allowRead, so
+            # `.env.*` would also hide `.env.example`. The guard hook denies
+            # any other `.env.*` named in a command or a file tool. `**/`
+            # doesn't match the root here, so each is listed twice.
+            denyRead =
+              lib.concatMap
+                (name: [
+                  "${config.devenv.root}/${name}"
+                  "${config.devenv.root}/**/${name}"
+                ])
+                [
+                  ".env"
+                  ".env.local"
+                  ".env.*.local"
+                  ".env.development"
+                  ".env.production"
+                  ".env.staging"
+                  ".env.test"
+                ]
+              ++ [ "${config.devenv.root}/**/secrets/**" ];
             # A write deny overrides allowWrite, so only `.env` itself is
             # listed. The guard hook keeps other `.env.*` files from being
             # written by name.

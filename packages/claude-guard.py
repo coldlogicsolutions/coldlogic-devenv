@@ -12,19 +12,20 @@ unwraps each command first, then:
 - otherwise leaves the call to Claude Code's own rules, which prompt.
 
 It is a backstop, not a boundary: a script can still do anything the sandbox
-lets it. The policy file holds the session's Bash allow and deny rules, as
-`{"allow": [...], "deny": [...]}`.
+lets it. Anything it can't follow gets no allow. The policy file holds the
+session's Bash allow and deny rules, as `{"allow": [...], "deny": [...]}`.
 """
 
+import fnmatch
 import json
 import os
 import re
 import shlex
 import sys
 
-# Programs that run their arguments as a command. A value is the number of
-# leading arguments to skip, or a function returning the command's index.
 SHELLS = {"bash", "sh", "zsh", "dash"}
+# Interpreters whose script this can't read.
+INTERPRETERS = {"python", "python3", "node", "perl", "ruby", "deno", "bun"}
 NO_ARG_WRAPPERS = {"command", "exec", "nohup", "time", "builtin"}
 
 # Option flags of `devenv` and `devenv shell` that a command may come after.
@@ -40,15 +41,25 @@ GIT_VALUE_FLAGS = {"-C", "-c", "--git-dir", "--work-tree", "--namespace",
                    "--exec-path", "--config-env", "--super-prefix",
                    "--attr-source", "--list-cmds"}
 
-# Commands that only read, allowed anywhere in a pipeline. A secrets file
-# named as an argument is still denied.
-READ_ONLY = {"cd", "pwd", "ls", "cat", "head", "tail", "grep", "rg", "wc",
-             "sort", "uniq", "cut", "tr", "jq", "echo", "printf", "true",
-             "diff", "column", "basename", "dirname", "realpath"}
+# Commands that only read what they're given, allowed anywhere in a
+# pipeline without a rule, as long as every argument stays in the project
+# (see read_only).
+READ_ONLY = {"cd", "pwd", "ls", "cat", "head", "tail", "grep", "wc", "sort",
+             "uniq", "cut", "tr", "jq", "echo", "printf", "true", "column",
+             "basename", "dirname"}
 
-OPERATORS = {";", "&&", "||", "|", "&", "|&", "(", ")", "\n", ";;"}
+OPERATORS = {";", "&&", "||", "|", "&", "|&", "(", ")", ";;"}
 REDIRECTS = re.compile(r"^\d*(>>?|<|<<<?|>&|<&|&>>?)$")
 ASSIGNMENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
+# A word the shell would expand: what it names can't be known here.
+EXPANDS = re.compile(r"[$`*?\[\]{}]|^~")
+HEREDOC = re.compile(r"<<-?\s*(['\"]?)([A-Za-z_][A-Za-z0-9_]*)\1")
+
+SUBSTITUTED = "SUBSTITUTED"
+
+SECRET_NAMES = (".env", ".dev.vars")
+# Names a glob is tested against, to catch `cat .e*`.
+SECRET_EXAMPLES = (".env", ".env.local", ".env.production", ".dev.vars")
 
 
 class Unparsable(Exception):
@@ -58,24 +69,26 @@ class Unparsable(Exception):
 def split_commands(text):
     """Split shell text into simple commands, each a list of words.
 
-    Command substitutions are split out as commands of their own. Anything
-    this can't follow (an unclosed quote, a heredoc) raises Unparsable.
+    Command substitutions, and heredocs fed to a shell, are split out as
+    commands of their own. Anything this can't follow raises Unparsable.
     """
-    text = drop_heredoc_bodies(text)
+    text, scripts = take_heredocs(text)
     # Duplicating a descriptor, or discarding output, writes no file.
     text = re.sub(r"\d*>&\d+|&?\d*>\s*/dev/null", " ", text)
     commands = []
-    for inner in substitutions(text):
+    inners, text = substitutions(text)
+    for inner in scripts + inners:
         commands.extend(split_commands(inner))
-    lexer = shlex.shlex(text.replace("\\\n", " "), posix=True,
-                        punctuation_chars=";&|()<>")
-    lexer.whitespace = " \t\r"
+    # A newline separates commands as `;` does. Inside quotes this changes
+    # only the words being looked at, not what runs.
+    text = text.replace("\\\n", " ").replace("\n", " ; ")
+    lexer = shlex.shlex(text, posix=True, punctuation_chars=";&|()<>")
     lexer.whitespace_split = True
     lexer.commenters = "#"
     words = []
     try:
         for token in lexer:
-            if token in OPERATORS or token == "\n":
+            if token in OPERATORS:
                 if words:
                     commands.append(words)
                 words = []
@@ -88,30 +101,41 @@ def split_commands(text):
     return [strip_redirects(c) for c in commands if c]
 
 
-def drop_heredoc_bodies(text):
-    """Text with each heredoc's body removed: it is data, not commands."""
-    lines = text.split("\n")
-    out, delimiter = [], None
-    for line in lines:
+def take_heredocs(text):
+    """(text without heredoc bodies, bodies a shell will run).
+
+    A heredoc's body is data unless a shell reads it, as in `bash <<EOF` or
+    `cat <<EOF | sh`. An interpreter reading one can't be followed.
+    """
+    out, scripts = [], []
+    delimiter, body, is_script = None, [], False
+    for line in text.split("\n"):
         if delimiter is not None:
             if line.strip() == delimiter:
-                delimiter = None
+                if is_script:
+                    scripts.append("\n".join(body))
+                delimiter, body = None, []
+            else:
+                body.append(line)
             continue
-        m = re.search(r"<<-?\s*(['\"]?)([A-Za-z_][A-Za-z0-9_]*)\1", line)
+        m = HEREDOC.search(line)
         if m:
-            delimiter = m.group(2)
-            # The operator goes too, so a substitution holding the heredoc
-            # parses on its own.
+            words = re.findall(r"[A-Za-z0-9_.-]+", line)
+            if INTERPRETERS & set(words):
+                raise Unparsable("a heredoc fed to an interpreter")
+            delimiter, is_script = m.group(2), bool(SHELLS & set(words))
             line = line[:m.start()] + line[m.end():]
         out.append(line)
     if delimiter is not None:
         raise Unparsable("unterminated heredoc")
-    return "\n".join(out)
+    return "\n".join(out), scripts
 
 
 def substitutions(text):
-    """The bodies of $(...) and `...` in text, outermost first."""
-    found = []
+    """(the bodies of $(...) and `...` in text, text with each replaced by a
+    placeholder). The bodies are checked as commands of their own, so the
+    word holding one needn't count as an expansion."""
+    found, out = [], []
     i = 0
     while i < len(text):
         if text.startswith("$(", i):
@@ -122,21 +146,23 @@ def substitutions(text):
             if depth:
                 raise Unparsable("unclosed $(")
             found.append(text[i + 2:j - 1])
+            out.append(SUBSTITUTED)
             i = j
         elif text[i] == "`":
             j = text.find("`", i + 1)
             if j < 0:
                 raise Unparsable("unclosed `")
             found.append(text[i + 1:j])
+            out.append(SUBSTITUTED)
             i = j + 1
         else:
+            out.append(text[i])
             i += 1
-    return found
+    return found, "".join(out)
 
 
 def strip_redirects(words):
-    """Words with redirections split off. The targets are kept separately,
-    as files the command touches."""
+    """Words with each redirection folded into one `>target` word."""
     out, i = [], 0
     while i < len(words):
         if REDIRECTS.match(words[i]):
@@ -148,77 +174,84 @@ def strip_redirects(words):
     return out
 
 
-def unwrap(words):
-    """The commands a simple command runs, with wrappers removed.
+class Unwrapped:
+    """The commands a simple command runs, with wrappers removed."""
 
-    Returns (commands, wrapped): commands is a list of word lists, and
-    wrapped says whether anything was removed that changes how a rule should
-    see it (an environment assignment, a wrapper, a shell's -c).
-    """
-    wrapped = False
+    def __init__(self):
+        self.commands = []
+        # Something was removed: a rule allowing the whole text shouldn't
+        # stand for what's inside.
+        self.wrapped = False
+        # An environment variable is set, which can change what any command
+        # does (PATH, GIT_SSH_COMMAND, LD_PRELOAD...): nothing is allowed.
+        self.environment = False
+
+    def add(self, other):
+        self.commands.extend(other.commands)
+        self.wrapped |= other.wrapped
+        self.environment |= other.environment
+
+
+def unwrap(words):
+    result = Unwrapped()
     while words:
         head = os.path.basename(words[0])
         if ASSIGNMENT.match(words[0]):
-            words, wrapped = words[1:], True
+            words, result.wrapped, result.environment = words[1:], True, True
         elif head == "env":
             i = 1
             while i < len(words) and (words[i].startswith("-") or ASSIGNMENT.match(words[i])):
                 i += 1
-            words, wrapped = words[i:], True
+            words, result.wrapped, result.environment = words[i:], True, True
         elif head in NO_ARG_WRAPPERS:
             i = 1
             while i < len(words) and words[i].startswith("-"):
                 i += 1
-            words, wrapped = words[i:], True
+            words, result.wrapped = words[i:], True
         elif head == "nice":
             i = 1
             while i < len(words) and words[i].startswith("-"):
                 i += 2 if words[i] == "-n" else 1
-            words, wrapped = words[i:], True
+            words, result.wrapped = words[i:], True
         elif head == "timeout":
             i = 1
             while i < len(words) and words[i].startswith("-"):
                 i += 2 if words[i] in ("-s", "-k", "--signal", "--kill-after") else 1
-            words, wrapped = words[i + 1:], True
-        elif head in SHELLS:
-            script = shell_script(words)
+            words, result.wrapped = words[i + 1:], True
+        elif head in SHELLS or head == "eval":
+            script = " ".join(words[1:]) if head == "eval" else shell_script(words)
             if script is None:
-                return [words], wrapped
-            commands = []
+                break
+            result.wrapped = True
             for c in split_commands(script):
-                inner, _ = unwrap(c)
-                commands.extend(inner)
-            return commands, True
-        elif head == "eval":
-            commands = []
-            for c in split_commands(" ".join(words[1:])):
-                inner, _ = unwrap(c)
-                commands.extend(inner)
-            return commands, True
+                result.add(unwrap(c))
+            return result
         elif head == "devenv":
             inner = devenv_command(words)
             if inner is None:
-                return [words], wrapped
-            words, wrapped = inner, True
+                break
+            words, result.wrapped = inner, True
         elif head in ("npx", "bunx", "pnpx"):
             i = 1
             while i < len(words) and words[i].startswith("-"):
                 i += 2 if words[i] in ("-p", "--package") else 1
-            words, wrapped = words[i:], True
+            words, result.wrapped = words[i:], True
         elif head in ("pnpm", "yarn", "npm") and len(words) > 1 and words[1] in ("exec", "dlx", "x"):
             i = 2
             while i < len(words) and words[i].startswith("-"):
                 i += 1
-            words, wrapped = words[i:], True
+            words, result.wrapped = words[i:], True
         else:
-            return [normalize_git(words)], wrapped
-    return [], wrapped
+            break
+    if words:
+        result.commands.append(normalize_git(words))
+    return result
 
 
 def shell_script(words):
     """The script a shell runs with -c, or None if it runs a file or stdin."""
     for i, w in enumerate(words[1:], 1):
-        if w == "-c" or (re.match(r"^-[a-z]*c[a-z]*$", w)):
+        if re.match(r"^-[A-Za-z]*c[A-Za-z]*$", w):
             return words[i + 1] if i + 1 < len(words) else ""
         if not w.startswith("-"):
             return None
@@ -256,10 +289,13 @@ def normalize_git(words):
     i = 1
     while i < len(words) and words[i].startswith("-"):
         w = words[i]
-        if w in GIT_VALUE_FLAGS:
-            i += 2
-        elif "=" in w and w.split("=", 1)[0] in GIT_VALUE_FLAGS:
-            i += 1
+        name, _, inline = w.partition("=")
+        if name in GIT_VALUE_FLAGS:
+            value = inline if inline else (words[i + 1] if i + 1 < len(words) else "")
+            if name in ("-c", "--config-env") and re.match(r"(?i)^(alias\.|core\.)", value):
+                # An alias or core setting can make any subcommand anything.
+                raise Unparsable(f"git {name} {value}")
+            i += 1 if inline else 2
         elif w in GIT_FLAGS:
             i += 1
         else:
@@ -269,23 +305,29 @@ def normalize_git(words):
     return ["git"] + words[i:]
 
 
+def long_option(arg, option, shortest):
+    """Whether arg is option or an abbreviation git would accept for it."""
+    name = arg.split("=", 1)[0]
+    return len(name) >= shortest and option.startswith(name)
+
+
 def forbidden(words):
     """Why no session may run this command, or None."""
-    if not words:
-        return None
     head = os.path.basename(words[0])
     args = words[1:]
     if head == "git" and args:
         sub, rest = args[0], args[1:]
         if sub == "push":
             for a in rest:
-                if a in ("--force", "--mirror", "--force-if-includes") or a.startswith("--force-with-lease"):
+                if a.startswith("--force") or long_option(a, "--force", 4):
                     return "force push"
-                if re.match(r"^-[A-Za-z]*f[A-Za-z]*$", a):
+                if long_option(a, "--mirror", 4):
+                    return "push --mirror"
+                if re.match(r"^-[A-Za-z0-9]*f[A-Za-z0-9]*$", a):
                     return "force push"
-                if a.startswith("+") or (":" in a and a.split(":", 1)[0].startswith("+")):
+                if a.startswith("+") or ":+" in a:
                     return "force push (+refspec)"
-        if sub == "reset" and "--hard" in rest:
+        if sub == "reset" and any(long_option(a, "--hard", 4) for a in rest):
             return "git reset --hard"
     if head == "wrangler" and args:
         if args[0] in ("deploy", "publish", "rollback"):
@@ -294,38 +336,48 @@ def forbidden(words):
             return "wrangler versions deploy"
     if head == "nix" and args[:1] == ["develop"]:
         return "nix develop: tools come from the devenv shell"
-    if head in ("nix-shell",):
+    if head == "nix-shell":
         return "nix-shell: tools come from the devenv shell"
-    # Merging with the user's own credentials bypasses the review the
-    # organization ruleset requires. The App's merges don't.
-    if head == "gh" and args[:2] == ["pr", "merge"]:
-        return "gh pr merge with your credentials skips review; the App merges approved PRs"
-    if head == "gh" and args[:1] == ["api"] and any(re.search(r"/pulls/[^/]+/merge\b", a) for a in args):
-        return "merging through gh api with your credentials skips review"
+    if head == "gh":
+        # The user's own credentials: merging skips the review the
+        # organization ruleset requires, and approving counts as that review.
+        # The App's (gh-app) don't.
+        if args[:2] == ["pr", "merge"]:
+            return "gh pr merge with your credentials skips review; the App merges approved PRs"
+        if args[:2] == ["pr", "review"] and any(a in ("-a", "--approve") for a in args):
+            return "approving with your credentials stands in for your review"
+        if args[:1] == ["alias"]:
+            return "gh aliases could hide a merge or an approval"
+        if args[:1] == ["api"]:
+            text = " ".join(args).lower()
+            if "merge" in text or "approve" in text or "/reviews" in text:
+                return "merging or reviewing through gh api with your credentials"
+            if "--input" in args or any(a.startswith("--input=") for a in args):
+                raise Unparsable("gh api --input")
     return None
 
 
-def secret_path(path):
-    """Whether a path names a secrets file."""
-    path = path.lstrip(">")
+def secret_path(word):
+    """Whether a word names, or could expand to, a secrets file."""
+    path = word.lstrip(">")
     if not path:
         return False
     name = os.path.basename(path.rstrip("/"))
-    if name in (".env", ".dev.vars"):
-        return True
-    for prefix in (".env.", ".dev.vars."):
-        if name.startswith(prefix) and name != prefix + "example":
+    for secret in SECRET_NAMES:
+        if name == secret or (name.startswith(secret + ".") and name != secret + ".example"):
             return True
+    if EXPANDS.search(name) and any(fnmatch.fnmatchcase(s, name) for s in SECRET_EXAMPLES):
+        return True
     parts = path.replace("\\", "/").split("/")
     return "secrets" in parts[:-1] or name == "secrets"
 
 
 def rule_regex(rule):
-    """A Bash permission rule as a regex. `*` matches anything; a trailing
-    ` *` is optional when it's the rule's only wildcard."""
+    """A Bash permission rule as a regex. `*` matches anything but a
+    newline; a trailing ` *` is optional when it's the rule's only wildcard."""
     if rule.count("*") == 1 and rule.endswith(" *"):
-        return re.compile(re.escape(rule[:-2]) + r"( .*)?\Z", re.S)
-    return re.compile(".*".join(re.escape(p) for p in rule.split("*")) + r"\Z", re.S)
+        return re.compile(re.escape(rule[:-2]) + r"( [^\n]*)?\Z")
+    return re.compile("[^\n]*".join(re.escape(p) for p in rule.split("*")) + r"\Z")
 
 
 def matches(rules, words):
@@ -333,10 +385,29 @@ def matches(rules, words):
     return any(r.match(text) for r in rules)
 
 
+def read_only(words):
+    """Whether this is a READ_ONLY command reading only inside the project."""
+    if words[0] not in READ_ONLY:
+        return False
+    for a in words[1:]:
+        if a.startswith("/") or a.startswith("~") or ".." in a.split("/"):
+            return False
+    head = words[0]
+    if head == "sort" and any(a.startswith("-o") or a.startswith("--output") for a in words[1:]):
+        return False
+    if head == "grep" and any(re.match(r"^-[A-Za-z]*[rRd]", a) or a.startswith("--recursive")
+                              or a.startswith("--dereference-recursive") or a.startswith("--directories")
+                              for a in words[1:]):
+        return False
+    return True
+
+
 def allowed(rules, words):
     if any(w.startswith(">") for w in words):
         return False
-    return os.path.basename(words[0]) in READ_ONLY or matches(rules, words)
+    if any(EXPANDS.search(w) for w in words):
+        return False
+    return read_only(words) or matches(rules, words)
 
 
 def decide(tool, tool_input, policy):
@@ -356,34 +427,31 @@ def decide(tool, tool_input, policy):
 
     command = tool_input.get("command", "")
     try:
-        commands = []
-        wrapped = False
+        result = Unwrapped()
         for words in split_commands(command):
-            inner, w = unwrap(words)
-            commands.extend(inner)
-            wrapped = wrapped or w
+            result.add(unwrap(words))
+        for words in result.commands:
+            reason = forbidden(words)
+            if reason:
+                return "deny", f"Not allowed in a session: {reason}."
+            for w in words[1:]:
+                if secret_path(w):
+                    return "deny", f"{w.lstrip('>')} is a secrets file. Change .env.example instead, and say what the real file needs."
     except Unparsable as e:
         # A command this can't follow gets no automatic allow, and a user
         # decides it.
-        return "ask", f"coldlogic guard can't parse this command ({e})."
-
-    for words in commands:
-        reason = forbidden(words)
-        if reason:
-            return "deny", f"Not allowed in a session: {reason}."
-        for w in words[1:]:
-            if secret_path(w):
-                return "deny", f"{w.lstrip('>')} is a secrets file. Change .env.example instead, and say what the real file needs."
+        return "ask", f"coldlogic guard can't follow this command ({e})."
 
     deny = [rule_regex(r) for r in policy.get("deny", [])]
-    for words in commands:
+    for words in result.commands:
         if matches(deny, words):
             return "deny", f"Denied by this project's rules: {' '.join(words)}"
 
     allow = [rule_regex(r) for r in policy.get("allow", [])]
-    if commands and all(allowed(allow, w) for w in commands):
+    if (result.commands and not result.environment
+            and all(allowed(allow, w) for w in result.commands)):
         return "allow", "coldlogic guard: every command matches an allow rule."
-    if wrapped and matches(allow, command.split()):
+    if result.wrapped and matches(allow, command.split()):
         # A rule allowing the wrapper itself would let anything through it.
         return "ask", "coldlogic guard: a rule allows the wrapper, not the command inside it."
     return None
