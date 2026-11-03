@@ -187,6 +187,13 @@ BASH = [
     ("cat *($(git push --force))", DENY),
     ("gh-app api repos/o/r/pulls/1/reviews --input x.json", DENY),
     ("npx wrangler -c 'git push --force'", DENY),
+    # From the sixth review.
+    ("devenv shell rm -rf src", ASK),
+    ("devenv shell bash -c 'rm -rf src'", ASK),
+    ("devenv shell --quiet -- devenv shell --quiet -- rm -rf src", ASK),
+    ("git commit -m \"$(cat <<'EOF'\nfix: don't let a session read .env\n\n1) stop git reset --hard paths\nEOF\n)\"", ALLOW),
+    ("git add -f ':(glob).dev.var*'", DENY),
+    ("git log -p -- ':(icase).DEV.VARS'", DENY),
     # Ordinary pushes and resets are left to the rules.
     ("git push -u origin feat", ASK),
     ("git reset --soft HEAD~1", NONE),
@@ -254,6 +261,28 @@ for tool, tool_input, expected in FILES:
     if got != expected:
         failures += 1
         print(f"FAIL {tool} {tool_input}: expected {expected}, got {got}")
-total = len(BASH) + len(FILES)
+# Rules seen against the command as written, and a bare `Bash` rule.
+for policy, command, expected in [
+    ({"allow": ["git status *"], "ask": ["devenv shell:*"]}, "devenv shell --quiet -- git status", ASK),
+    ({"allow": ["git status *"], "ask": ["*"]}, "git status", ASK),
+]:
+    got = guard.decide("Bash", {"command": command}, policy)
+    got = got[0] if got else None
+    if got != expected:
+        failures += 1
+        print(f"FAIL policy {policy} {command!r}: expected {expected}, got {got}")
+
+# A symlink inside the project that leads out of it.
+import tempfile
+with tempfile.TemporaryDirectory() as root:
+    os.symlink("/etc", os.path.join(root, "link"))
+    guard.WORKING.update(cwd=root, root=root)
+    got = guard.decide("Bash", {"command": "cat link/hosts"}, POLICY)
+    guard.WORKING.update(cwd=None, root=None)
+    if got is not None:
+        failures += 1
+        print(f"FAIL symlink out of the project: expected None, got {got}")
+
+total = len(BASH) + len(FILES) + 3
 print(f"{total - failures}/{total} passed")
 sys.exit(1 if failures else 0)
