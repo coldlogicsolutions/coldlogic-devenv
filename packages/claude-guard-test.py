@@ -178,6 +178,12 @@ BASH = [
     ("ls *", NONE),
     ("cat .e*", DENY),
     ("env FOO=1 timeout 5 git push -f", DENY),
+    ("pnpm exec wrangler deploy -c wrangler.toml", DENY),
+    ("devenv shell -- npx wrangler versions deploy -c x.toml", DENY),
+    ("gh-app alias set r 'pr review --approve'", DENY),
+    ("gh-app api graphql --input q.json", ASK),
+    ("cat *(D)", DENY),
+    ("cat *(.)", NONE),
     # Ordinary pushes and resets are left to the rules.
     ("git push -u origin feat", ASK),
     ("git reset --soft HEAD~1", NONE),
