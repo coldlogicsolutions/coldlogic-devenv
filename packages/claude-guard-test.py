@@ -272,6 +272,7 @@ for tool, tool_input, expected in FILES:
 for policy, command, expected in [
     ({"allow": ["git status *"], "ask": ["devenv shell:*"]}, "devenv shell --quiet -- git status", ASK),
     ({"allow": ["git status *"], "ask": ["*"]}, "git status", ASK),
+    ({"allow": [], "deny": ["git push *"]}, "git --literal-pathspecs push origin x", DENY),
 ]:
     got = guard.decide("Bash", {"command": command}, policy)
     got = got[0] if got else None
@@ -296,6 +297,7 @@ with tempfile.TemporaryDirectory() as root:
     os.makedirs(os.path.join(root, "sub", "refs"))
     open(os.path.join(root, "sub", "HEAD"), "w").close()
     open(os.path.join(root, ".env.preview"), "w").close()
+    os.makedirs(os.path.join(root, "nested", ".git"))
     os.symlink(".env.preview", os.path.join(root, "notes.txt"))
     os.symlink("/tmp", os.path.join(root, "outlink"))
     for cwd, command, expected in [
@@ -305,6 +307,9 @@ with tempfile.TemporaryDirectory() as root:
         (root, "cat notes.txt", "deny"),
         (root, "git worktree add outlink/newwt", None),
         (root, "git log -p -- '*env'", None),
+        (os.path.join(root, "nested"), "git status", None),
+        (root, "git add --pathspec-from-file=list.txt", None),
+        (root, "git log --format=x -- '--x=*env'", None),
     ]:
         guard.WORKING.update(cwd=cwd, root=root)
         got = guard.decide("Bash", {"command": command}, POLICY)
@@ -314,6 +319,6 @@ with tempfile.TemporaryDirectory() as root:
             print(f"FAIL {command!r} in {cwd}: expected {expected}, got {got}")
     guard.WORKING.update(cwd=None, root=None)
 
-total = len(BASH) + len(FILES) + 9
+total = len(BASH) + len(FILES) + 13
 print(f"{total - failures}/{total} passed")
 sys.exit(1 if failures else 0)
