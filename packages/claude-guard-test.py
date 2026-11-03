@@ -212,6 +212,9 @@ BASH = [
     ("wc --f=list2", NONE),
     ("git commit --file=msg.txt", ALLOW),
     ("git diff HEAD:.dev.vars HEAD:README.md", DENY),
+    ("wrangler dev -c other.toml", NONE),
+    ("wrangler dev --config=other.toml", NONE),
+    ("git log --output=x", NONE),
     # Ordinary pushes and resets are left to the rules.
     ("git push -u origin feat", ASK),
     ("git reset --soft HEAD~1", NONE),
@@ -352,7 +355,7 @@ with tempfile.TemporaryDirectory() as root:
         (root, "cat s/key", "deny"),
         (root, "touch s/newkey", "deny"),
         (root, f"cat {root}/notes.txt", "deny"),
-        (root, "wc --outp=x", "allow"),
+        (root, "wc --outp=x", None),
         (wt, "devenv shell --quiet -- scripts/check.sh", "allow"),
         (fake, "devenv shell --quiet -- scripts/check.sh", "ask"),
         (root, "git diff --no-index a b", "allow"),
