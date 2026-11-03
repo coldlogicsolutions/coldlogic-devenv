@@ -194,6 +194,10 @@ BASH = [
     ("git commit -m \"$(cat <<'EOF'\nfix: don't let a session read .env\n\n1) stop git reset --hard paths\nEOF\n)\"", ALLOW),
     ("git add -f ':(glob).dev.var*'", DENY),
     ("git log -p -- ':(icase).DEV.VARS'", DENY),
+    ("npx -c 'echo hi' wrangler -c 'git push --force'", DENY),
+    ("npx --call='git push --force' wrangler", DENY),
+    ("pnpm dlx wrangler -c 'git reset --hard'", DENY),
+    ("cat *(e:'git push --force':)", ASK),
     # Ordinary pushes and resets are left to the rules.
     ("git push -u origin feat", ASK),
     ("git reset --soft HEAD~1", NONE),
