@@ -250,6 +250,14 @@ def lex(text):
             cmd.expands = True
             append(c)
             i += 1
+        elif c == "(" and word is not None and re.search(r"[*?\]]$", word):
+            # A zsh glob qualifier, `*(D)`: part of the word.
+            j = text.find(")", i)
+            if j < 0:
+                raise Unparsable("unclosed glob qualifier")
+            cmd.expands = True
+            append(text[i:j + 1])
+            i = j + 1
         elif c in ";&|()":
             op = text[i:i + 2] if text[i:i + 2] in ("&&", "||", "|&", ";;", "&>") else c
             if op == "&>":
@@ -493,22 +501,26 @@ def unwrap(words):
             words, result.wrapped = inner, True
         elif head in ("npx", "bunx", "pnpx") or (
                 head in ("pnpm", "yarn", "npm") and len(words) > 1 and words[1] in ("exec", "dlx", "x")):
-            start = 1 if head in ("npx", "bunx", "pnpx") else 2
-            script = next((words[k + 1] for k in range(start, len(words) - 1)
-                           if words[k] in ("-c", "--call", "--shell-mode")), None)
-            if script is None:
-                script = next((w.split("=", 1)[1] for w in words[start:] if w.startswith("--call=")), None)
-            if script is not None:
-                # The package runner hands this to a shell.
-                result.wrapped = result.opaque = True
-                result.add(analyse(script))
-                return result
-            i = start
+            # Only the runner's own options, before the command: a `-c` after
+            # it is the command's (`wrangler deploy -c wrangler.toml`).
+            i = 1 if head in ("npx", "bunx", "pnpx") else 2
+            script = None
             while i < len(words) and words[i].startswith("-"):
-                if words[i] in ("-p", "--package") or words[i].startswith("--package="):
+                w = words[i]
+                if w in ("-c", "--call", "--shell-mode"):
+                    script = words[i + 1] if i + 1 < len(words) else ""
+                    i += 2
+                    continue
+                if w.startswith("--call="):
+                    script = w.split("=", 1)[1]
+                if w in ("-p", "--package") or w.startswith("--package="):
                     # Another package's binary: the rule names a different one.
                     result.opaque = True
-                i += 2 if words[i] in ("-p", "--package") else 1
+                i += 2 if w in ("-p", "--package") else 1
+            if script is not None:
+                # The runner hands this to a shell.
+                result.opaque = True
+                result.add(analyse(script))
             words, result.wrapped = words[i:], True
         elif head == "cd" or head == "pushd" or head == "popd":
             # Later commands run somewhere else, so their rules and paths
@@ -667,6 +679,12 @@ def forbidden_from(head, args):
         # approve one: where the ruleset's file patterns miss a path, its
         # approval would count.
         lowered = [a.lower() for a in args]
+        if "alias" in lowered:
+            return "gh-app aliases could hide an approval"
+        if "api" in lowered:
+            text = " ".join(lowered)
+            if "--input" in text or "=@" in text or re.search(r"(^| )@", text):
+                raise Unparsable("gh-app api reading its request from a file")
         if "review" in lowered and any(
                 a.startswith("--approve") or re.match(r"^-[A-Za-z]*a[A-Za-z]*$", a) for a in args):
             return "the App approving a PR"
@@ -726,7 +744,15 @@ def names_secret(path):
     for secret in SECRET_NAMES:
         if name == secret or (name.startswith(secret + ".") and name != secret + ".example"):
             return True
-    # A glob reaches a dotfile only if it starts with a dot itself.
+    # A glob reaches a dotfile only if it starts with a dot itself, or a zsh
+    # qualifier (`*(D)`) says so.
+    qualifier = re.search(r"\(([^)]*)\)$", name)
+    if qualifier:
+        pattern = name[:qualifier.start()]
+        if "d" in qualifier.group(1) and any(fnmatch.fnmatchcase(s, pattern) or
+                                              fnmatch.fnmatchcase(s, "." + pattern) for s in SECRET_EXAMPLES):
+            return True
+        name = pattern
     if name.startswith(".") and re.search(r"[*?\[]", name) and any(
             fnmatch.fnmatchcase(s, name) for s in SECRET_EXAMPLES):
         return True
