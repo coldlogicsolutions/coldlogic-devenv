@@ -13,7 +13,7 @@ POLICY = {
     "allow": ["scripts/check.sh", "git status *", "git diff *", "git log *",
               "git add *", "git commit *", "cargo test *", "gh-app pr view *",
               "devenv shell *", "wrangler dev *", "wc *", "npm run *",
-              "git diff:*"],
+              "git diff:*", "git worktree *"],
     "ask": ["git push *", "npm run deploy:*"],
     "deny": ["cargo publish *"],
 }
@@ -107,6 +107,7 @@ BASH = [
     ("bash -o pipefail -c 'git push -f'", DENY),
     ("echo x | xargs git push -f", DENY),
     ("git -P push --force", DENY),
+    ("git -p log", NONE),
     ("git -c remote.origin.mirror=true push origin", ASK),
     ("git -C sub status", NONE),
     ("git -C . status", ALLOW),
@@ -117,7 +118,7 @@ BASH = [
     ("nix --extra-experimental-features flakes develop", DENY),
     ("gh pr --repo o/r merge 1", DENY),
     ("gh api graphql -F query=@q.graphql", ASK),
-    ("git log '*.rs'", ALLOW),
+    ("git log '*.rs'", NONE),
     ("git log *.rs", NONE),
     ("echo $HOME", NONE),
     ("git commit -m 'fix #12'", ALLOW),
@@ -287,6 +288,30 @@ with tempfile.TemporaryDirectory() as root:
         failures += 1
         print(f"FAIL symlink out of the project: expected None, got {got}")
 
-total = len(BASH) + len(FILES) + 3
+# The seventh review: repositories git could find besides the project's.
+with tempfile.TemporaryDirectory() as root:
+    os.makedirs(os.path.join(root, "sub", "objects"))
+    os.makedirs(os.path.join(root, "sub", "refs"))
+    open(os.path.join(root, "sub", "HEAD"), "w").close()
+    open(os.path.join(root, ".env.preview"), "w").close()
+    os.symlink(".env.preview", os.path.join(root, "notes.txt"))
+    os.symlink("/tmp", os.path.join(root, "outlink"))
+    for cwd, command, expected in [
+        (root, "git --bare diff a b", None),
+        (os.path.join(root, "sub"), "git diff --no-index a b", None),
+        (root, "git diff --no-index a b", "allow"),
+        (root, "cat notes.txt", "deny"),
+        (root, "git worktree add outlink/newwt", None),
+        (root, "git log -p -- '*env'", None),
+    ]:
+        guard.WORKING.update(cwd=cwd, root=root)
+        got = guard.decide("Bash", {"command": command}, POLICY)
+        got = got[0] if got else None
+        if got != expected:
+            failures += 1
+            print(f"FAIL {command!r} in {cwd}: expected {expected}, got {got}")
+    guard.WORKING.update(cwd=None, root=None)
+
+total = len(BASH) + len(FILES) + 9
 print(f"{total - failures}/{total} passed")
 sys.exit(1 if failures else 0)
