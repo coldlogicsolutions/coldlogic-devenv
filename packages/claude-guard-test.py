@@ -3,6 +3,7 @@
 import importlib.util
 import os
 import sys
+import tempfile
 
 spec = importlib.util.spec_from_file_location(
     "guard", os.path.join(os.path.dirname(os.path.abspath(__file__)), "claude-guard.py"))
@@ -201,6 +202,9 @@ BASH = [
     ("cat *(e:'git push --force':)", ASK),
     ("npx --cal='git push --force' wrangler", DENY),
     ("cat *(/D)", ASK),
+    ("git commit -m \"$(cat <<'EOF'\nline\nEOF)\n$(touch pwned1)\nEOF\n)\"", NONE),
+    ("grep -5r TOKEN .", NONE),
+    ("wc --files0=list", NONE),
     # Ordinary pushes and resets are left to the rules.
     ("git push -u origin feat", ASK),
     ("git reset --soft HEAD~1", NONE),
@@ -281,8 +285,19 @@ for policy, command, expected in [
         failures += 1
         print(f"FAIL policy {policy} {command!r}: expected {expected}, got {got}")
 
+# A project inside a directory named secrets.
+with tempfile.TemporaryDirectory() as top:
+    root = os.path.join(top, "secrets", "proj")
+    os.makedirs(root)
+    open(os.path.join(root, "README.md"), "w").close()
+    guard.WORKING.update(cwd=root, root=root)
+    got = guard.decide("Bash", {"command": "cat README.md"}, POLICY)
+    guard.WORKING.update(cwd=None, root=None)
+    if got is None or got[0] != "allow":
+        failures += 1
+        print(f"FAIL a project under secrets/: expected allow, got {got}")
+
 # A symlink inside the project that leads out of it.
-import tempfile
 with tempfile.TemporaryDirectory() as root:
     os.symlink("/etc", os.path.join(root, "link"))
     guard.WORKING.update(cwd=root, root=root)
@@ -302,6 +317,19 @@ with tempfile.TemporaryDirectory() as root:
     os.makedirs(os.path.join(root, "secrets"))
     open(os.path.join(root, "secrets", "key"), "w").close()
     os.symlink("secrets", os.path.join(root, "s"))
+    # One of the project's own worktrees, and a directory that only claims to
+    # be one.
+    wt = os.path.join(root, ".claude", "worktrees", "x")
+    os.makedirs(wt)
+    os.makedirs(os.path.join(root, ".git", "worktrees", "x"))
+    with open(os.path.join(wt, ".git"), "w") as f:
+        f.write(f"gitdir: {os.path.join(root, '.git', 'worktrees', 'x')}\n")
+    with open(os.path.join(root, ".git", "worktrees", "x", "gitdir"), "w") as f:
+        f.write(os.path.join(wt, ".git") + "\n")
+    fake = os.path.join(root, "fake")
+    os.makedirs(fake)
+    with open(os.path.join(fake, ".git"), "w") as f:
+        f.write(f"gitdir: {os.path.join(root, '.git', 'worktrees', 'x')}\n")
     os.symlink(".env.preview", os.path.join(root, "notes.txt"))
     os.symlink("/tmp", os.path.join(root, "outlink"))
     for cwd, command, expected in [
@@ -311,6 +339,9 @@ with tempfile.TemporaryDirectory() as root:
         (os.path.join(root, "sub"), "gh-app pr view 1", None),
         (root, "git add --pathspec-from=list.txt", None),
         (root, "cat s/key", "deny"),
+        (root, "touch s/newkey", "deny"),
+        (wt, "devenv shell --quiet -- scripts/check.sh", "allow"),
+        (fake, "devenv shell --quiet -- scripts/check.sh", "ask"),
         (root, "git diff --no-index a b", "allow"),
         (root, "cat notes.txt", "deny"),
         (root, "git worktree add outlink/newwt", None),
@@ -327,6 +358,6 @@ with tempfile.TemporaryDirectory() as root:
             print(f"FAIL {command!r} in {cwd}: expected {expected}, got {got}")
     guard.WORKING.update(cwd=None, root=None)
 
-total = len(BASH) + len(FILES) + 18
+total = len(BASH) + len(FILES) + 22
 print(f"{total - failures}/{total} passed")
 sys.exit(1 if failures else 0)
