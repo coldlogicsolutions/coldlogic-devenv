@@ -193,7 +193,7 @@ BASH = [
     ("devenv shell rm -rf src", ASK),
     ("devenv shell bash -c 'rm -rf src'", ASK),
     ("devenv shell --quiet -- devenv shell --quiet -- rm -rf src", ASK),
-    ("git commit -m \"$(cat <<'EOF'\nfix: don't let a session read .env\n\n1) stop git reset --hard paths\nEOF\n)\"", ALLOW),
+    ("git commit -m \"$(cat <<'EOF'\nfix: don't let a session read .env\n\n1) stop git reset --hard paths\nEOF\n)\"", DENY),
     ("git add -f ':(glob).dev.var*'", DENY),
     ("git log -p -- ':(icase).DEV.VARS'", DENY),
     ("npx -c 'echo hi' wrangler -c 'git push --force'", DENY),
@@ -205,6 +205,13 @@ BASH = [
     ("git commit -m \"$(cat <<'EOF'\nline\nEOF)\n$(touch pwned1)\nEOF\n)\"", NONE),
     ("grep -5r TOKEN .", NONE),
     ("wc --files0=list", NONE),
+    ("git commit -m \"$(cat <<'EOF'\n)\n\"; touch pwned; echo \"\nEOF\n)\"", ASK),
+    ("git commit -m \"$(cat <<'EOF'\nfix (#12)\nEOF\n)\"", NONE),
+    ("cat $'.dev.var\\u017f'", DENY),
+    ("cat 'ſecrets/key'", DENY),
+    ("wc --f=list2", NONE),
+    ("git commit --file=msg.txt", ALLOW),
+    ("git diff HEAD:.dev.vars HEAD:README.md", DENY),
     # Ordinary pushes and resets are left to the rules.
     ("git push -u origin feat", ASK),
     ("git reset --soft HEAD~1", NONE),
@@ -260,14 +267,17 @@ FILES = [
 ]
 
 failures = 0
+checks = 0
 for command, expected in BASH:
     got = guard.decide("Bash", {"command": command}, POLICY)
+    checks += 1
     got = got[0] if got else None
     if got != expected:
         failures += 1
         print(f"FAIL Bash {command!r}: expected {expected}, got {got}")
 for tool, tool_input, expected in FILES:
     got = guard.decide(tool, tool_input, POLICY)
+    checks += 1
     got = got[0] if got else None
     if got != expected:
         failures += 1
@@ -280,6 +290,7 @@ for policy, command, expected in [
     ({"allow": [], "deny": ["git push *"]}, "/usr/bin/git --literal-pathspecs push origin x", DENY),
 ]:
     got = guard.decide("Bash", {"command": command}, policy)
+    checks += 1
     got = got[0] if got else None
     if got != expected:
         failures += 1
@@ -341,7 +352,7 @@ with tempfile.TemporaryDirectory() as root:
         (root, "cat s/key", "deny"),
         (root, "touch s/newkey", "deny"),
         (root, f"cat {root}/notes.txt", "deny"),
-        (root, "wc --outp=x", None),
+        (root, "wc --outp=x", "allow"),
         (wt, "devenv shell --quiet -- scripts/check.sh", "allow"),
         (fake, "devenv shell --quiet -- scripts/check.sh", "ask"),
         (root, "git diff --no-index a b", "allow"),
@@ -354,12 +365,13 @@ with tempfile.TemporaryDirectory() as root:
     ]:
         guard.WORKING.update(cwd=cwd, root=root)
         got = guard.decide("Bash", {"command": command}, POLICY)
+        checks += 1
         got = got[0] if got else None
         if got != expected:
             failures += 1
             print(f"FAIL {command!r} in {cwd}: expected {expected}, got {got}")
     guard.WORKING.update(cwd=None, root=None)
 
-total = len(BASH) + len(FILES) + 24
+total = checks
 print(f"{total - failures}/{total} passed")
 sys.exit(1 if failures else 0)

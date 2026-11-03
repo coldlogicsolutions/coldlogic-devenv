@@ -20,6 +20,7 @@ without a prompt. The policy file holds the session's Bash rules, as
 """
 
 import fnmatch
+import unicodedata
 import json
 import os
 import re
@@ -777,10 +778,13 @@ def plain_args(words):
     if "/" in words[0] and outside(words[0]):
         return False
     for w in words[1:]:
-        if (long_option(w, "--output", 4) or long_option(w, "--files0-from", 4)
-                or long_option(w, "--config", 4) or w == "-o"):
-            # An output file, or configuration that can name a program
-            # (`cargo --config build.rustc-wrapper=...`).
+        program = os.path.basename(words[0])
+        # Per program, since each abbreviates options its own way: git's
+        # --output writes a file, wc's --files0-from reads a list of paths
+        # (any unique prefix, `--f=`), cargo's --config can name a program.
+        if (w == "-o" or (program == "git" and long_option(w, "--output", 5))
+                or (program == "wc" and long_option(w, "--files0-from", 3))
+                or (program == "cargo" and long_option(w, "--config", 4))):
             return False
         if os.path.basename(words[0]) == "cargo" and (w.startswith("-Z") or w.startswith("+")):
             return False
@@ -796,10 +800,12 @@ def plain_args(words):
 
 
 def names_secret(path):
-    """Whether a path names a secrets file. Case is ignored: macOS's
-    filesystem ignores it too. git pathspec magic (`:(glob)x`, `:/x`, `:!x`)
-    is looked through."""
-    path = re.sub(r"^:(\([^)]*\)|[/!^]+)", "", path).lower()
+    """Whether a path names a secrets file. Case is folded as macOS's
+    filesystem folds it (`ſ` is `s`). git pathspec magic (`:(glob)x`, `:/x`,
+    `:!x`) and a revision (`HEAD:x`) are looked through."""
+    if ":" in path and not path.startswith(":") and names_secret(path.split(":", 1)[1]):
+        return True
+    path = unicodedata.normalize("NFKC", re.sub(r"^:(\([^)]*\)|[/!^]+)", "", path)).casefold()
     if not path:
         return False
     name = os.path.basename(path.rstrip("/"))
@@ -970,8 +976,10 @@ def decide(tool, tool_input, policy):
 
 
 # The one compound form allowed: a commit whose message is a quoted heredoc.
+# Its body may hold no `)` or `"`: macOS's bash 3.2 ends the substitution at
+# the first `)`, even inside the heredoc.
 COMMIT_MESSAGE = re.compile(
-    r"""(git commit(?: -[A-Za-z]+| --[a-z-]+)*) -([A-Za-z]*)m "\$\(cat <<'EOF'\n(?:(?!EOF)[^\n]*\n)*EOF\n\)"\Z""")
+    r"""(git commit(?: -[A-Za-z]+| --[a-z-]+)*) -([A-Za-z]*)m "\$\(cat <<'EOF'\n(?:(?!EOF)[^\n)"]*\n)*EOF\n\)"\Z""")
 WRAPPER = re.compile(r"devenv shell(?: --quiet| -q)? -- ")
 # Characters that mean nothing to the shell outside quotes.
 PLAIN = re.compile(r"[A-Za-z0-9 _./:@%+,=-]")
