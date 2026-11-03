@@ -255,8 +255,9 @@ def lex(text):
             j = text.find(")", i)
             if j < 0:
                 raise Unparsable("unclosed glob qualifier")
-            if re.search(r"[$`'\"]", text[i:j]):
-                raise Unparsable("a glob qualifier with quotes or a substitution")
+            if not re.fullmatch(r"\([A-Za-z.,/^\-0-9]*\)", text[i:j + 1]) or re.search(r"[eE+]", text[i:j]):
+                # Only inert qualifiers: e and + run code.
+                raise Unparsable("a glob qualifier this can't read")
             cmd.expands = True
             append(text[i:j + 1])
             i = j + 1
@@ -519,17 +520,17 @@ def unwrap(words):
                     # Another package's binary: the rule names a different one.
                     result.opaque = True
                 i += 2 if w in ("-p", "--package") else 1
-            if script is not None:
-                # The runner hands this to a shell.
+            # Runners differ on where they read -c, and the last one may win:
+            # check every value given anywhere, in any spelling, as a script.
+            scripts = [script] if script is not None else []
+            for k in range(i, len(words)):
+                name, eq, inline = words[k].partition("=")
+                if name == "-c" or (name.startswith("--") and len(name) > 3 and (
+                        "--call".startswith(name) or "--shell-mode".startswith(name))):
+                    scripts.append(inline if eq else (words[k + 1] if k + 1 < len(words) else ""))
+            for value in scripts:
                 result.opaque = True
-                result.add(analyse(script))
-            elif head in ("npx", "npm"):
-                # npm's option parser takes -c anywhere: check its value as a
-                # script too.
-                for k in range(i, len(words) - 1):
-                    if words[k] in ("-c", "--call"):
-                        result.opaque = True
-                        result.add(analyse(words[k + 1]))
+                result.add(analyse(value))
             words, result.wrapped = words[i:], True
         elif head == "cd" or head == "pushd" or head == "popd":
             # Later commands run somewhere else, so their rules and paths
