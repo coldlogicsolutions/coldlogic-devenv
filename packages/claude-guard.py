@@ -779,12 +779,15 @@ def plain_args(words):
         return False
     for w in words[1:]:
         program = os.path.basename(words[0])
-        # Per program, since each abbreviates options its own way: git's
-        # --output writes a file, wc's --files0-from reads a list of paths
-        # (any unique prefix, `--f=`), cargo's --config can name a program.
-        if (w == "-o" or (program == "git" and long_option(w, "--output", 5))
+        # For any program: an output file, a list of paths, or configuration
+        # that can name a program to run. Some programs take shorter
+        # abbreviations (wc's `--f=`) or a short config flag (wrangler's -c,
+        # whose build command runs).
+        if (w == "-o" or long_option(w, "--output", 5) or long_option(w, "--config", 5)
+                or long_option(w, "--files0-from", 8)
                 or (program == "wc" and long_option(w, "--files0-from", 3))
-                or (program == "cargo" and long_option(w, "--config", 4))):
+                or (program == "cargo" and long_option(w, "--config", 4))
+                or (program == "wrangler" and (w == "-c" or w.startswith("-c")))):
             return False
         if os.path.basename(words[0]) == "cargo" and (w.startswith("-Z") or w.startswith("+")):
             return False
