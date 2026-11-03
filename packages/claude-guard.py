@@ -760,7 +760,8 @@ def foreign_repository():
     if not (here == base or here.startswith(base + os.sep)):
         return True
     while here != base:
-        if all(os.path.exists(os.path.join(here, n)) for n in ("HEAD", "objects", "refs")):
+        if os.path.lexists(os.path.join(here, ".git")) or all(
+                os.path.exists(os.path.join(here, n)) for n in ("HEAD", "objects", "refs")):
             return True
         here = os.path.dirname(here)
     return False
@@ -778,8 +779,11 @@ def plain_args(words):
             return False
         if any(outside(c) for c in option_values(w)):
             return False
-        if os.path.basename(words[0]) == "git" and not w.startswith("-") and re.search(r"[*?\[]", w):
-            # A pathspec glob: git's `*` crosses `/` and matches dotfiles.
+        if os.path.basename(words[0]) == "git" and (
+                w.startswith("--pathspec-from-file") or
+                any(re.search(r"[*?\[]", c) for c in option_values(w) if not c.startswith("-"))):
+            # A pathspec glob, or a file of pathspecs: git's `*` crosses `/`
+            # and matches dotfiles.
             return False
     if os.path.basename(words[0]) == "git" and foreign_repository():
         return False
@@ -934,12 +938,15 @@ def decide(tool, tool_input, policy):
     # Rules see both what runs and what was written (`devenv shell:*`).
     if any(r.match(checked) for r in deny):
         return "deny", "Denied by a deny rule."
-    for words in commands:
+    # Rules also see git with every global option dropped, so an inert one
+    # (`git --literal-pathspecs push`) doesn't dodge them.
+    ruled = commands + [normalize_git_loosely(w) for w in commands if w[0] == "git"]
+    for words in ruled:
         if matches(deny, words):
             return "deny", f"Denied by this project's rules: {' '.join(words)}"
     if any(r.match(checked) for r in ask):
         return "ask", "An ask rule covers this command."
-    for words in commands:
+    for words in ruled:
         if matches(ask, words):
             return "ask", f"An ask rule covers: {' '.join(words)}"
 
