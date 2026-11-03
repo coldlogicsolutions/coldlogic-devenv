@@ -52,7 +52,7 @@ GIT_RELOCATING = {"--git-dir", "--work-tree", "--namespace", "--exec-path",
 # Commands that only read what they're given, allowed in a pipeline without a
 # rule as long as every argument stays inside the project (see read_only).
 READ_ONLY = {"pwd", "ls", "cat", "head", "tail", "grep", "wc", "cut",
-             "tr", "jq", "echo", "printf", "true", "column", "basename",
+             "tr", "echo", "printf", "true", "column", "basename",
              "dirname"}
 
 SECRET_NAMES = (".env", ".dev.vars")
@@ -245,7 +245,8 @@ def lex(text):
             cmd.expands = True
             append("$")
             i += 1
-        elif c in "*?[]{}" or (c == "~" and word is None):
+        elif c in "*?[]{}" or (c in "~=" and word is None):
+            # `=cmd` is zsh's path expansion: Claude Code runs zsh here.
             cmd.expands = True
             append(c)
             i += 1
@@ -269,7 +270,9 @@ def lex(text):
             op = m.group(0)
             i += len(op)
             if op in (">&", "<&"):
-                m2 = re.match(r"\s*(\d+|-)", text[i:])
+                # A descriptor only if nothing follows it in the word: zsh
+                # writes `>&2x` to a file named 2x.
+                m2 = re.match(r"\s*(\d+|-)(?=$|[\s;&|()<>])", text[i:])
                 if m2:
                     i += len(m2.group(0))
                     continue
@@ -362,24 +365,40 @@ def analyse(text):
             words = [v for w in cmd.words for v in expand_braces(w)]
             for k, w in enumerate(words):
                 if QUOTED_PLACEHOLDER in w and not (
-                        w == QUOTED_PLACEHOLDER and k > 0 and MESSAGE_FLAG.match(words[k - 1])):
+                        w == QUOTED_PLACEHOLDER and k > 0 and MESSAGE_FLAG.match(words[k - 1])
+                        and commits(words[:k])):
                     result.opaque = True
             if words:
                 result.add(unwrap(words))
     return result
 
 
+def commits(words):
+    """Whether these words are `git commit` or `git tag`, maybe wrapped: the
+    only commands whose -m takes a message."""
+    try:
+        k = words.index("git")
+    except ValueError:
+        return False
+    rest = [w for w in words[k + 1:] if not w.startswith("-")]
+    return bool(rest) and rest[0] in ("commit", "tag")
+
+
 def expand_braces(word, limit=64):
     """A word's brace expansions (`{--force,}` is `--force`), as bash makes
-    them, up to limit; empty results dropped."""
-    m = re.search(r"\{([^{}]*,[^{}]*)\}", word)
-    if not m:
-        return [word]
+    them; empty results dropped. More than limit can't be followed."""
     out = []
-    for part in m.group(1).split(","):
-        for rest in expand_braces(word[:m.start()] + part + word[m.end():], limit):
-            if rest and len(out) < limit:
-                out.append(rest)
+    todo = [word]
+    while todo:
+        w = todo.pop()
+        m = re.search(r"\{([^{}]*,[^{}]*)\}", w)
+        if not m:
+            if w:
+                out.append(w)
+        else:
+            todo.extend(w[:m.start()] + part + w[m.end():] for part in reversed(m.group(1).split(",")))
+        if len(out) + len(todo) > limit:
+            raise Unparsable("too many brace expansions")
     return out
 
 
@@ -472,18 +491,24 @@ def unwrap(words):
             if inner is None:
                 break
             words, result.wrapped = inner, True
-        elif head in ("npx", "bunx", "pnpx"):
-            i = 1
+        elif head in ("npx", "bunx", "pnpx") or (
+                head in ("pnpm", "yarn", "npm") and len(words) > 1 and words[1] in ("exec", "dlx", "x")):
+            start = 1 if head in ("npx", "bunx", "pnpx") else 2
+            script = next((words[k + 1] for k in range(start, len(words) - 1)
+                           if words[k] in ("-c", "--call", "--shell-mode")), None)
+            if script is None:
+                script = next((w.split("=", 1)[1] for w in words[start:] if w.startswith("--call=")), None)
+            if script is not None:
+                # The package runner hands this to a shell.
+                result.wrapped = result.opaque = True
+                result.add(analyse(script))
+                return result
+            i = start
             while i < len(words) and words[i].startswith("-"):
                 if words[i] in ("-p", "--package") or words[i].startswith("--package="):
                     # Another package's binary: the rule names a different one.
                     result.opaque = True
                 i += 2 if words[i] in ("-p", "--package") else 1
-            words, result.wrapped = words[i:], True
-        elif head in ("pnpm", "yarn", "npm") and len(words) > 1 and words[1] in ("exec", "dlx", "x"):
-            i = 2
-            while i < len(words) and words[i].startswith("-"):
-                i += 1
             words, result.wrapped = words[i:], True
         elif head == "cd" or head == "pushd" or head == "popd":
             # Later commands run somewhere else, so their rules and paths
@@ -551,8 +576,9 @@ def normalize_git(words):
             raise Unparsable(f"git {w}")
         if name in GIT_VALUE_FLAGS:
             value = inline or (words[i + 1] if i + 1 < len(words) else "")
-            if outside(value):
-                # Another repository: its configuration, not this one's, runs.
+            if value not in (".", "./"):
+                # Possibly another repository, whose own configuration (a
+                # pager, an fsmonitor) runs: no rule covers that.
                 return words
             i += 1 if inline else 2
         elif w in GIT_FLAGS:
@@ -593,7 +619,7 @@ def forbidden_from(head, args):
     if head == "git" and args:
         # The subcommand, past global options this may not know and their
         # values.
-        k = next((k for k, a in enumerate(args[:5]) if a in ("push", "reset")), None)
+        k = next((k for k, a in enumerate(args) if a in ("push", "reset")), None)
         if k is None:
             return None
         sub, rest = args[k], args[k + 1:]
@@ -628,14 +654,24 @@ def forbidden_from(head, args):
                 a.startswith("--approve") or re.match(r"^-[A-Za-z]*a[A-Za-z]*$", a) for a in args):
             return "approving with your credentials stands in for your review"
         # The subcommand may follow global flags (`gh --repo o/r api ...`).
-        if "alias" in lowered[:4]:
+        if "alias" in lowered:
             return "gh aliases could hide a merge or an approval"
-        if "api" in lowered[:4]:
+        if "api" in lowered:
             text = " ".join(lowered)
             if "merge" in text or "approve" in text or "/reviews" in text:
                 return "merging or reviewing through gh api with your credentials"
             if "--input" in text or "=@" in text or re.search(r"(^| )@", text):
                 raise Unparsable("gh api reading its request from a file")
+    if head == "gh-app":
+        # The App may merge a PR the developer team approved, but it must not
+        # approve one: where the ruleset's file patterns miss a path, its
+        # approval would count.
+        lowered = [a.lower() for a in args]
+        if "review" in lowered and any(
+                a.startswith("--approve") or re.match(r"^-[A-Za-z]*a[A-Za-z]*$", a) for a in args):
+            return "the App approving a PR"
+        if "api" in lowered and ("approve" in " ".join(lowered) or "/reviews" in " ".join(lowered)):
+            return "the App reviewing a PR through gh-app api"
     return None
 
 
@@ -648,7 +684,8 @@ def secret_path(word):
         if "=" in word:
             candidates.append(word.split("=", 1)[1])
         elif re.match(r"^-[A-Za-z].", word):
-            candidates.append(word[2:])
+            # A value attached to a cluster of short options: -Fx, -aFx.
+            candidates.extend(word[k:] for k in range(2, len(word)))
     return any(names_secret(c) for c in candidates)
 
 
@@ -663,11 +700,17 @@ def plain_args(words):
     """Whether no argument, or option value, points outside the project or
     names an output file."""
     for w in words[1:]:
-        if re.match(r"^--(output|files0-from)", w) or w in ("-o",):
+        if re.match(r"^--(output|files0-from|config)", w) or w in ("-o",):
+            # An output file, or configuration that can name a program
+            # (`cargo --config build.rustc-wrapper=...`).
+            return False
+        if os.path.basename(words[0]) == "cargo" and (w.startswith("-Z") or w.startswith("+")):
             return False
         candidates = [w]
         if w.startswith("-") and "=" in w:
             candidates.append(w.split("=", 1)[1])
+        elif re.match(r"^-[A-Za-z].", w):
+            candidates.extend(w[k:] for k in range(2, len(w)))
         if any(outside(c) for c in candidates):
             return False
     return True
@@ -683,17 +726,22 @@ def names_secret(path):
     for secret in SECRET_NAMES:
         if name == secret or (name.startswith(secret + ".") and name != secret + ".example"):
             return True
-    if re.search(r"[*?\[]", name) and any(fnmatch.fnmatchcase(s, name) for s in SECRET_EXAMPLES):
+    # A glob reaches a dotfile only if it starts with a dot itself.
+    if name.startswith(".") and re.search(r"[*?\[]", name) and any(
+            fnmatch.fnmatchcase(s, name) for s in SECRET_EXAMPLES):
         return True
     parts = path.replace("\\", "/").split("/")
     return "secrets" in parts[:-1] or name == "secrets"
 
 
-def rule_regex(rule):
+def rule_regex(rule, widen=False):
     """A Bash permission rule as a regex. `*` matches anything but a
     newline; a trailing ` *` is optional when it's the rule's only wildcard.
-    The older `cmd:*` form means `cmd *`."""
+    The older `cmd:*` form means `cmd *`, or, for an ask or deny rule
+    (widen), any command starting with `cmd`."""
     if rule.endswith(":*"):
+        if widen:
+            return re.compile(re.escape(rule[:-2]) + r"[^\n]*\Z")
         rule = rule[:-2] + " *"
     if rule.count("*") == 1 and rule.endswith(" *"):
         return re.compile(re.escape(rule[:-2]) + r"( [^\n]*)?\Z")
@@ -701,6 +749,10 @@ def rule_regex(rule):
 
 
 def matches(rules, words):
+    """Whether a rule matches the words. A program word holding whitespace
+    (`"git status x/evil"` runs a file of that name) matches nothing."""
+    if re.search(r"\s", words[0]):
+        return False
     text = " ".join(words)
     return any(r.match(text) for r in rules)
 
@@ -786,10 +838,10 @@ def decide(tool, tool_input, policy):
 
     commands = [w for w in result.commands if not w[0].startswith(">")]
     for words in commands:
-        if matches([rule_regex(r) for r in policy.get("deny", [])], words):
+        if matches([rule_regex(r, widen=True) for r in policy.get("deny", [])], words):
             return "deny", f"Denied by this project's rules: {' '.join(words)}"
     for words in commands:
-        if matches([rule_regex(r) for r in policy.get("ask", [])], words):
+        if matches([rule_regex(r, widen=True) for r in policy.get("ask", [])], words):
             return "ask", f"An ask rule covers: {' '.join(words)}"
 
     allow = [rule_regex(r) for r in policy.get("allow", [])]
