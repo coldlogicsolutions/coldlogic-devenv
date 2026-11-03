@@ -6,9 +6,9 @@
 # it).
 #
 # Needs the COLDLOGIC_AI_CLIENT_ID and COLDLOGIC_AI_PRIVATE_KEY secrets, which
-# the infrastructure stack shares with every registered repository. Only the
-# second job sees them: the first runs Nix and devenv, and hands over nothing
-# but devenv.lock.
+# the infrastructure stack puts in a `coldlogic-ai` environment, deployable
+# only from main, in every registered repository. Only the second job sees
+# them: the first runs Nix and devenv, and hands over nothing but devenv.lock.
 name: Update coldlogic-devenv
 
 on:
@@ -47,8 +47,10 @@ jobs:
 
   pull-request:
     needs: update
-    # Only main's copy of this workflow may use the App key.
+    # Only main's copy of this workflow may use the App key: the environment
+    # enforces that, and this skips the job instead of failing it.
     if: github.ref == 'refs/heads/main'
+    environment: coldlogic-ai
     runs-on: ubuntu-latest
     # The App token does the writing; GITHUB_TOKEN only checks out.
     permissions:
@@ -112,6 +114,6 @@ jobs:
             - Moves `coldlogic-devenv` in `devenv.lock` to the module's latest revision.
 
             ## Test plan
-            - This project's CI runs on this PR in the updated shell.
+            - CI tests this PR.
           reviewers: derekjw
           draft: false
