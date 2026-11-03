@@ -27,6 +27,11 @@ import re
 import sys
 
 SHELLS = {"bash", "sh", "zsh", "dash", "ksh", "mksh", "ash", "fish"}
+# Programs that run another program: unwrap() looks inside them, and none of
+# them is ever allowed itself.
+WRAPPERS = {"npx", "bunx", "pnpx", "pnpm", "yarn", "npm", "env", "sudo", "xargs", "find",
+            "exec", "command", "builtin", "eval", "timeout", "nice", "nohup", "time",
+            "devenv", "busybox"}
 # Interpreters whose script this can't read.
 INTERPRETERS = {"python", "python3", "node", "perl", "ruby", "deno", "bun"}
 RESERVED = {"!", "{", "}", "if", "then", "else", "elif", "fi", "do", "done",
@@ -788,7 +793,7 @@ def plain_args(words):
                 or long_option(w, "--files0-from", 8)
                 or (prog in ("wc", "sort", "du") and long_option(w, "--files0-from", 3))
                 or (prog == "cargo" and long_option(w, "--config", 4))
-                or (prog == "wrangler" and re.match(r"^-[A-Za-z]*c", w))
+                or (prog == "wrangler" and (re.match(r"^-[A-Za-z]*c", w) or long_option(w, "--config", 3)))
                 # gh's jq and templates can read the environment, the App's
                 # GH_TOKEN included.
                 or (prog in ("gh", "gh-app") and (
@@ -826,6 +831,9 @@ def names_secret(path):
     for secret in SECRET_NAMES:
         if name == secret or (name.startswith(secret + ".") and name != secret + ".example"):
             return True
+    # Other spellings of an env file: .env-production, .env_local, .envrc.
+    if re.match(r"^\.env([-_].+|rc)$", name):
+        return True
     # A glob reaches a dotfile only if it starts with a dot itself, or a zsh
     # qualifier (`*(D)`) says so.
     qualifier = re.search(r"\(([^)]*)\)$", name)
@@ -922,6 +930,10 @@ def decide(tool, tool_input, policy):
         path = tool_input.get("file_path") or tool_input.get("notebook_path") or ""
         if secret_path(path):
             return "deny", f"{path} is a secrets file. Change .env.example instead, and say what the real file needs."
+        if tool != "Read" and ".git" in path.replace("\\", "/").split("/"):
+            # A repository's own files, config and hooks among them, which git
+            # runs from.
+            return "deny", f"{path} is inside a .git directory."
         return None
     if tool in ("Grep", "Glob"):
         for key in ("path", "glob", "pattern") if tool == "Glob" else ("path", "glob"):
@@ -988,9 +1000,12 @@ def decide(tool, tool_input, policy):
     for w in commands:
         if matches(allow, w) and not plain_args(w):
             return "ask", f"coldlogic guard: an allow rule names {w[0]}, but not with these arguments."
-    if result.wrapped and matches(allow, command.split()):
-        # A rule allowing the wrapper itself would let anything through it.
-        return "ask", "coldlogic guard: a rule allows the wrapper, not the command inside it."
+    # Whenever this hook doesn't allow a command but any allow rule, from the
+    # module or the user's own settings, would match it or a command inside
+    # it, ask: left silent, Claude Code's own rules would allow it.
+    every_allow = allow + [rule_regex(r) for r in policy.get("settings_allow", [])]
+    if any(matches(every_allow, w) for w in ruled) or any(r.match(checked) for r in every_allow):
+        return "ask", "coldlogic guard: an allow rule covers this, but the guard can't vouch for it."
     return None
 
 
@@ -998,7 +1013,7 @@ def decide(tool, tool_input, policy):
 # Its body may hold no `)` or `"`: macOS's bash 3.2 ends the substitution at
 # the first `)`, even inside the heredoc.
 COMMIT_MESSAGE = re.compile(
-    r"""(git commit(?: -[A-Za-z]+| --[a-z-]+)*) -([A-Za-z]*)m "\$\(cat <<'EOF'\n(?:(?!EOF)[^\n)"]*\n)*EOF\n\)"\Z""")
+    r"""(git commit(?: -[aqsvn]+| --(?:all|amend|no-verify|allow-empty|signoff|quiet|verbose|no-edit))*) -([aqsvn]*)m "\$\(cat <<'EOF'\n(?:(?!EOF)[^\n)"]*\n)*EOF\n\)"\Z""")
 WRAPPER = re.compile(r"devenv shell(?: --quiet| -q)? -- ")
 # Characters that mean nothing to the shell outside quotes.
 PLAIN = re.compile(r"[A-Za-z0-9 _./:@%+,=-]")
@@ -1037,10 +1052,7 @@ def simple_command(command):
             return None
     if word is not None:
         words.append(word)
-    if not words or "=" in words[0] or os.path.basename(words[0]) in (
-            "npx", "bunx", "pnpx", "pnpm", "yarn", "npm", "env", "sudo", "xargs", "find", "exec",
-            "command", "builtin", "eval", "timeout", "nice", "nohup", "time", "devenv",
-            "busybox") or os.path.basename(words[0]) in SHELLS:
+    if not words or "=" in words[0] or os.path.basename(words[0]) in WRAPPERS | SHELLS:
         # A runner or wrapper: the rule names what it runs, not it.
         return None
     return normalize_git(words) if words[0] == "git" else words
@@ -1049,7 +1061,7 @@ def simple_command(command):
 def settings_rules():
     """Bash ask and deny rules from the user's and the checkout's own
     settings, which the policy file can't know."""
-    rules = {"ask": [], "deny": []}
+    rules = {"ask": [], "deny": [], "settings_allow": []}
     config = os.environ.get("CLAUDE_CONFIG_DIR") or os.path.expanduser("~/.claude")
     paths = [os.path.join(config, "settings.json"),
              "/Library/Application Support/ClaudeCode/managed-settings.json",
@@ -1065,7 +1077,7 @@ def settings_rules():
         except (OSError, ValueError, AttributeError):
             continue
         for kind in rules:
-            for rule in permissions.get(kind) or []:
+            for rule in permissions.get("allow" if kind == "settings_allow" else kind) or []:
                 if rule == "Bash":
                     rules[kind].append("*")
                 m = re.match(r"^Bash\((.*)\)$", str(rule), re.S)
