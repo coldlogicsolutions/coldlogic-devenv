@@ -39,10 +39,9 @@ DEVENV_FLAGS = {"-q", "--quiet", "-v", "--verbose", "--impure", "--offline",
 DEVENV_VALUE_FLAGS = {"-P", "--profile", "--log-format"}
 
 # git's global options, and those that take a value.
-GIT_FLAGS = {"--no-pager", "-p", "-P", "--paginate", "--bare",
-             "--no-replace-objects", "--literal-pathspecs", "--glob-pathspecs",
-             "--noglob-pathspecs", "--icase-pathspecs", "--no-optional-locks",
-             "--no-advice"}
+# The only global options stripped before rules match. Any other (--bare,
+# --literal-pathspecs...) stays, so `git <option> <sub>` matches no rule.
+GIT_FLAGS = {"--no-pager", "--no-optional-locks"}
 GIT_VALUE_FLAGS = {"-C"}
 # Options that change which programs git runs or which repository it acts
 # on: a rule allowing the subcommand no longer means what it says.
@@ -703,18 +702,29 @@ def forbidden_from(head, args):
     return None
 
 
-def secret_path(word):
-    """Whether a word, or an option value in it (`--file=x`, `-Fx`), names or
-    could expand to a secrets file."""
-    word = word.lstrip("<>")
+def option_values(word):
+    """The word, and any value an option carries in it: `--file=x`, and a
+    value attached to a cluster of short options, `-Fx`, `-aFx`."""
     candidates = [word]
     if word.startswith("-"):
         if "=" in word:
             candidates.append(word.split("=", 1)[1])
         elif re.match(r"^-[A-Za-z].", word):
-            # A value attached to a cluster of short options: -Fx, -aFx.
             candidates.extend(word[k:] for k in range(2, len(word)))
-    return any(names_secret(c) for c in candidates)
+    return candidates
+
+
+def secret_path(word):
+    """Whether a word, or an option value in it, names or could expand to a
+    secrets file, directly or through a symlink."""
+    for c in option_values(word.lstrip("<>")):
+        if names_secret(c):
+            return True
+        cwd = WORKING["cwd"]
+        if cwd and not c.startswith("-") and os.path.islink(os.path.join(cwd, c)):
+            if names_secret(os.path.realpath(os.path.join(cwd, c))):
+                return True
+    return False
 
 
 # Set by decide: where the command runs, and the project it may stay in.
@@ -730,11 +740,29 @@ def outside(path):
         return True
     cwd, root = WORKING["cwd"], WORKING["root"]
     if cwd and root and not path.startswith("-"):
+        # realpath resolves whatever prefix exists, so a link on the way to
+        # a path not yet created counts too.
         resolved = os.path.realpath(os.path.join(cwd, path))
         base = os.path.realpath(root)
-        if os.path.lexists(os.path.join(cwd, path)) and not (
-                resolved == base or resolved.startswith(base + os.sep)):
+        if not (resolved == base or resolved.startswith(base + os.sep)):
             return True
+    return False
+
+
+def foreign_repository():
+    """Whether git, run in the cwd, could find a repository other than the
+    project's own: the cwd is outside the project, or a directory between
+    them is laid out like a bare repository, whose config git would read."""
+    cwd, root = WORKING["cwd"], WORKING["root"]
+    if not cwd or not root:
+        return False
+    here, base = os.path.realpath(cwd), os.path.realpath(root)
+    if not (here == base or here.startswith(base + os.sep)):
+        return True
+    while here != base:
+        if all(os.path.exists(os.path.join(here, n)) for n in ("HEAD", "objects", "refs")):
+            return True
+        here = os.path.dirname(here)
     return False
 
 
@@ -748,13 +776,13 @@ def plain_args(words):
             return False
         if os.path.basename(words[0]) == "cargo" and (w.startswith("-Z") or w.startswith("+")):
             return False
-        candidates = [w]
-        if w.startswith("-") and "=" in w:
-            candidates.append(w.split("=", 1)[1])
-        elif re.match(r"^-[A-Za-z].", w):
-            candidates.extend(w[k:] for k in range(2, len(w)))
-        if any(outside(c) for c in candidates):
+        if any(outside(c) for c in option_values(w)):
             return False
+        if os.path.basename(words[0]) == "git" and not w.startswith("-") and re.search(r"[*?\[]", w):
+            # A pathspec glob: git's `*` crosses `/` and matches dotfiles.
+            return False
+    if os.path.basename(words[0]) == "git" and foreign_repository():
+        return False
     return True
 
 
@@ -916,7 +944,8 @@ def decide(tool, tool_input, policy):
             return "ask", f"An ask rule covers: {' '.join(words)}"
 
     allow = [rule_regex(r) for r in policy.get("allow", [])]
-    words = simple_command(command)
+    # `checked` has the commit message's stand-in already.
+    words = simple_command(checked)
     # The plain reading and the full analysis must agree on one command.
     if (words is not None and commands == [words] and len(result.commands) == 1
             and not result.opaque and plain_args(words)
@@ -942,9 +971,6 @@ def simple_command(command):
     expansion, redirect, comment or escape outside quotes, nothing but text
     inside them. Anything else gets no allow from this hook."""
     text = command[len(m.group(0)):] if (m := WRAPPER.match(command)) else command
-    m = COMMIT_MESSAGE.match(text)
-    if m:
-        text = m.group(1) + " -" + m.group(2) + "m message"
     words, word, i = [], None, 0
     while i < len(text):
         c = text[i]
