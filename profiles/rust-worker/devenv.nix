@@ -20,6 +20,9 @@
           };
           enabledPlugins."cloudflare@cloudflare" = true;
         };
+
+        # The guard hook sees `npx wrangler dev` as `wrangler dev`.
+        claude.code.permissions.rules.Bash.allow = [ "wrangler dev *" ];
       };
   };
 }

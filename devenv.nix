@@ -5,6 +5,7 @@
 { pkgs, ... }:
 let
   gh-app = import ./packages/gh-app.nix { inherit pkgs; };
+  claude-guard = import ./packages/claude-guard.nix { inherit pkgs; };
 in
 {
   profiles.developer.module =
@@ -28,8 +29,11 @@ in
         };
         permissions = {
           # A starting point. Anything broader belongs in the project.
+          # The guard hook below applies these to each command inside a
+          # wrapper, so `devenv shell --quiet -- scripts/check.sh` is allowed
+          # by the `scripts/check.sh` rule. Allowing the wrapper itself would
+          # allow anything run through it.
           rules.Bash.allow = [
-            "devenv shell --quiet -- *"
             "scripts/check.sh"
             "git status *"
             "git diff *"
@@ -46,24 +50,16 @@ in
             "gh-app issue create *"
             "openspec *"
           ];
-          # Each command is denied bare, with arguments, and behind the devenv
-          # wrapper, because a trailing ` *` is only optional in a rule with no
-          # other wildcard. The wrapper forms keep `--` or `shell` so that most
-          # commit messages mentioning a command aren't denied.
-          #
-          # Anything behind the wrapper runs without a prompt unless one of these
-          # matches. Other spellings and `bash -c` inside it get past them: they
-          # are a backstop, not a boundary. A project's own deny rules are not
-          # wrapped.
+          # The guard hook denies force pushes, `git reset --hard`, deploys and
+          # a flake's dev shell however they are spelled or wrapped. These
+          # catch the plain spellings if the hook ever doesn't run. A trailing
+          # ` *` is only optional in a rule with no other wildcard, so each is
+          # listed bare and with arguments.
           rules.Bash.deny =
             lib.concatMap
               (command: [
                 command
                 "${command} *"
-                "devenv * -- ${command}"
-                "devenv * -- ${command} *"
-                "devenv shell ${command}"
-                "devenv shell ${command} *"
               ])
               [
                 "git push --force"
@@ -74,20 +70,38 @@ in
                 "npx wrangler deploy"
                 # Tools come from the devenv shell, never a flake's dev shell.
                 "nix develop"
-                # A backstop to auto mode's classifier.
                 "git reset --hard"
                 "git reset * --hard"
-                # Merging is the user's, and the App could do it unprompted.
-                "gh-app pr merge"
               ];
-          # Claude Code also merges these into the sandbox's denyRead, so a file
-          # a tool in the shell needs, like wrangler's `.dev.vars`, can't go here.
+          # Claude Code also merges these into the sandbox, so no command can
+          # read or write them either. A file a tool in the shell needs, like
+          # wrangler's `.dev.vars`, can't go here: the guard hook keeps Claude's
+          # own tools, and commands naming it, away from it instead.
           rules.Read.deny = [
-            "./.env"
-            "./.env.*"
-            "./**/secrets/**"
+            "**/.env"
+            "**/secrets/**"
+          ];
+          rules.Edit.deny = [
+            "**/.env"
+            "**/secrets/**"
           ];
         };
+      };
+
+      # Decides each tool call from what it would run (packages/claude-guard.py).
+      # It reads the session's Bash rules, the project's included, from a file
+      # written here.
+      claude.code.hooks.coldlogic-guard = {
+        hookType = "PreToolUse";
+        matcher = "Bash|Read|Edit|Write|MultiEdit|NotebookEdit|Grep|Glob";
+        command = "${claude-guard}/bin/coldlogic-claude-guard ${
+          pkgs.writeText "coldlogic-claude-guard-policy.json" (
+            builtins.toJSON {
+              allow = config.claude.code.permissions.rules.Bash.allow or [ ];
+              deny = config.claude.code.permissions.rules.Bash.deny or [ ];
+            }
+          )
+        }";
       };
 
       # Merges with the definition claude.nix writes under the same key, which
@@ -111,22 +125,41 @@ in
         enabledPlugins."coldlogic@coldlogic-plugins" = true;
         enabledMcpjsonServers = [ "mcp.devenv.sh" ];
 
-        # Stops `cat .env` in the shell.
         # Paths are absolute: the file is generated per checkout and never
         # committed.
         sandbox = {
           enabled = true;
-          # Off so that commands outside the devenv wrapper need the allow list.
-          # Behind the wrapper, only the deny rules apply.
+          # Off so that every command needs an allow rule, or the guard hook's
+          # allow for what runs inside a wrapper.
           autoAllowBashIfSandboxed = false;
+          # Off so that a command the sandbox blocks fails rather than being
+          # retried outside it. What a session legitimately needs goes into
+          # this module, or the project's devenv.nix, through a reviewed PR.
+          allowUnsandboxedCommands = false;
           # `gh`, and so `gh-app`, can't verify TLS on macOS without trustd.
           # Claude Code documents this as a possible way to exfiltrate data.
           enableWeakerNetworkIsolation = true;
           filesystem = {
+            # No command reads a `.env` file at any depth, but `.env.example`
+            # stays readable. `**/` doesn't match the root here, so each is
+            # listed twice.
             denyRead = [
               "${config.devenv.root}/.env"
+              "${config.devenv.root}/**/.env"
               "${config.devenv.root}/.env.*"
+              "${config.devenv.root}/**/.env.*"
               "${config.devenv.root}/**/secrets/**"
+            ];
+            allowRead = [
+              "${config.devenv.root}/.env.example"
+              "${config.devenv.root}/**/.env.example"
+            ];
+            # A write deny overrides allowWrite, so only `.env` itself is
+            # listed. The guard hook keeps other `.env.*` files from being
+            # written by name.
+            denyWrite = [
+              "${config.devenv.root}/.env"
+              "${config.devenv.root}/**/.env"
             ];
             # What `devenv shell` and the toolchains inside it write to.
             allowWrite = [
