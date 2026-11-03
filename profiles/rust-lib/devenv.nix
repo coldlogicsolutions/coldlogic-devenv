@@ -78,6 +78,18 @@
           };
           clippy.enable = true;
         };
+
+        # Builds and checks; the shared module's guard hook applies these
+        # inside the devenv wrapper too.
+        claude.code.permissions.rules.Bash.allow = [
+          "cargo check *"
+          "cargo build *"
+          "cargo test *"
+          "cargo clippy *"
+          "cargo fmt *"
+          "cargo tree *"
+          "cargo metadata *"
+        ];
       };
     };
   };
