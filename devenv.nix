@@ -96,10 +96,15 @@ in
         matcher = "Bash|Read|Edit|Write|MultiEdit|NotebookEdit|Grep|Glob";
         command = "${claude-guard}/bin/coldlogic-claude-guard ${
           pkgs.writeText "coldlogic-claude-guard-policy.json" (
-            builtins.toJSON {
-              allow = config.claude.code.permissions.rules.Bash.allow or [ ];
-              deny = config.claude.code.permissions.rules.Bash.deny or [ ];
-            }
+            builtins.toJSON (
+              lib.genAttrs [ "allow" "ask" "deny" ] (
+                kind:
+                # Rules can be written under `rules` or, the older way,
+                # directly under `permissions`.
+                (config.claude.code.permissions.rules.Bash.${kind} or [ ])
+                ++ (config.claude.code.permissions.Bash.${kind} or [ ])
+              )
+            )
           )
         }";
       };
