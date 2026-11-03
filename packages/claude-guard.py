@@ -65,7 +65,10 @@ SECRET_EXAMPLES = (".env", ".env.local", ".env.production", ".dev.vars")
 
 # Stand-in for a substitution's output in a word. A command holding one
 # gets no allow: the canonical commit message is handled before lexing.
+HEREDOC = re.compile(r"<<-?\s*(['\"]?)([A-Za-z_][A-Za-z0-9_]*)\1")
 PLACEHOLDER = "SUBSTITUTED"
+# What an allowed command may be piped into.
+PIPE_FILTERS = {"tail", "head", "grep", "wc"}
 
 
 class Unparsable(Exception):
@@ -92,11 +95,26 @@ def find_close(text, i, opener="(", closer=")"):
     """The index just past the bracket closing the one opened before i,
     skipping quoted text."""
     depth = 1
+    pending = []
     while i < len(text):
         c = text[i]
         if c == "\\":
             i += 2
             continue
+        if c == "\n" and pending:
+            # Heredoc bodies are data: an apostrophe or `)` in one means
+            # nothing.
+            i += 1
+            for delimiter, strip_tabs in pending:
+                _, i = take_body(text, i, delimiter, strip_tabs)
+            pending = []
+            continue
+        if text.startswith("<<", i) and not text.startswith("<<<", i):
+            m = HEREDOC.match(text, i)
+            if m:
+                pending.append((m.group(2), text.startswith("<<-", i)))
+                i = m.end()
+                continue
         if c == "'":
             j = text.find("'", i + 1)
             if j < 0:
@@ -640,7 +658,7 @@ def forbidden_from(head, args):
                     return "force push (+refspec)"
         if sub == "reset" and any(long_option(a, "--hard", 4) for a in rest):
             return "git reset --hard"
-    if head == "wrangler":
+    if head == "wrangler" and "--dry-run" not in args:
         for a in args:
             if a in ("deploy", "publish", "rollback"):
                 return "wrangler " + a
@@ -653,18 +671,17 @@ def forbidden_from(head, args):
         # organization ruleset requires, and approving counts as that review.
         # The App's (gh-app) don't.
         lowered = [a.lower() for a in args]
-        if "pr" in lowered and "merge" in lowered:
+        sub = gh_subcommand(lowered)
+        if sub == ("pr", "merge"):
             return "gh pr merge with your credentials skips review; the App merges approved PRs"
-        if "pr" in lowered and "review" in lowered and any(
-                a.startswith("--approve") or re.match(r"^-[A-Za-z]*a[A-Za-z]*$", a) for a in args):
+        if sub == ("pr", "review") and approves(args):
             return "approving with your credentials stands in for your review"
-        # The subcommand may follow global flags (`gh --repo o/r api ...`).
-        if "alias" in lowered:
+        if sub and sub[0] == "alias":
             return "gh aliases could hide a merge or an approval"
-        if "api" in lowered:
-            text = " ".join(lowered)
-            if "merge" in text or "approve" in text or "/reviews" in text:
+        if sub and sub[0] == "api":
+            if api_changes_review(lowered, merging=True):
                 return "merging or reviewing through gh api with your credentials"
+            text = " ".join(lowered)
             if "--input" in text or "=@" in text or re.search(r"(^| )@", text):
                 raise Unparsable("gh api reading its request from a file")
     if head == "gh-app":
@@ -672,18 +689,59 @@ def forbidden_from(head, args):
         # approve one: where the ruleset's file patterns miss a path, its
         # approval would count.
         lowered = [a.lower() for a in args]
-        if "alias" in lowered:
+        sub = gh_subcommand(lowered)
+        if sub and sub[0] == "alias":
             return "gh-app aliases could hide an approval"
-        if "review" in lowered and any(
-                a.startswith("--approve") or re.match(r"^-[A-Za-z]*a[A-Za-z]*$", a) for a in args):
+        if sub == ("pr", "review") and approves(args):
             return "the App approving a PR"
-        if "api" in lowered:
+        if sub and sub[0] == "api":
             text = " ".join(lowered)
-            if "approve" in text or "/reviews" in text:
+            if api_changes_review(lowered, merging=False):
                 return "the App reviewing a PR through gh-app api"
             if "--input" in text or "=@" in text or re.search(r"(^| )@", text):
                 raise Unparsable("gh-app api reading its request from a file")
     return None
+
+
+def gh_subcommand(lowered):
+    """gh's command and subcommand, past global flags: ("pr", "merge")."""
+    words = []
+    k = 0
+    while k < len(lowered) and len(words) < 2:
+        a = lowered[k]
+        if a in ("-r", "-R", "--repo", "--hostname"):
+            k += 2
+            continue
+        if not a.startswith("-"):
+            words.append(a)
+        k += 1
+    return tuple(words) or None
+
+
+def approves(args):
+    return any(a.startswith("--approve") or re.match(r"^-[A-Za-z]*a[A-Za-z]*$", a) for a in args)
+
+
+def api_changes_review(lowered, merging):
+    """Whether a gh api call approves (or, with merging, merges) a PR, rather
+    than reading one."""
+    text = " ".join(lowered)
+    if re.search(r"event=approve|approvepullrequest|addpullrequestreview", text):
+        return True
+    if merging and re.search(r"mergepullrequest|enablepullrequestautomerge", text):
+        return True
+    writes = re.search(r"(^| )(-x|--method)[ =]?(post|put|patch)", text) or re.search(r"(^| )-[fF] ", text)
+    return bool(writes and ((merging and re.search(r"/pulls/[^/ ]+/merge", text)) or "/reviews" in text))
+
+
+def names_file(word):
+    """Whether a command word could name a file rather than mention one, as
+    a search pattern does (`grep -rn '.env' src`): a redirect, a path, a glob,
+    or a name that exists. Where the cwd is unknown, every word counts."""
+    cwd = WORKING["cwd"]
+    if not cwd or word.startswith(">") or "/" in word or re.search(r"[*?\[{]", word):
+        return True
+    return any(os.path.lexists(os.path.join(cwd, c)) for c in option_values(word) if c)
 
 
 def option_values(word):
@@ -756,8 +814,28 @@ def away_from_root():
     cwd, root = WORKING["cwd"], WORKING["root"]
     if not cwd or not root:
         return False
+    if at_top():
+        return False
     here, base = os.path.realpath(cwd), os.path.realpath(root)
-    return here != base and not (here.startswith(base + os.sep) and own_worktree(here, base))
+    if not here.startswith(base + os.sep):
+        return True
+    # A subdirectory of the project, unless a repository of its own sits on
+    # the way: git there would read that one's config.
+    while here != base:
+        if os.path.lexists(os.path.join(here, ".git")):
+            return True
+        here = os.path.dirname(here)
+    return False
+
+
+def at_top():
+    """Whether the command runs at the project root or the top of one of its
+    own worktrees, where a relative program is the file the rule means."""
+    cwd, root = WORKING["cwd"], WORKING["root"]
+    if not cwd or not root:
+        return True
+    here, base = os.path.realpath(cwd), os.path.realpath(root)
+    return here == base or (here.startswith(base + os.sep) and own_worktree(here, base))
 
 
 def own_worktree(here, base):
@@ -781,7 +859,9 @@ def own_worktree(here, base):
 def plain_args(words):
     """Whether no argument, or option value, points outside the project or
     names an output file, and the program isn't a path out of it."""
-    if "/" in words[0] and outside(words[0]):
+    if "/" in words[0] and (outside(words[0]) or not at_top()):
+        # A relative program from a subdirectory is another file than the
+        # rule's.
         return False
     prog = program(words[0])
     for w in words[1:]:
@@ -796,21 +876,30 @@ def plain_args(words):
                 or (prog == "wrangler" and (re.match(r"^-[A-Za-z]*c", w) or long_option(w, "--config", 3)))
                 # gh's jq and templates can read the environment, the App's
                 # GH_TOKEN included.
-                or (prog in ("gh", "gh-app") and (
-                    long_option(w, "--jq", 4) or long_option(w, "--template", 4)
-                    or re.match(r"^-[A-Za-z]*[qt]", w)))):
+                or (prog in ("gh", "gh-app") and reads_environment(words, w))):
             return False
         if prog == "cargo" and (w.startswith("-Z") or w.startswith("+")):
             return False
         if any(outside(c) for c in option_values(w)):
             return False
-        if prog == "git" and (
-                long_option(w, "--pathspec-from-file", 7) or
-                any(re.search(r"[*?\[]", c) for c in option_values(w) if not c.startswith("-"))):
-            # A pathspec glob, or a file of pathspecs: git's `*` crosses `/`
-            # and matches dotfiles.
+        if prog == "git" and long_option(w, "--pathspec-from-file", 7):
+            # A file of pathspecs, whose names aren't checked.
             return False
     return True
+
+
+def reads_environment(words, w):
+    """Whether a gh jq or template filter could read the environment (the
+    App's GH_TOKEN): only on commands where -q and -t mean --jq and
+    --template, and only if it mentions env."""
+    k = words.index(w)
+    value = w.split("=", 1)[1] if "=" in w else (words[k + 1] if k + 1 < len(words) else "")
+    if long_option(w, "--jq", 4) or long_option(w, "--template", 4):
+        return "env" in value.lower()
+    lowered = [a.lower() for a in words[1:]]
+    if (gh_subcommand(lowered) or ("",))[-1] in ("create", "edit", "comment") or lowered[:1] == ["api"]:
+        return False
+    return bool(re.match(r"^-[A-Za-z]*[qt]", w)) and "env" in value.lower()
 
 
 def names_secret(path):
@@ -829,10 +918,11 @@ def names_secret(path):
         return False
     name = os.path.basename(path.rstrip("/"))
     for secret in SECRET_NAMES:
-        if name == secret or (name.startswith(secret + ".") and name != secret + ".example"):
+        if name == secret or (name.startswith(secret + ".") and name not in (
+                secret + ".example", secret + ".sample", secret + ".template")):
             return True
-    # Other spellings of an env file: .env-production, .env_local, .envrc.
-    if re.match(r"^\.env([-_].+|rc)$", name):
+    # Other spellings of an env file: .env-production, .env_local.
+    if re.match(r"^\.env[-_].+$", name) and not re.search(r"[-_.](example|sample|template)$", name):
         return True
     # A glob reaches a dotfile only if it starts with a dot itself, or a zsh
     # qualifier (`*(D)`) says so.
@@ -936,7 +1026,8 @@ def decide(tool, tool_input, policy):
             return "deny", f"{path} is inside a .git directory."
         return None
     if tool in ("Grep", "Glob"):
-        for key in ("path", "glob", "pattern") if tool == "Glob" else ("path", "glob"):
+        # Glob only lists names, so its pattern may mention a secrets file.
+        for key in ("path",) if tool == "Glob" else ("path", "glob"):
             value = tool_input.get(key) or ""
             if secret_path(value):
                 return "deny", f"{value} is a secrets file."
@@ -959,7 +1050,7 @@ def decide(tool, tool_input, policy):
             if reason:
                 return "deny", f"Not allowed in a session: {reason}."
             for w in words:
-                if secret_path(w):
+                if names_file(w) and secret_path(w):
                     return "deny", f"{w.lstrip('>')} is a secrets file. Change .env.example instead, and say what the real file needs."
     except Unparsable as e:
         # A command this can't follow gets no automatic allow, and a user
@@ -989,11 +1080,14 @@ def decide(tool, tool_input, policy):
 
     allow = [rule_regex(r) for r in policy.get("allow", [])]
     # `checked` has the commit message's stand-in already.
-    words = simple_command(checked) if not away_from_root() else None
-    # The plain reading and the full analysis must agree on one command.
-    if (words is not None and commands == [words] and len(result.commands) == 1
-            and not result.opaque and plain_args(words)
-            and (read_only(words) or matches(allow, words))):
+    pipeline = simple_command(checked) if not away_from_root() else None
+    # The plain reading and the full analysis must agree on every command:
+    # the first one an allow rule names (or a read-only one), the rest
+    # read-only filters (`| tail -20`).
+    if (pipeline is not None and commands == pipeline and len(result.commands) == len(pipeline)
+            and not result.opaque and all(plain_args(w) for w in pipeline)
+            and (read_only(pipeline[0]) or matches(allow, pipeline[0]))
+            and all(w[0] in PIPE_FILTERS and read_only(w) for w in pipeline[1:])):
         return "allow", "coldlogic guard: a plain command an allow rule names."
     # Claude Code's own rules would allow a command that one names, though
     # an option or path in it is one this hook refuses: ask instead.
@@ -1009,25 +1103,33 @@ def decide(tool, tool_input, policy):
 
 
 # The one compound form allowed: a commit whose message is a quoted heredoc.
-# Its body may hold no `)` or `"`: macOS's bash 3.2 ends the substitution at
-# the first `)`, even inside the heredoc.
 COMMIT_MESSAGE = re.compile(
-    r"""(git commit(?: -[aqsvn]+| --(?:all|amend|no-verify|allow-empty|signoff|quiet|verbose|no-edit))*) -([aqsvn]*)m "\$\(cat <<'EOF'\n(?:(?!EOF)[^\n)"]*\n)*EOF\n\)"\Z""")
+    r"""(git commit(?: -[aqsvn]+| --(?:all|amend|no-verify|allow-empty|signoff|quiet|verbose|no-edit))*) -([aqsvn]*)m "\$\(cat <<'EOF'\n(?:(?!EOF)[^\n]*\n)*EOF\n\)"\Z""")
 WRAPPER = re.compile(r"devenv shell(?: --quiet| -q)? -- ")
 # Characters that mean nothing to the shell outside quotes.
 PLAIN = re.compile(r"[A-Za-z0-9 _./:@%+,=-]")
 
 
 def simple_command(command):
-    """The words of command if it is one plain command, optionally behind
-    `devenv shell [--quiet] --`, that the shell runs as written: no operator,
-    expansion, redirect, comment or escape outside quotes, nothing but text
-    inside them. Anything else gets no allow from this hook."""
+    """The commands of a plain pipeline, optionally behind `devenv shell
+    [--quiet] --`, that the shell runs as written: words with no expansion,
+    redirect, comment or escape outside quotes and nothing but text inside
+    them, joined only by `|`, with `2>&1` allowed. Anything else gets no allow
+    from this hook."""
     text = command[len(m.group(0)):] if (m := WRAPPER.match(command)) else command
-    words, word, i = [], None, 0
+    commands, words, word, i = [], [], None, 0
     while i < len(text):
         c = text[i]
-        if c == " ":
+        if text.startswith(" 2>&1", i) and text[i + 5:i + 6] in ("", " "):
+            if word is not None:
+                words.append(word)
+            word = None
+            i += 5
+        elif c == "|" and text[i + 1:i + 2] not in ("|", "&") and word is None and words:
+            commands.append(words)
+            words = []
+            i += 1
+        elif c == " ":
             if word is not None:
                 words.append(word)
             word = None
@@ -1051,10 +1153,12 @@ def simple_command(command):
             return None
     if word is not None:
         words.append(word)
-    if not words or "=" in words[0] or os.path.basename(words[0]) in WRAPPERS | SHELLS:
-        # A runner or wrapper: the rule names what it runs, not it.
-        return None
-    return normalize_git(words) if words[0] == "git" else words
+    commands.append(words)
+    for words in commands:
+        if not words or "=" in words[0] or os.path.basename(words[0]) in WRAPPERS | SHELLS:
+            # A runner or wrapper: the rule names what it runs, not it.
+            return None
+    return [normalize_git(w) if w[0] == "git" else w for w in commands]
 
 
 def settings_rules():
