@@ -226,6 +226,8 @@ BASH = [
     ("wrangler dev -jc other.toml", ASK),
     ("node_modules/.bin/wrangler dev --config=x.toml", NONE),
     ("git log --follow README.md", ALLOW),
+    ("@d/wrangler dev -c x.toml", NONE),
+    ("npx @cloudflare/wrangler@3 deploy", DENY),
     # Ordinary pushes and resets are left to the rules.
     ("git push -u origin feat", ASK),
     ("git reset --soft HEAD~1", NONE),

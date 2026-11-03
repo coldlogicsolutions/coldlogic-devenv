@@ -597,10 +597,10 @@ def long_option(arg, option, shortest):
 
 
 def program(word):
-    """A command word's program name: `wrangler@4` is wrangler."""
-    if word.startswith("@"):
-        return word
-    name = os.path.basename(word).split("@", 1)[0]
+    """A command word's program name: `wrangler@4`, `@scope/wrangler` and
+    `node_modules/.bin/wrangler.js` are wrangler."""
+    name = os.path.basename(word)
+    name = name.split("@", 1)[0] if not name.startswith("@") else name[1:].split("@", 1)[0]
     return re.sub(r"\.(js|mjs|cjs|exe)$", "", name)
 
 
