@@ -215,6 +215,14 @@ BASH = [
     ("wrangler dev -c other.toml", NONE),
     ("wrangler dev --config=other.toml", NONE),
     ("git log --output=x", NONE),
+    ("gh-app pr view 1 --json number --jq env.GH_TOKEN", NONE),
+    ("gh-app pr view 1 -q env", NONE),
+    ("gh-app pr view 1 --json title", ALLOW),
+    ("git add -f :.dev.vars", DENY),
+    ("git add -f ::.dev.vars", DENY),
+    ("git add -f :/:.dev.vars", DENY),
+    ("git add -f :0:.dev.vars", DENY),
+    ("cat <<EOF\n\tEOF\ncat <<X\nEOF\ngit push --force\nX", DENY),
     # Ordinary pushes and resets are left to the rules.
     ("git push -u origin feat", ASK),
     ("git reset --soft HEAD~1", NONE),
@@ -305,6 +313,7 @@ with tempfile.TemporaryDirectory() as top:
     os.makedirs(root)
     open(os.path.join(root, "README.md"), "w").close()
     guard.WORKING.update(cwd=root, root=root)
+    checks += 1
     got = guard.decide("Bash", {"command": "cat README.md"}, POLICY)
     guard.WORKING.update(cwd=None, root=None)
     if got is None or got[0] != "allow":
@@ -315,6 +324,7 @@ with tempfile.TemporaryDirectory() as top:
 with tempfile.TemporaryDirectory() as root:
     os.symlink("/etc", os.path.join(root, "link"))
     guard.WORKING.update(cwd=root, root=root)
+    checks += 1
     got = guard.decide("Bash", {"command": "cat link/hosts"}, POLICY)
     guard.WORKING.update(cwd=None, root=None)
     if got is not None:

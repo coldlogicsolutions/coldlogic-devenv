@@ -48,8 +48,8 @@ GIT_VALUE_FLAGS = {"-C"}
 GIT_RELOCATING = {"--git-dir", "--work-tree", "--namespace", "--exec-path",
                   "--super-prefix", "--attr-source", "--list-cmds"}
 
-# Commands that only read what they're given, allowed in a pipeline without a
-# rule as long as every argument stays inside the project (see read_only).
+# Commands that only read what they're given, allowed alone without a rule
+# as long as every argument stays inside the project (see read_only).
 READ_ONLY = {"pwd", "ls", "cat", "head", "tail", "grep", "wc", "cut",
              "tr", "echo", "printf", "true", "column", "basename",
              "dirname"}
@@ -149,7 +149,7 @@ def lex(text):
         if pending_redirect is not None:
             op, pending_redirect = pending_redirect, None
             if op.startswith("<<") and not op.startswith("<<<"):
-                cmd.heredocs.append((word, was_quoted))
+                cmd.heredocs.append((word, was_quoted, op == "<<-"))
             elif word != "/dev/null":
                 cmd.redirects.append(word)
         else:
@@ -178,8 +178,8 @@ def lex(text):
             ended = cmd
             end_command()
             i += 1
-            for delimiter, delimiter_quoted in ended.heredocs:
-                body, i = take_body(text, i, delimiter)
+            for delimiter, delimiter_quoted, strip_tabs in ended.heredocs:
+                body, i = take_body(text, i, delimiter, strip_tabs)
                 programs = {os.path.basename(w) for w in ended.words}
                 if SHELLS & programs or pipes_to_shell(text):
                     inner.append(body)
@@ -295,13 +295,14 @@ def pipes_to_shell(text):
     return bool(re.search(r"\|\s*(bash|sh|zsh|dash)\b", text))
 
 
-def take_body(text, i, delimiter):
-    """(a heredoc's body, the index after its closing line)."""
+def take_body(text, i, delimiter, strip_tabs):
+    """(a heredoc's body, the index after its closing line). Only `<<-`
+    strips leading tabs from the closing line."""
     lines = []
     while i <= len(text):
         j = text.find("\n", i)
         line = text[i:] if j < 0 else text[i:j]
-        if line.lstrip("\t") == delimiter:
+        if (line.lstrip("\t") if strip_tabs else line) == delimiter:
             return "\n".join(lines), (len(text) if j < 0 else j + 1)
         lines.append(line)
         if j < 0:
@@ -777,23 +778,28 @@ def plain_args(words):
     names an output file, and the program isn't a path out of it."""
     if "/" in words[0] and outside(words[0]):
         return False
+    prog = os.path.basename(words[0])
     for w in words[1:]:
-        program = os.path.basename(words[0])
         # For any program: an output file, a list of paths, or configuration
         # that can name a program to run. Some programs take shorter
         # abbreviations (wc's `--f=`) or a short config flag (wrangler's -c,
         # whose build command runs).
         if (w == "-o" or long_option(w, "--output", 5) or long_option(w, "--config", 5)
                 or long_option(w, "--files0-from", 8)
-                or (program == "wc" and long_option(w, "--files0-from", 3))
-                or (program == "cargo" and long_option(w, "--config", 4))
-                or (program == "wrangler" and (w == "-c" or w.startswith("-c")))):
+                or (prog == "wc" and long_option(w, "--files0-from", 3))
+                or (prog == "cargo" and long_option(w, "--config", 4))
+                or (prog == "wrangler" and (w == "-c" or w.startswith("-c")))
+                # gh's jq and templates can read the environment, the App's
+                # GH_TOKEN included.
+                or (prog in ("gh", "gh-app") and (
+                    long_option(w, "--jq", 4) or long_option(w, "--template", 4)
+                    or re.match(r"^-[A-Za-z]*[qt]", w)))):
             return False
-        if os.path.basename(words[0]) == "cargo" and (w.startswith("-Z") or w.startswith("+")):
+        if prog == "cargo" and (w.startswith("-Z") or w.startswith("+")):
             return False
         if any(outside(c) for c in option_values(w)):
             return False
-        if os.path.basename(words[0]) == "git" and (
+        if prog == "git" and (
                 long_option(w, "--pathspec-from-file", 7) or
                 any(re.search(r"[*?\[]", c) for c in option_values(w) if not c.startswith("-"))):
             # A pathspec glob, or a file of pathspecs: git's `*` crosses `/`
@@ -808,7 +814,12 @@ def names_secret(path):
     `:!x`) and a revision (`HEAD:x`) are looked through."""
     if ":" in path and not path.startswith(":") and names_secret(path.split(":", 1)[1]):
         return True
-    path = unicodedata.normalize("NFKC", re.sub(r"^:(\([^)]*\)|[/!^]+)", "", path)).casefold()
+    # Pathspec magic: `:(top)x`, `:/x`, `:!x`, `:/:x`, `::x`; and an index
+    # stage, `:0:x`.
+    path = re.sub(r"^:([0-3]:|\([^)]*\)|[/!^]*:?)", "", path)
+    if path.startswith(":"):
+        return names_secret(path)
+    path = unicodedata.normalize("NFKC", path).casefold()
     if not path:
         return False
     name = os.path.basename(path.rstrip("/"))
@@ -913,7 +924,7 @@ def decide(tool, tool_input, policy):
             return "deny", f"{path} is a secrets file. Change .env.example instead, and say what the real file needs."
         return None
     if tool in ("Grep", "Glob"):
-        for key in ("path", "glob", "pattern" if tool == "Glob" else "path"):
+        for key in ("path", "glob", "pattern") if tool == "Glob" else ("path", "glob"):
             value = tool_input.get(key) or ""
             if secret_path(value):
                 return "deny", f"{value} is a secrets file."
@@ -1072,6 +1083,9 @@ def main():
         WORKING["cwd"] = event.get("cwd") or os.getcwd()
         WORKING["root"] = os.environ.get("CLAUDE_PROJECT_DIR") or WORKING["cwd"]
         result = decide(tool, event.get("tool_input") or {}, policy)
+        if result and result[0] == "allow" and event.get("permission_mode") == "plan":
+            # Plan mode makes no changes: this hook doesn't speed anything up there.
+            result = None
     except Exception as e:  # noqa: BLE001 — a broken hook must not allow.
         result = ("ask", f"coldlogic guard failed: {e}")
     if result:
