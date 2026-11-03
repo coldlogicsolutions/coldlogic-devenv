@@ -166,7 +166,10 @@ in
                   ".env.staging"
                   ".env.test"
                 ]
-              ++ [ "${config.devenv.root}/**/secrets/**" ];
+              ++ [
+                "${config.devenv.root}/secrets/**"
+                "${config.devenv.root}/**/secrets/**"
+              ];
             # A write deny overrides allowWrite, so only `.env` itself is
             # listed. The guard hook keeps other `.env.*` files from being
             # written by name.

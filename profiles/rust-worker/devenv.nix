@@ -22,7 +22,8 @@
         };
 
         # The guard hook allows no package runner, so `npx wrangler dev` is
-        # matched by Claude Code's own rules.
+        # matched by Claude Code's own rules, and only when run directly:
+        # behind the devenv wrapper it prompts.
         claude.code.permissions.rules.Bash.allow = [
           "wrangler dev *"
           "npx wrangler dev *"

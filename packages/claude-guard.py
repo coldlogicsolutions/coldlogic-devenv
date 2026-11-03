@@ -440,9 +440,9 @@ def unwrap(words):
                         w.startswith("-S") and len(w) > 2):
                     script = (w.split("=", 1)[1] if w.startswith("--split-string=")
                               else w[2:] if w.startswith("-S") and len(w) > 2 else "")
-                    rest = words[i + 1:] if script else words[i + 1:]
+                    rest = words[i + 1:]
                     result.wrapped = result.opaque = True
-                    result.add(analyse(" ".join([script] + rest if script else rest)))
+                    result.add(analyse(" ".join(([script] if script else []) + rest)))
                     return result
                 elif w.startswith("-") or re.match(r"^[A-Za-z_][A-Za-z0-9_]*=", w):
                     i += 1
@@ -716,11 +716,25 @@ def secret_path(word):
     return any(names_secret(c) for c in candidates)
 
 
+# Set by decide: where the command runs, and the project it may stay in.
+WORKING = {"cwd": None, "root": None}
+
+
 def outside(path):
-    """Whether a path points outside the project (or anywhere unknown)."""
+    """Whether a path points outside the project, by its text or, through a
+    symlink, by where it resolves."""
     if path in ("/dev/null", "-"):
         return False
-    return path.startswith("/") or path.startswith("~") or ".." in path.split("/")
+    if path.startswith("/") or path.startswith("~") or ".." in path.split("/"):
+        return True
+    cwd, root = WORKING["cwd"], WORKING["root"]
+    if cwd and root and not path.startswith("-"):
+        resolved = os.path.realpath(os.path.join(cwd, path))
+        base = os.path.realpath(root)
+        if os.path.lexists(os.path.join(cwd, path)) and not (
+                resolved == base or resolved.startswith(base + os.sep)):
+            return True
+    return False
 
 
 def plain_args(words):
@@ -745,8 +759,9 @@ def plain_args(words):
 
 def names_secret(path):
     """Whether a path names a secrets file. Case is ignored: macOS's
-    filesystem ignores it too."""
-    path = path.lower()
+    filesystem ignores it too. git pathspec magic (`:(glob)x`, `:/x`, `:!x`)
+    is looked through."""
+    path = re.sub(r"^:(\([^)]*\)|[/!^]+)", "", path).lower()
     if not path:
         return False
     name = os.path.basename(path.rstrip("/"))
@@ -770,6 +785,12 @@ def names_secret(path):
 
 
 def rule_regex(rule, widen=False):
+    if rule == "*":
+        return re.compile(r"[\s\S]*\Z")
+    return _rule_regex(rule, widen)
+
+
+def _rule_regex(rule, widen=False):
     """A Bash permission rule as a regex. `*` matches anything but a
     newline; a trailing ` *` is optional when it's the rule's only wildcard.
     The older `cmd:*` form means `cmd *`, or, for an ask or deny rule
@@ -854,8 +875,15 @@ def decide(tool, tool_input, policy):
         return None
 
     command = tool_input.get("command", "")
+    # The canonical commit message is data: check the command with a stand-in.
+    checked = command
+    m_wrapper = WRAPPER.match(command)
+    inner_text = command[m_wrapper.end():] if m_wrapper else command
+    m_commit = COMMIT_MESSAGE.match(inner_text)
+    if m_commit:
+        checked = (m_wrapper.group(0) if m_wrapper else "") + m_commit.group(1) + " -" + m_commit.group(2) + "m message"
     try:
-        result = analyse(command)
+        result = analyse(checked)
         for words in result.commands:
             reason = forbidden(words)
             if reason:
@@ -872,16 +900,25 @@ def decide(tool, tool_input, policy):
         return "ask", f"coldlogic guard can't follow this command ({e})."
 
     commands = [w for w in result.commands if not w[0].startswith(">")]
+    deny = [rule_regex(r, widen=True) for r in policy.get("deny", [])]
+    ask = [rule_regex(r, widen=True) for r in policy.get("ask", [])]
+    # Rules see both what runs and what was written (`devenv shell:*`).
+    if any(r.match(checked) for r in deny):
+        return "deny", "Denied by a deny rule."
     for words in commands:
-        if matches([rule_regex(r, widen=True) for r in policy.get("deny", [])], words):
+        if matches(deny, words):
             return "deny", f"Denied by this project's rules: {' '.join(words)}"
+    if any(r.match(checked) for r in ask):
+        return "ask", "An ask rule covers this command."
     for words in commands:
-        if matches([rule_regex(r, widen=True) for r in policy.get("ask", [])], words):
+        if matches(ask, words):
             return "ask", f"An ask rule covers: {' '.join(words)}"
 
     allow = [rule_regex(r) for r in policy.get("allow", [])]
     words = simple_command(command)
-    if (words is not None and not result.opaque and plain_args(words)
+    # The plain reading and the full analysis must agree on one command.
+    if (words is not None and commands == [words] and len(result.commands) == 1
+            and not result.opaque and plain_args(words)
             and (read_only(words) or matches(allow, words))):
         return "allow", "coldlogic guard: a plain command an allow rule names."
     if result.wrapped and matches(allow, command.split()):
@@ -936,7 +973,8 @@ def simple_command(command):
         words.append(word)
     if not words or "=" in words[0] or os.path.basename(words[0]) in (
             "npx", "bunx", "pnpx", "pnpm", "yarn", "npm", "env", "sudo", "xargs", "find", "exec",
-            "command", "eval", "bash", "sh", "zsh", "fish", "timeout", "nice", "nohup", "time"):
+            "command", "builtin", "eval", "timeout", "nice", "nohup", "time", "devenv",
+            "busybox") or os.path.basename(words[0]) in SHELLS:
         # A runner or wrapper: the rule names what it runs, not it.
         return None
     return normalize_git(words) if words[0] == "git" else words
@@ -946,34 +984,44 @@ def settings_rules():
     """Bash ask and deny rules from the user's and the checkout's own
     settings, which the policy file can't know."""
     rules = {"ask": [], "deny": []}
-    paths = [os.path.expanduser("~/.claude/settings.json")]
+    config = os.environ.get("CLAUDE_CONFIG_DIR") or os.path.expanduser("~/.claude")
+    paths = [os.path.join(config, "settings.json"),
+             "/Library/Application Support/ClaudeCode/managed-settings.json",
+             "/etc/claude-code/managed-settings.json"]
     project = os.environ.get("CLAUDE_PROJECT_DIR")
     if project:
-        paths.append(os.path.join(project, ".claude", "settings.local.json"))
+        paths += [os.path.join(project, ".claude", "settings.json"),
+                  os.path.join(project, ".claude", "settings.local.json")]
     for path in paths:
         try:
             with open(path) as f:
-                permissions = json.load(f).get("permissions", {})
-        except (OSError, ValueError):
+                permissions = json.load(f).get("permissions") or {}
+        except (OSError, ValueError, AttributeError):
             continue
         for kind in rules:
-            for rule in permissions.get(kind, []):
-                m = re.match(r"^Bash\((.*)\)$", rule, re.S)
+            for rule in permissions.get(kind) or []:
+                if rule == "Bash":
+                    rules[kind].append("*")
+                m = re.match(r"^Bash\((.*)\)$", str(rule), re.S)
                 if m:
                     rules[kind].append(m.group(1))
     return rules
 
 
 def main():
-    policy = {}
-    if len(sys.argv) > 1:
-        with open(sys.argv[1]) as f:
-            policy = json.load(f)
-    for kind, rules in settings_rules().items():
-        policy[kind] = policy.get(kind, []) + rules
     try:
+        policy = {}
+        if len(sys.argv) > 1:
+            with open(sys.argv[1]) as f:
+                policy = json.load(f)
         event = json.load(sys.stdin)
-        result = decide(event.get("tool_name", ""), event.get("tool_input") or {}, policy)
+        tool = event.get("tool_name", "")
+        if tool == "Bash":
+            for kind, rules in settings_rules().items():
+                policy[kind] = policy.get(kind, []) + rules
+        WORKING["cwd"] = event.get("cwd") or os.getcwd()
+        WORKING["root"] = os.environ.get("CLAUDE_PROJECT_DIR") or WORKING["cwd"]
+        result = decide(tool, event.get("tool_input") or {}, policy)
     except Exception as e:  # noqa: BLE001 — a broken hook must not allow.
         result = ("ask", f"coldlogic guard failed: {e}")
     if result:
