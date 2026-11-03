@@ -199,6 +199,8 @@ BASH = [
     ("npx --call='git push --force' wrangler", DENY),
     ("pnpm dlx wrangler -c 'git reset --hard'", DENY),
     ("cat *(e:'git push --force':)", ASK),
+    ("npx --cal='git push --force' wrangler", DENY),
+    ("cat *(/D)", ASK),
     # Ordinary pushes and resets are left to the rules.
     ("git push -u origin feat", ASK),
     ("git reset --soft HEAD~1", NONE),

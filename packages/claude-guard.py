@@ -254,7 +254,7 @@ def lex(text):
             j = text.find(")", i)
             if j < 0:
                 raise Unparsable("unclosed glob qualifier")
-            if not re.fullmatch(r"\([A-Za-z.,/^\-0-9]*\)", text[i:j + 1]) or re.search(r"[eE+]", text[i:j]):
+            if not re.fullmatch(r"\([A-Za-z.,^\-0-9]*\)", text[i:j + 1]) or re.search(r"[eE+]", text[i:j]):
                 # Only inert qualifiers: e and + run code.
                 raise Unparsable("a glob qualifier this can't read")
             cmd.expands = True
@@ -521,8 +521,8 @@ def unwrap(words):
                 i += 2 if w in ("-p", "--package") else 1
             # Runners differ on where they read -c, and the last one may win:
             # check every value given anywhere, in any spelling, as a script.
-            scripts = [script] if script is not None else []
-            for k in range(i, len(words)):
+            scripts = []
+            for k in range(1 if head in ("npx", "bunx", "pnpx") else 2, len(words)):
                 name, eq, inline = words[k].partition("=")
                 if name == "-c" or (name.startswith("--") and len(name) > 3 and (
                         "--call".startswith(name) or "--shell-mode".startswith(name))):
