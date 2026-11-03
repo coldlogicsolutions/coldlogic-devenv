@@ -21,8 +21,12 @@
           enabledPlugins."cloudflare@cloudflare" = true;
         };
 
-        # The guard hook sees `npx wrangler dev` as `wrangler dev`.
-        claude.code.permissions.rules.Bash.allow = [ "wrangler dev *" ];
+        # The guard hook allows no package runner, so `npx wrangler dev` is
+        # matched by Claude Code's own rules.
+        claude.code.permissions.rules.Bash.allow = [
+          "wrangler dev *"
+          "npx wrangler dev *"
+        ];
       };
   };
 }

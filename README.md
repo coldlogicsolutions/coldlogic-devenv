@@ -26,7 +26,7 @@ imports:
 profile: developer
 ```
 
-The project's `devenv.nix` keeps only what is its own (Pulumi, cachix push, extra packages). It adds to the same `build`, `ci` and `developer` profiles. Permissions go through `claude.code.permissions`, whose lists concatenate; other Claude Code settings go through the same `files` key the module uses:
+The project's `devenv.nix` keeps only what is its own (Pulumi, cachix push, extra packages). It adds to the same `build`, `ci` and `developer` profiles. Permissions go through `claude.code.permissions`, whose lists concatenate. Allow rules name the command run inside the devenv wrapper (`cargo test *`, not `devenv shell -- cargo test *`): the guard hook applies them there; other Claude Code settings go through the same `files` key the module uses:
 
 ```nix
 profiles.developer.module = { config, ... }: {
@@ -43,7 +43,8 @@ Copy `templates/update-coldlogic-devenv.yaml` to `.github/workflows/` and regist
 
 | Path | What it adds |
 | --- | --- |
-| `devenv.nix` | `developer`: `git`, `openspec`, `gh-app`; the nixfmt hook; `claude.code` permissions and deny rules; the marketplace, plugin and sandbox settings (what the shell may write and reach, and that `.env` it may not read); per-worktree `core.hooksPath`; the freshness warning |
+| `devenv.nix` | `developer`: `git`, `openspec`, `gh-app`; the nixfmt hook; `claude.code` permissions and deny rules; the guard hook; the marketplace, plugin and sandbox settings (what the shell may write and reach, and the `.env` files it may not read); per-worktree `core.hooksPath`; the freshness warning |
+| `packages/claude-guard.py` | The PreToolUse guard hook: denies force pushes, hard resets, deploys, a flake's dev shell, merges or approvals with the user's own `gh` credentials, approvals by the App, and secrets files (`.env`, `.dev.vars` and their variants, not `.example`), however a command spells or wraps them. It allows a command only when it is one plain command, optionally behind `devenv shell --`, that an allow rule names; everything else goes to Claude Code's own rules. A backstop, not a boundary. Its cases in `claude-guard-test.py` run when it builds. |
 | `profiles/rust-lib` | Rust with wasm32 in `build`; the slimmed `ci` toolchain; rust-analyzer, docs and the check-only `rustfmt` and `clippy` hooks in `developer` |
 | `profiles/rust-worker` | `rust-lib` plus `worker-build`, `wasm-pack`, and the `cloudflare` plugin |
 | `packages/gh-app.nix` | `gh-app <gh args>`: one `gh` call as `coldlogic-ai[bot]`. The key path comes from `GH_APP_KEY` (default `~/.config/github/coldlogic-ai.pem`) |

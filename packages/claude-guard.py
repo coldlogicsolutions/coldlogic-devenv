@@ -871,13 +871,88 @@ def decide(tool, tool_input, policy):
             return "ask", f"An ask rule covers: {' '.join(words)}"
 
     allow = [rule_regex(r) for r in policy.get("allow", [])]
-    if (commands and not result.opaque
-            and all(plain_args(w) and (read_only(w) or matches(allow, w)) for w in commands)):
-        return "allow", "coldlogic guard: every command matches an allow rule."
+    words = simple_command(command)
+    if (words is not None and not result.opaque and plain_args(words)
+            and (read_only(words) or matches(allow, words))):
+        return "allow", "coldlogic guard: a plain command an allow rule names."
     if result.wrapped and matches(allow, command.split()):
         # A rule allowing the wrapper itself would let anything through it.
         return "ask", "coldlogic guard: a rule allows the wrapper, not the command inside it."
     return None
+
+
+# The one compound form allowed: a commit whose message is a quoted heredoc.
+COMMIT_MESSAGE = re.compile(
+    r"""(git commit(?: -[A-Za-z]+| --[a-z-]+)*) -([A-Za-z]*)m "\$\(cat <<'EOF'\n(?:(?!EOF\n)[^\n]*\n)*EOF\n\)"\Z""")
+WRAPPER = re.compile(r"devenv shell(?: --quiet| -q)? -- ")
+# Characters that mean nothing to the shell outside quotes.
+PLAIN = re.compile(r"[A-Za-z0-9 _./:@%+,=-]")
+
+
+def simple_command(command):
+    """The words of command if it is one plain command, optionally behind
+    `devenv shell [--quiet] --`, that the shell runs as written: no operator,
+    expansion, redirect, comment or escape outside quotes, nothing but text
+    inside them. Anything else gets no allow from this hook."""
+    text = command[len(m.group(0)):] if (m := WRAPPER.match(command)) else command
+    m = COMMIT_MESSAGE.match(text)
+    if m:
+        text = m.group(1) + " -" + m.group(2) + "m message"
+    words, word, i = [], None, 0
+    while i < len(text):
+        c = text[i]
+        if c == " ":
+            if word is not None:
+                words.append(word)
+            word = None
+            i += 1
+        elif c == "'":
+            j = text.find("'", i + 1)
+            if j < 0 or "\n" in text[i:j]:
+                return None
+            word = (word or "") + text[i + 1:j]
+            i = j + 1
+        elif c == '"':
+            j = text.find('"', i + 1)
+            if j < 0 or re.search(r'[$`\\\n]', text[i + 1:j]):
+                return None
+            word = (word or "") + text[i + 1:j]
+            i = j + 1
+        elif PLAIN.match(c) and not (c in "=" and word is None):
+            word = (word or "") + c
+            i += 1
+        else:
+            return None
+    if word is not None:
+        words.append(word)
+    if not words or "=" in words[0] or os.path.basename(words[0]) in (
+            "npx", "bunx", "pnpx", "pnpm", "yarn", "npm", "env", "sudo", "xargs", "find", "exec",
+            "command", "eval", "bash", "sh", "zsh", "fish", "timeout", "nice", "nohup", "time"):
+        # A runner or wrapper: the rule names what it runs, not it.
+        return None
+    return normalize_git(words) if words[0] == "git" else words
+
+
+def settings_rules():
+    """Bash ask and deny rules from the user's and the checkout's own
+    settings, which the policy file can't know."""
+    rules = {"ask": [], "deny": []}
+    paths = [os.path.expanduser("~/.claude/settings.json")]
+    project = os.environ.get("CLAUDE_PROJECT_DIR")
+    if project:
+        paths.append(os.path.join(project, ".claude", "settings.local.json"))
+    for path in paths:
+        try:
+            with open(path) as f:
+                permissions = json.load(f).get("permissions", {})
+        except (OSError, ValueError):
+            continue
+        for kind in rules:
+            for rule in permissions.get(kind, []):
+                m = re.match(r"^Bash\((.*)\)$", rule, re.S)
+                if m:
+                    rules[kind].append(m.group(1))
+    return rules
 
 
 def main():
@@ -885,6 +960,8 @@ def main():
     if len(sys.argv) > 1:
         with open(sys.argv[1]) as f:
             policy = json.load(f)
+    for kind, rules in settings_rules().items():
+        policy[kind] = policy.get(kind, []) + rules
     try:
         event = json.load(sys.stdin)
         result = decide(event.get("tool_name", ""), event.get("tool_input") or {}, policy)
