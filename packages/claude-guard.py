@@ -983,6 +983,11 @@ def decide(tool, tool_input, policy):
             and not result.opaque and plain_args(words)
             and (read_only(words) or matches(allow, words))):
         return "allow", "coldlogic guard: a plain command an allow rule names."
+    # Claude Code's own rules would allow a command that one names, though
+    # an option or path in it is one this hook refuses: ask instead.
+    for w in commands:
+        if matches(allow, w) and not plain_args(w):
+            return "ask", f"coldlogic guard: an allow rule names {w[0]}, but not with these arguments."
     if result.wrapped and matches(allow, command.split()):
         # A rule allowing the wrapper itself would let anything through it.
         return "ask", "coldlogic guard: a rule allows the wrapper, not the command inside it."
