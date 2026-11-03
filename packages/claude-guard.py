@@ -38,7 +38,6 @@ DEVENV_FLAGS = {"-q", "--quiet", "-v", "--verbose", "--impure", "--offline",
                 "--refresh-eval-cache", "--no-eval-cache"}
 DEVENV_VALUE_FLAGS = {"-P", "--profile", "--log-format"}
 
-# git's global options, and those that take a value.
 # The only global options stripped before rules match. Any other (--bare,
 # --literal-pathspecs...) stays, so `git <option> <sub>` matches no rule.
 GIT_FLAGS = {"--no-pager", "--no-optional-locks"}
@@ -58,10 +57,9 @@ SECRET_NAMES = (".env", ".dev.vars")
 # Names a glob is tested against, to catch `cat .e*`.
 SECRET_EXAMPLES = (".env", ".env.local", ".env.production", ".dev.vars")
 
-# Stand-ins for a substitution's output in a word. A command holding one
+# Stand-in for a substitution's output in a word. A command holding one
 # gets no allow: the canonical commit message is handled before lexing.
 PLACEHOLDER = "SUBSTITUTED"
-QUOTED_PLACEHOLDER = "QUOTEDSUBSTITUTED"
 
 
 class Unparsable(Exception):
@@ -322,14 +320,16 @@ def quoted_text(body, inner, cmd):
         elif body.startswith("$(", i):
             j = find_close(body, i + 2)
             inner.append(body[i + 2:j - 1])
-            out.append(QUOTED_PLACEHOLDER)
+            cmd.expands = True
+            out.append(PLACEHOLDER)
             i = j
         elif c == "`":
             j = body.find("`", i + 1)
             if j < 0:
                 raise Unparsable("unclosed `")
             inner.append(body[i + 1:j])
-            out.append(QUOTED_PLACEHOLDER)
+            cmd.expands = True
+            out.append(PLACEHOLDER)
             i = j + 1
         elif c == "$":
             cmd.expands = True
@@ -371,8 +371,6 @@ def analyse(text):
             result.commands.append([">" + target])
         if cmd.words:
             words = [v for w in cmd.words for v in expand_braces(w)]
-            if any(QUOTED_PLACEHOLDER in w for w in words):
-                result.opaque = True
             if words:
                 result.add(unwrap(words))
     return result
@@ -699,15 +697,32 @@ def secret_path(word):
     for c in option_values(word.lstrip("<>")):
         if names_secret(c):
             return True
-        cwd, root = WORKING["cwd"], WORKING["root"]
-        if cwd and not c.startswith("-") and os.path.lexists(os.path.join(cwd, c)):
-            # Through a link anywhere in the path (`s/key` with s -> secrets).
-            resolved = os.path.realpath(os.path.join(cwd, c))
-            base = os.path.realpath(root or cwd)
-            if names_secret(resolved) or (resolved.startswith(base + os.sep) and
-                                          names_secret(os.path.relpath(resolved, base))):
+        where = resolve(c)
+        if where is not None:
+            # Through a link anywhere in the path (`s/key` with s -> secrets),
+            # judged by the part inside the project, or the whole path if it
+            # leads out of it.
+            resolved, inside = where
+            if names_secret(inside if inside is not None else resolved):
                 return True
     return False
+
+
+def resolve(path):
+    """(the real path, its part inside the project or None) for a relative
+    path from the cwd, or None when there is no cwd. realpath resolves
+    whatever prefix exists, so a link on the way to a path not yet created
+    counts too."""
+    cwd = WORKING["cwd"]
+    if not cwd or path.startswith("-") or path.startswith("/") or path.startswith("~"):
+        return None
+    resolved = os.path.realpath(os.path.join(cwd, path))
+    base = os.path.realpath(WORKING["root"] or cwd)
+    if resolved == base:
+        return resolved, "."
+    if resolved.startswith(base + os.sep):
+        return resolved, os.path.relpath(resolved, base)
+    return resolved, None
 
 
 # Set by decide: where the command runs, and the project it may stay in.
@@ -721,15 +736,8 @@ def outside(path):
         return False
     if path.startswith("/") or path.startswith("~") or ".." in path.split("/"):
         return True
-    cwd, root = WORKING["cwd"], WORKING["root"]
-    if cwd and root and not path.startswith("-"):
-        # realpath resolves whatever prefix exists, so a link on the way to
-        # a path not yet created counts too.
-        resolved = os.path.realpath(os.path.join(cwd, path))
-        base = os.path.realpath(root)
-        if not (resolved == base or resolved.startswith(base + os.sep)):
-            return True
-    return False
+    where = resolve(path) if WORKING["root"] else None
+    return where is not None and where[1] is None
 
 
 def away_from_root():
@@ -740,14 +748,34 @@ def away_from_root():
     cwd, root = WORKING["cwd"], WORKING["root"]
     if not cwd or not root:
         return False
-    return os.path.realpath(cwd) != os.path.realpath(root)
+    here, base = os.path.realpath(cwd), os.path.realpath(root)
+    return here != base and not own_worktree(here, base)
+
+
+def own_worktree(here, base):
+    """Whether here is the top of one of the project's own git worktrees
+    (EnterWorktree's `.claude/worktrees/<name>`): its `.git` file names a
+    directory under the project's `.git/worktrees`, which names it back."""
+    try:
+        with open(os.path.join(here, ".git")) as f:
+            m = re.match(r"gitdir: (.+)", f.read().strip())
+        if not m:
+            return False
+        gitdir = os.path.realpath(os.path.join(here, m.group(1)))
+        if os.path.dirname(gitdir) != os.path.realpath(os.path.join(base, ".git", "worktrees")):
+            return False
+        with open(os.path.join(gitdir, "gitdir")) as f:
+            return os.path.realpath(os.path.dirname(f.read().strip())) == here
+    except OSError:
+        return False
 
 
 def plain_args(words):
     """Whether no argument, or option value, points outside the project or
     names an output file."""
     for w in words[1:]:
-        if re.match(r"^--(output|files0-from|config)", w) or w in ("-o",):
+        if (long_option(w, "--output", 5) or long_option(w, "--files0-from", 6)
+                or long_option(w, "--config", 5) or w == "-o"):
             # An output file, or configuration that can name a program
             # (`cargo --config build.rustc-wrapper=...`).
             return False
@@ -761,7 +789,6 @@ def plain_args(words):
             # A pathspec glob, or a file of pathspecs: git's `*` crosses `/`
             # and matches dotfiles.
             return False
-
     return True
 
 
@@ -825,10 +852,10 @@ def read_only(words):
     """Whether this is a READ_ONLY command reading only inside the project."""
     if words[0] not in READ_ONLY:
         return False
-    if any(PLACEHOLDER in a or QUOTED_PLACEHOLDER in a for a in words[1:]):
+    if any(PLACEHOLDER in a for a in words[1:]):
         # Its arguments are another command's output.
         return False
-    if words[0] == "grep" and any(re.match(r"^-[A-Za-z]*[rRd]", a) or a.startswith("--r")
+    if words[0] == "grep" and any(re.match(r"^-[A-Za-z0-9]*[rRd]", a) or a.startswith("--r")
                                   or a.startswith("--d") for a in words[1:]):
         return False
     return True
@@ -941,7 +968,7 @@ def decide(tool, tool_input, policy):
 
 # The one compound form allowed: a commit whose message is a quoted heredoc.
 COMMIT_MESSAGE = re.compile(
-    r"""(git commit(?: -[A-Za-z]+| --[a-z-]+)*) -([A-Za-z]*)m "\$\(cat <<'EOF'\n(?:(?!EOF\n)[^\n]*\n)*EOF\n\)"\Z""")
+    r"""(git commit(?: -[A-Za-z]+| --[a-z-]+)*) -([A-Za-z]*)m "\$\(cat <<'EOF'\n(?:(?!EOF)[^\n]*\n)*EOF\n\)"\Z""")
 WRAPPER = re.compile(r"devenv shell(?: --quiet| -q)? -- ")
 # Characters that mean nothing to the shell outside quotes.
 PLAIN = re.compile(r"[A-Za-z0-9 _./:@%+,=-]")
