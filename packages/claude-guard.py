@@ -739,7 +739,12 @@ def names_file(word):
     a search pattern does (`grep -rn '.env' src`): a redirect, a path, a glob,
     or a name that exists. Where the cwd is unknown, every word counts."""
     cwd = WORKING["cwd"]
-    if not cwd or word.startswith(">") or "/" in word or re.search(r"[*?\[{]", word):
+    if word.startswith(">"):
+        return True
+    # A phrase, like a PR title, mentions a file rather than naming one.
+    if re.search(r"\s", word):
+        return False
+    if not cwd or "/" in word or re.search(r"[*?\[{]", word):
         return True
     return any(os.path.lexists(os.path.join(cwd, c)) for c in option_values(word) if c)
 
@@ -793,6 +798,18 @@ def resolve(path):
 
 # Set by decide: where the command runs, and the project it may stay in.
 WORKING = {"cwd": None, "root": None}
+
+
+def scratch(path):
+    """Whether a path is in a temporary directory, where a session keeps its
+    scratch files (a commit message, a diff's other side)."""
+    if not path.startswith("/"):
+        return False
+    real = os.path.realpath(path)
+    roots = {"/tmp", "/private/tmp", "/private/var/folders"}
+    if os.environ.get("TMPDIR"):
+        roots.add(os.path.realpath(os.environ["TMPDIR"]))
+    return any(real == r or real.startswith(r.rstrip("/") + "/") for r in roots)
 
 
 def outside(path):
@@ -880,7 +897,7 @@ def plain_args(words):
             return False
         if prog == "cargo" and (w.startswith("-Z") or w.startswith("+")):
             return False
-        if any(outside(c) for c in option_values(w)):
+        if any(outside(c) and not scratch(c) for c in option_values(w)):
             return False
         if prog == "git" and long_option(w, "--pathspec-from-file", 7):
             # A file of pathspecs, whose names aren't checked.
@@ -902,6 +919,48 @@ def reads_environment(words, w):
     return bool(re.match(r"^-[A-Za-z]*[qt]", w)) and "env" in value.lower()
 
 
+# A template to copy from, which holds no secrets: `.env.example`,
+# `.env.local.example`, `.env.dist`.
+TEMPLATE = re.compile(r"[-_.](example|sample|template|dist)$")
+
+# Programs that only mention the files they are given. Any other that names
+# a secrets file is taken to read or write it.
+SECRET_MENTIONS = {"ls", "test", "[", "[[", "echo", "printf", "stat"}
+
+
+def secret_named(words):
+    """The word by which a command names a secrets file in a way that could
+    read or write it, or None."""
+    prog = program(words[0])
+    found = None
+    pattern_seen = False
+    for k, w in enumerate(words):
+        if w.startswith(">"):
+            if secret_path(w):
+                return w
+            continue
+        if k == 0:
+            continue
+        # grep's first operand is its pattern, unless -e or -f gives one.
+        if prog in ("grep", "rg") and not pattern_seen and not w.startswith("-"):
+            pattern_seen = True
+            if not any(x in ("-e", "-f") or x.startswith(("--regexp", "--file")) for x in words[1:k]):
+                continue
+        if names_file(w) and secret_path(w):
+            found = found or w
+    if not found:
+        return None
+    if prog in SECRET_MENTIONS:
+        return None
+    lowered = [w.lower() for w in words]
+    if prog == "git" and ("check-ignore" in lowered or "rm" in lowered):
+        return None
+    # wrangler reads .dev.vars itself; pointing it at one is ordinary.
+    if prog == "wrangler" and "dev" in lowered:
+        return None
+    return found
+
+
 def names_secret(path):
     """Whether a path names a secrets file. Case is folded as macOS's
     filesystem folds it (`ſ` is `s`). git pathspec magic (`:(glob)x`, `:/x`,
@@ -918,11 +977,10 @@ def names_secret(path):
         return False
     name = os.path.basename(path.rstrip("/"))
     for secret in SECRET_NAMES:
-        if name == secret or (name.startswith(secret + ".") and name not in (
-                secret + ".example", secret + ".sample", secret + ".template")):
+        if name == secret or (name.startswith(secret + ".") and not TEMPLATE.search(name)):
             return True
     # Other spellings of an env file: .env-production, .env_local.
-    if re.match(r"^\.env[-_].+$", name) and not re.search(r"[-_.](example|sample|template)$", name):
+    if re.match(r"^\.env[-_].+$", name) and not TEMPLATE.search(name):
         return True
     # A glob reaches a dotfile only if it starts with a dot itself, or a zsh
     # qualifier (`*(D)`) says so.
@@ -1049,9 +1107,9 @@ def decide(tool, tool_input, policy):
             reason = forbidden(words)
             if reason:
                 return "deny", f"Not allowed in a session: {reason}."
-            for w in words:
-                if names_file(w) and secret_path(w):
-                    return "deny", f"{w.lstrip('>')} is a secrets file. Change .env.example instead, and say what the real file needs."
+            named = secret_named(words)
+            if named:
+                return "deny", f"{named.lstrip('>')} is a secrets file. Change .env.example instead, and say what the real file needs."
     except Unparsable as e:
         # A command this can't follow gets no automatic allow, and a user
         # decides it, unless a rough reading finds something to deny.

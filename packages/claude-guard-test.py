@@ -42,7 +42,7 @@ BASH = [
     ("wrangler deploy --env preview", DENY),
     ("nix develop", DENY),
     ("echo $(git reset --hard)", DENY),
-    ("cat $(echo .env)", DENY),
+    ("cat $(echo .env)", NONE),
     ("git log $(rm -rf x)", NONE),
     ("git status && git push -f", DENY),
     ("gh pr merge 12 --squash", DENY),
@@ -237,6 +237,21 @@ BASH = [
     ("cat .env_local", DENY),
     ("cat .envrc", ALLOW),
     ("cd sub && git status", NONE),
+    ("git commit -F /private/tmp/claude-501/scratch/msg.txt", ALLOW),
+    ("git diff --no-index /tmp/a /tmp/b", ALLOW),
+    ("git diff --no-index /etc/a /tmp/b", ASK),
+    # Mentioning a secrets file without reading it.
+    ("echo .dev.vars >> .gitignore", NONE),
+    ("git check-ignore -v .dev.vars", NONE),
+    ("git rm --cached .env", NONE),
+    ("ls -la .dev.vars", ALLOW),
+    ("test -f .dev.vars && echo yes", NONE),
+    ("grep -n '.dev.vars' .gitignore", ALLOW),
+    ("grep -n .gitignore -e .dev.vars", DENY),
+    ("devenv shell --quiet -- wrangler dev --env-file .dev.vars", ALLOW),
+    ("gh-app pr create --title \"fix: stop reading config/.dev.vars\" --body x", NONE),
+    ("git commit -m \"chore: ignore apps/api/.env\"", ALLOW),
+    ("git add -f .dev.vars", DENY),
     # From the productivity review.
     ("gh-app pr create --title x --body \"$(cat <<'EOF'\nThis doesn't touch .env or git push --force.\nEOF\n)\"", NONE),
     ("devenv shell --quiet -- cargo test 2>&1", ALLOW),
@@ -264,7 +279,7 @@ BASH = [
     ("echo X=1 >> .env", DENY),
     ("cat .dev.vars", DENY),
     ("devenv shell -- cat ./.dev.vars", DENY),
-    ("ls secrets/", DENY),
+    ("ls secrets/", ALLOW),
     ("cat .env.example", ALLOW),
     ("cat .dev.vars.example", ALLOW),
     # Allowed when every command inside matches.
@@ -308,6 +323,10 @@ FILES = [
     ("Glob", {"pattern": "**/.env*"}, NONE),
     ("Read", {"file_path": "/p/.envrc"}, NONE),
     ("Read", {"file_path": "/p/.env.sample"}, NONE),
+    ("Read", {"file_path": "/p/.env.local.example"}, NONE),
+    ("Edit", {"file_path": "/p/.dev.vars.local.example"}, NONE),
+    ("Read", {"file_path": "/p/.env.dist"}, NONE),
+    ("Read", {"file_path": "/p/.env.local"}, DENY),
 ]
 
 failures = 0
