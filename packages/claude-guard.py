@@ -1000,12 +1000,11 @@ def decide(tool, tool_input, policy):
     for w in commands:
         if matches(allow, w) and not plain_args(w):
             return "ask", f"coldlogic guard: an allow rule names {w[0]}, but not with these arguments."
-    # Whenever this hook doesn't allow a command but any allow rule, from the
-    # module or the user's own settings, would match it or a command inside
-    # it, ask: left silent, Claude Code's own rules would allow it.
-    every_allow = allow + [rule_regex(r) for r in policy.get("settings_allow", [])]
-    if any(matches(every_allow, w) for w in ruled) or any(r.match(checked) for r in every_allow):
-        return "ask", "coldlogic guard: an allow rule covers this, but the guard can't vouch for it."
+    if result.wrapped and matches(allow, command.split()):
+        # A rule allowing the wrapper itself would let anything through it.
+        return "ask", "coldlogic guard: a rule allows the wrapper, not the command inside it."
+    # Anything else is left to Claude Code's own rules, as it would be
+    # without this hook.
     return None
 
 
@@ -1061,7 +1060,7 @@ def simple_command(command):
 def settings_rules():
     """Bash ask and deny rules from the user's and the checkout's own
     settings, which the policy file can't know."""
-    rules = {"ask": [], "deny": [], "settings_allow": []}
+    rules = {"ask": [], "deny": []}
     config = os.environ.get("CLAUDE_CONFIG_DIR") or os.path.expanduser("~/.claude")
     paths = [os.path.join(config, "settings.json"),
              "/Library/Application Support/ClaudeCode/managed-settings.json",
@@ -1077,7 +1076,7 @@ def settings_rules():
         except (OSError, ValueError, AttributeError):
             continue
         for kind in rules:
-            for rule in permissions.get("allow" if kind == "settings_allow" else kind) or []:
+            for rule in permissions.get(kind) or []:
                 if rule == "Bash":
                     rules[kind].append("*")
                 m = re.match(r"^Bash\((.*)\)$", str(rule), re.S)
