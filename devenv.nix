@@ -50,6 +50,20 @@ in
             "gh-app issue create *"
             "openspec *"
           ];
+          # Covered by the allow rules above, but they throw away work the way
+          # `git reset --hard` does, so a user decides.
+          rules.Bash.ask = [
+            "git switch -f *"
+            "git switch --force *"
+            "git switch --discard-changes *"
+            "git switch * -f"
+            "git switch * --discard-changes"
+            "git branch -D *"
+            "git branch * -D"
+            "git branch --delete --force *"
+            "git worktree remove -f *"
+            "git worktree remove --force *"
+          ];
           # The guard hook denies force pushes, `git reset --hard`, deploys and
           # a flake's dev shell however they are spelled or wrapped. These
           # catch the plain spellings if the hook ever doesn't run. A trailing
