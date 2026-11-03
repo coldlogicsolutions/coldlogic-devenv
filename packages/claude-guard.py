@@ -255,6 +255,8 @@ def lex(text):
             j = text.find(")", i)
             if j < 0:
                 raise Unparsable("unclosed glob qualifier")
+            if re.search(r"[$`'\"]", text[i:j]):
+                raise Unparsable("a glob qualifier with quotes or a substitution")
             cmd.expands = True
             append(text[i:j + 1])
             i = j + 1
@@ -521,6 +523,13 @@ def unwrap(words):
                 # The runner hands this to a shell.
                 result.opaque = True
                 result.add(analyse(script))
+            elif head in ("npx", "npm"):
+                # npm's option parser takes -c anywhere: check its value as a
+                # script too.
+                for k in range(i, len(words) - 1):
+                    if words[k] in ("-c", "--call"):
+                        result.opaque = True
+                        result.add(analyse(words[k + 1]))
             words, result.wrapped = words[i:], True
         elif head == "cd" or head == "pushd" or head == "popd":
             # Later commands run somewhere else, so their rules and paths
@@ -681,15 +690,15 @@ def forbidden_from(head, args):
         lowered = [a.lower() for a in args]
         if "alias" in lowered:
             return "gh-app aliases could hide an approval"
-        if "api" in lowered:
-            text = " ".join(lowered)
-            if "--input" in text or "=@" in text or re.search(r"(^| )@", text):
-                raise Unparsable("gh-app api reading its request from a file")
         if "review" in lowered and any(
                 a.startswith("--approve") or re.match(r"^-[A-Za-z]*a[A-Za-z]*$", a) for a in args):
             return "the App approving a PR"
-        if "api" in lowered and ("approve" in " ".join(lowered) or "/reviews" in " ".join(lowered)):
-            return "the App reviewing a PR through gh-app api"
+        if "api" in lowered:
+            text = " ".join(lowered)
+            if "approve" in text or "/reviews" in text:
+                return "the App reviewing a PR through gh-app api"
+            if "--input" in text or "=@" in text or re.search(r"(^| )@", text):
+                raise Unparsable("gh-app api reading its request from a file")
     return None
 
 

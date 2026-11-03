@@ -184,6 +184,9 @@ BASH = [
     ("gh-app api graphql --input q.json", ASK),
     ("cat *(D)", DENY),
     ("cat *(.)", NONE),
+    ("cat *($(git push --force))", DENY),
+    ("gh-app api repos/o/r/pulls/1/reviews --input x.json", DENY),
+    ("npx wrangler -c 'git push --force'", DENY),
     # Ordinary pushes and resets are left to the rules.
     ("git push -u origin feat", ASK),
     ("git reset --soft HEAD~1", NONE),
