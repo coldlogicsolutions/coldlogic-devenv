@@ -340,6 +340,8 @@ with tempfile.TemporaryDirectory() as root:
         (root, "git add --pathspec-from=list.txt", None),
         (root, "cat s/key", "deny"),
         (root, "touch s/newkey", "deny"),
+        (root, f"cat {root}/notes.txt", "deny"),
+        (root, "wc --outp=x", None),
         (wt, "devenv shell --quiet -- scripts/check.sh", "allow"),
         (fake, "devenv shell --quiet -- scripts/check.sh", "ask"),
         (root, "git diff --no-index a b", "allow"),
@@ -358,6 +360,6 @@ with tempfile.TemporaryDirectory() as root:
             print(f"FAIL {command!r} in {cwd}: expected {expected}, got {got}")
     guard.WORKING.update(cwd=None, root=None)
 
-total = len(BASH) + len(FILES) + 22
+total = len(BASH) + len(FILES) + 24
 print(f"{total - failures}/{total} passed")
 sys.exit(1 if failures else 0)
