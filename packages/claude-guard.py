@@ -58,12 +58,10 @@ SECRET_NAMES = (".env", ".dev.vars")
 # Names a glob is tested against, to catch `cat .e*`.
 SECRET_EXAMPLES = (".env", ".env.local", ".env.production", ".dev.vars")
 
-# Stand-ins for a substitution's output: unquoted, it is split and globbed,
-# so the command gets no allow; quoted, it is one word, allowed only as a
-# commit message (`git commit -m "$(cat <<'EOF' ...)"`).
+# Stand-ins for a substitution's output in a word. A command holding one
+# gets no allow: the canonical commit message is handled before lexing.
 PLACEHOLDER = "SUBSTITUTED"
 QUOTED_PLACEHOLDER = "QUOTEDSUBSTITUTED"
-MESSAGE_FLAG = re.compile(r"^(-[A-Za-z]*m|--message)$")
 
 
 class Unparsable(Exception):
@@ -373,25 +371,11 @@ def analyse(text):
             result.commands.append([">" + target])
         if cmd.words:
             words = [v for w in cmd.words for v in expand_braces(w)]
-            for k, w in enumerate(words):
-                if QUOTED_PLACEHOLDER in w and not (
-                        w == QUOTED_PLACEHOLDER and k > 0 and MESSAGE_FLAG.match(words[k - 1])
-                        and commits(words[:k])):
-                    result.opaque = True
+            if any(QUOTED_PLACEHOLDER in w for w in words):
+                result.opaque = True
             if words:
                 result.add(unwrap(words))
     return result
-
-
-def commits(words):
-    """Whether these words are `git commit` or `git tag`, maybe wrapped: the
-    only commands whose -m takes a message."""
-    try:
-        k = words.index("git")
-    except ValueError:
-        return False
-    rest = [w for w in words[k + 1:] if not w.startswith("-")]
-    return bool(rest) and rest[0] in ("commit", "tag")
 
 
 def expand_braces(word, limit=64):
@@ -503,18 +487,13 @@ def unwrap(words):
             words, result.wrapped = inner, True
         elif head in ("npx", "bunx", "pnpx") or (
                 head in ("pnpm", "yarn", "npm") and len(words) > 1 and words[1] in ("exec", "dlx", "x")):
-            # Only the runner's own options, before the command: a `-c` after
-            # it is the command's (`wrangler deploy -c wrangler.toml`).
+            # The runner's own options come first; the command follows them.
             i = 1 if head in ("npx", "bunx", "pnpx") else 2
-            script = None
             while i < len(words) and words[i].startswith("-"):
                 w = words[i]
                 if w in ("-c", "--call", "--shell-mode"):
-                    script = words[i + 1] if i + 1 < len(words) else ""
                     i += 2
                     continue
-                if w.startswith("--call="):
-                    script = w.split("=", 1)[1]
                 if w in ("-p", "--package") or w.startswith("--package="):
                     # Another package's binary: the rule names a different one.
                     result.opaque = True
@@ -720,9 +699,13 @@ def secret_path(word):
     for c in option_values(word.lstrip("<>")):
         if names_secret(c):
             return True
-        cwd = WORKING["cwd"]
-        if cwd and not c.startswith("-") and os.path.islink(os.path.join(cwd, c)):
-            if names_secret(os.path.realpath(os.path.join(cwd, c))):
+        cwd, root = WORKING["cwd"], WORKING["root"]
+        if cwd and not c.startswith("-") and os.path.lexists(os.path.join(cwd, c)):
+            # Through a link anywhere in the path (`s/key` with s -> secrets).
+            resolved = os.path.realpath(os.path.join(cwd, c))
+            base = os.path.realpath(root or cwd)
+            if names_secret(resolved) or (resolved.startswith(base + os.sep) and
+                                          names_secret(os.path.relpath(resolved, base))):
                 return True
     return False
 
@@ -749,22 +732,15 @@ def outside(path):
     return False
 
 
-def foreign_repository():
-    """Whether git, run in the cwd, could find a repository other than the
-    project's own: the cwd is outside the project, or a directory between
-    them is laid out like a bare repository, whose config git would read."""
+def away_from_root():
+    """Whether the command runs anywhere but the project root. Elsewhere a
+    relative program is another file, and git or gh-app may find another
+    repository, with its own config, in ways too many to list (a nested
+    .git, a bare layout, a worktree's commondir)."""
     cwd, root = WORKING["cwd"], WORKING["root"]
     if not cwd or not root:
         return False
-    here, base = os.path.realpath(cwd), os.path.realpath(root)
-    if not (here == base or here.startswith(base + os.sep)):
-        return True
-    while here != base:
-        if os.path.lexists(os.path.join(here, ".git")) or all(
-                os.path.exists(os.path.join(here, n)) for n in ("HEAD", "objects", "refs")):
-            return True
-        here = os.path.dirname(here)
-    return False
+    return os.path.realpath(cwd) != os.path.realpath(root)
 
 
 def plain_args(words):
@@ -780,13 +756,12 @@ def plain_args(words):
         if any(outside(c) for c in option_values(w)):
             return False
         if os.path.basename(words[0]) == "git" and (
-                w.startswith("--pathspec-from-file") or
+                long_option(w, "--pathspec-from-file", 7) or
                 any(re.search(r"[*?\[]", c) for c in option_values(w) if not c.startswith("-"))):
             # A pathspec glob, or a file of pathspecs: git's `*` crosses `/`
             # and matches dotfiles.
             return False
-    if os.path.basename(words[0]) == "git" and foreign_repository():
-        return False
+
     return True
 
 
@@ -940,7 +915,7 @@ def decide(tool, tool_input, policy):
         return "deny", "Denied by a deny rule."
     # Rules also see git with every global option dropped, so an inert one
     # (`git --literal-pathspecs push`) doesn't dodge them.
-    ruled = commands + [normalize_git_loosely(w) for w in commands if w[0] == "git"]
+    ruled = commands + [normalize_git_loosely(w) for w in commands if os.path.basename(w[0]) == "git"]
     for words in ruled:
         if matches(deny, words):
             return "deny", f"Denied by this project's rules: {' '.join(words)}"
@@ -952,7 +927,7 @@ def decide(tool, tool_input, policy):
 
     allow = [rule_regex(r) for r in policy.get("allow", [])]
     # `checked` has the commit message's stand-in already.
-    words = simple_command(checked)
+    words = simple_command(checked) if not away_from_root() else None
     # The plain reading and the full analysis must agree on one command.
     if (words is not None and commands == [words] and len(result.commands) == 1
             and not result.opaque and plain_args(words)
