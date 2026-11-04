@@ -53,6 +53,10 @@ Copy `templates/update-coldlogic-devenv.yaml` to `.github/workflows/` and regist
 
 `rust-gui` (proxcarta) and `node-web` (paintinator, voxcarta) are added when those projects move to devenv.
 
+## Working on the module
+
+This repository's own `devenv.yaml` makes `devenv.nix` here its shell too, so sessions working on the module run under the settings, guard hook and plugin it gives every project.
+
 ## Staying current
 
 Each project pins the module in `devenv.lock`, so CI images keyed on that file stay stable. The update workflow proposes the update as a PR, weekly and whenever the module's main moves, and the shell warns when the pin is behind:
