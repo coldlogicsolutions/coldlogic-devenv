@@ -932,6 +932,9 @@ def secret_named(words):
     """The word by which a command names a secrets file in a way that could
     read or write it, or None."""
     prog = program(words[0])
+    if prog == "git" and normalize_git_loosely(words)[1:2] == ["grep"]:
+        # `git grep` takes its pattern as grep does.
+        words, prog = normalize_git_loosely(words)[1:], "grep"
     found = None
     pattern_seen = False
     for k, w in enumerate(words):

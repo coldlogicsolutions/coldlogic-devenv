@@ -58,11 +58,18 @@ in
             "git switch --discard-changes *"
             "git switch * -f"
             "git switch * --discard-changes"
+            "git switch -fc *"
             "git branch -D *"
             "git branch * -D"
             "git branch --delete --force *"
+            "git branch -f *"
+            "git branch --force *"
+            "git branch * -f"
+            "git branch * --force"
             "git worktree remove -f *"
             "git worktree remove --force *"
+            "git worktree remove * -f"
+            "git worktree remove * --force"
           ];
           # The guard hook denies force pushes, `git reset --hard`, deploys and
           # a flake's dev shell however they are spelled or wrapped. These
