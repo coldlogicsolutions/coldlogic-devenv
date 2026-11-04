@@ -1,0 +1,16 @@
+# yaml-language-server: $schema=https://devenv.sh/devenv.schema.json
+# This repository's own shell: devenv.nix here is the module itself, so
+# working on the module runs under the same Claude Code settings, guard hook
+# and plugin as every project that imports it. The inputs are the ones the
+# module asks importing projects to declare.
+inputs:
+  git-hooks:
+    url: github:cachix/git-hooks.nix
+  nixpkgs:
+    url: github:NixOS/nixpkgs/nixpkgs-unstable
+  rust-overlay:
+    url: github:oxalica/rust-overlay
+    inputs:
+      nixpkgs:
+        follows: nixpkgs
+profile: developer
