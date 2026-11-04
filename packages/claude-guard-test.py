@@ -252,6 +252,8 @@ BASH = [
     ("gh-app pr create --title \"fix: stop reading config/.dev.vars\" --body x", NONE),
     ("git commit -m \"chore: ignore apps/api/.env\"", ALLOW),
     ("git add -f .dev.vars", DENY),
+    ("git log -p rm -- .dev.vars", DENY),
+    ("devenv shell --quiet -- wrangler deploy --env dev --env-file .dev.vars", DENY),
     # From the productivity review.
     ("gh-app pr create --title x --body \"$(cat <<'EOF'\nThis doesn't touch .env or git push --force.\nEOF\n)\"", NONE),
     ("devenv shell --quiet -- cargo test 2>&1", ALLOW),

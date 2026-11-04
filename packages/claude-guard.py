@@ -952,11 +952,11 @@ def secret_named(words):
         return None
     if prog in SECRET_MENTIONS:
         return None
-    lowered = [w.lower() for w in words]
-    if prog == "git" and ("check-ignore" in lowered or "rm" in lowered):
+    first = next((w for w in words[1:] if not w.startswith("-")), None)
+    if prog == "git" and normalize_git_loosely(words)[1:2] in (["rm"], ["check-ignore"]):
         return None
     # wrangler reads .dev.vars itself; pointing it at one is ordinary.
-    if prog == "wrangler" and "dev" in lowered:
+    if prog == "wrangler" and first == "dev":
         return None
     return found
 
