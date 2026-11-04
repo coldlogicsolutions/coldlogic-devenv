@@ -1,0 +1,65 @@
+# Asks every repository in the organization to update its coldlogic-devenv
+# pin now, rather than at its weekly run: runs whenever main moves, or by
+# hand. Each repository whose update workflow listens for the
+# `coldlogic-devenv-updated` event (templates/update-coldlogic-devenv.yaml)
+# runs it; one without the workflow is skipped.
+#
+# Sends a repository_dispatch event, which needs Contents write, a permission
+# the coldlogic-ai App already holds. Starting the workflow directly would
+# need Actions write.
+name: Dispatch coldlogic-devenv updates
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: dispatch-updates
+  cancel-in-progress: true
+
+jobs:
+  dispatch:
+    # Only main may use the App key: the environment enforces that, and this
+    # skips the job instead of failing it.
+    if: github.ref == 'refs/heads/main'
+    environment: coldlogic-ai
+    runs-on: ubuntu-latest
+    steps:
+      # Every repository the App is installed on (all of them), but only
+      # Contents write: what sending the event needs.
+      - id: app-token
+        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
+        with:
+          client-id: ${{ secrets.COLDLOGIC_AI_CLIENT_ID }}
+          private-key: ${{ secrets.COLDLOGIC_AI_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          permission-contents: write
+
+      - name: Send the event to every repository with the update workflow
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          WORKFLOW: .github/workflows/update-coldlogic-devenv.yaml
+        run: |
+          set -euo pipefail
+          repos=$(gh api --paginate installation/repositories \
+            --jq '.repositories[] | select(.archived | not) | .full_name' | sort)
+          failed=0
+          for repo in $repos; do
+            if ! err=$(gh api "repos/$repo/contents/$WORKFLOW" --silent 2>&1); then
+              if [[ $err == *"HTTP 404"* ]]; then
+                echo "$repo: no update workflow, skipped"
+              else
+                echo "::error::$repo: checking for the update workflow failed: $err"
+                failed=1
+              fi
+            elif gh api -X POST "repos/$repo/dispatches" -f event_type=coldlogic-devenv-updated --silent; then
+              echo "$repo: sent"
+            else
+              echo "::error::$repo: sending the event failed"
+              failed=1
+            fi
+          done
+          exit "$failed"

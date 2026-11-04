@@ -47,13 +47,14 @@ Copy `templates/update-coldlogic-devenv.yaml` to `.github/workflows/` and regist
 | `profiles/rust-lib` | Rust with wasm32 in `build`; the slimmed `ci` toolchain; rust-analyzer, docs and the check-only `rustfmt` and `clippy` hooks in `developer` |
 | `profiles/rust-worker` | `rust-lib` plus `worker-build`, `wasm-pack`, and the `cloudflare` plugin |
 | `packages/gh-app.nix` | `gh-app <gh args>`: one `gh` call as `coldlogic-ai[bot]`. The key path comes from `GH_APP_KEY` (default `~/.config/github/coldlogic-ai.pem`) |
-| `templates/` | The scheduled workflow that proposes `devenv update coldlogic-devenv` as a PR |
+| `templates/` | The workflow that proposes `devenv update coldlogic-devenv` as a PR, weekly and whenever main moves |
+| `.github/workflows/dispatch-updates.yaml` | On every push to main, sends each repository with that workflow the `coldlogic-devenv-updated` event, so it updates now |
 
 `rust-gui` (proxcarta) and `node-web` (paintinator, voxcarta) are added when those projects move to devenv.
 
 ## Staying current
 
-Each project pins the module in `devenv.lock`, so CI images keyed on that file stay stable. The weekly workflow proposes the update as a PR, and the shell warns when the pin is behind:
+Each project pins the module in `devenv.lock`, so CI images keyed on that file stay stable. The update workflow proposes the update as a PR, weekly and whenever the module's main moves, and the shell warns when the pin is behind:
 
 ```
 coldlogic-devenv is behind (locked 1a2b3c4, latest 5d6e7f8); run: devenv update coldlogic-devenv
