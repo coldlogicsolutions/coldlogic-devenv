@@ -47,6 +47,10 @@ in
             "gh-app pr view *"
             "gh-app pr checks *"
             "gh-app pr create *"
+            # gh-app merges only the App's own PRs, approved at their head
+            # commit (packages/gh-app.sh); GitHub's ruleset requires the
+            # approval as well.
+            "gh-app pr merge *"
             "gh-app issue create *"
             "openspec *"
           ];

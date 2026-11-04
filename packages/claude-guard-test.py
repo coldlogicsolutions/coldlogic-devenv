@@ -252,6 +252,8 @@ BASH = [
     ("gh-app pr create --title \"fix: stop reading config/.dev.vars\" --body x", NONE),
     ("git commit -m \"chore: ignore apps/api/.env\"", ALLOW),
     ("git add -f .dev.vars", DENY),
+    ("gh-app pr merge 12 --squash", NONE),
+    ("gh pr merge 12 --squash", DENY),
     ("git grep -n '.dev.vars'", NONE),
     ("git log -p rm -- .dev.vars", DENY),
     ("devenv shell --quiet -- wrangler deploy --env dev --env-file .dev.vars", DENY),

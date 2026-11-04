@@ -47,7 +47,7 @@ Copy `templates/update-coldlogic-devenv.yaml` to `.github/workflows/` and regist
 | `packages/claude-guard.py` | The PreToolUse guard hook: denies force pushes, hard resets, deploys, a flake's dev shell, merges or approvals with the user's own `gh` credentials, approvals by the App, and secrets files (`.env`, `.dev.vars` and their variants, not `.example`), however a command spells or wraps them. It allows a command only when it is one plain command, optionally behind `devenv shell --`, that an allow rule names; everything else goes to Claude Code's own rules. A backstop, not a boundary. Its cases in `claude-guard-test.py` run when it builds. |
 | `profiles/rust-lib` | Rust with wasm32 in `build`; the slimmed `ci` toolchain; rust-analyzer, docs and the check-only `rustfmt` and `clippy` hooks in `developer` |
 | `profiles/rust-worker` | `rust-lib` plus `worker-build`, `wasm-pack`, and the `cloudflare` plugin |
-| `packages/gh-app.nix` | `gh-app <gh args>`: one `gh` call as `coldlogic-ai[bot]`. The key path comes from `GH_APP_KEY` (default `~/.config/github/coldlogic-ai.pem`) |
+| `packages/gh-app.nix` | `gh-app <gh args>`: one `gh` call as `coldlogic-ai[bot]`. `gh-app pr merge` merges only the App's own PRs, approved at their head commit, and refuses `--admin`. The key path comes from `GH_APP_KEY` (default `~/.config/github/coldlogic-ai.pem`) |
 | `templates/` | The workflow that proposes `devenv update coldlogic-devenv` as a PR, weekly and whenever main moves |
 | `.github/workflows/dispatch-updates.yaml` | On every push to main, sends each repository with that workflow the `coldlogic-devenv-updated` event, so it updates now |
 
