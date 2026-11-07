@@ -6,6 +6,13 @@
 let
   gh-app = import ./packages/gh-app.nix { inherit pkgs; };
   claude-guard = import ./packages/claude-guard.nix { inherit pkgs; };
+  # Where gpg keeps its sockets and lock files, so commits can be signed
+  # inside the sandbox. devenv evaluates impurely, so this is the user's.
+  gnupgHome =
+    let
+      set = builtins.getEnv "GNUPGHOME";
+    in
+    if set != "" then set else "${builtins.getEnv "HOME"}/.gnupg";
 in
 {
   profiles.developer.module =
@@ -201,6 +208,18 @@ in
             denyWrite = [
               "${config.devenv.root}/.env"
               "${config.devenv.root}/**/.env"
+              # gpg needs to write its lock files in its home (allowWrite),
+              # but not its configuration or the private keys, which the
+              # agent holds outside the sandbox.
+              "${gnupgHome}/gpg.conf"
+              "${gnupgHome}/gpg-agent.conf"
+              "${gnupgHome}/common.conf"
+              "${gnupgHome}/dirmngr.conf"
+              "${gnupgHome}/scdaemon.conf"
+              "${gnupgHome}/gpgsm.conf"
+              "${gnupgHome}/tpm2daemon.conf"
+              "${gnupgHome}/sshcontrol"
+              "${gnupgHome}/private-keys-v1.d"
             ];
             # What `devenv shell` and the toolchains inside it write to.
             allowWrite = [
@@ -219,12 +238,20 @@ in
               "~/.cache/worker-build"
               "~/Library/Caches/.wasm-pack"
               "~/.cache/.wasm-pack"
+              # gpg's lock files, for signed commits (see denyWrite).
+              gnupgHome
             ];
           };
           network = {
             # `devenv shell` needs the daemon, and a build it runs happens
             # outside this sandbox, so this limits a mistake, not an attacker.
-            allowUnixSockets = [ "/nix/var/nix/daemon-socket/socket" ];
+            allowUnixSockets = [
+              "/nix/var/nix/daemon-socket/socket"
+              # Signs commits. The agent, outside the sandbox, holds the key
+              # and asks for the passphrase through pinentry when its cache
+              # has expired.
+              "${gnupgHome}/S.gpg-agent"
+            ];
             # `wrangler dev` and the integration suites listen on localhost.
             allowLocalBinding = true;
             allowedDomains = [
