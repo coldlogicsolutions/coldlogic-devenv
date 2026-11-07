@@ -35,11 +35,16 @@ if ! command -v yq >/dev/null || ! yq --version 2>&1 | grep -q mikefarah; then
     if [[ ! -f $self ]]; then # piped from curl: fetch a copy to run
       self=$(mktemp "${TMPDIR:-/tmp}/adopt.XXXXXX")
       curl -fsSL "$raw/scripts/adopt.sh" -o "$self"
+      # exec leaves no trap here, so the re-executed copy removes itself.
+      export COLDLOGIC_ADOPT_TMP=$self
     fi
     exec nix shell nixpkgs#yq-go --command bash "$self" "$@"
   fi
   echo "adopt: needs yq-go (mikefarah/yq): nix profile install nixpkgs#yq-go" >&2
   exit 1
+fi
+if [[ -n ${COLDLOGIC_ADOPT_TMP:-} && ${BASH_SOURCE[0]:-} == "$COLDLOGIC_ADOPT_TMP" ]]; then
+  trap 'rm -f -- "$COLDLOGIC_ADOPT_TMP"' EXIT
 fi
 
 profile=auto
@@ -114,7 +119,7 @@ ensure_input() { # name, yq value
     added_inputs+=("$1")
   fi
 }
-ensure_input nixpkgs '{"url": "github:cachix/devenv-nixpkgs/rolling"}'
+ensure_input nixpkgs '{"url": "github:NixOS/nixpkgs/nixpkgs-unstable"}'
 # coldlogic-devenv uses these, and devenv doesn't take inputs from an
 # imported module, so the project declares them.
 ensure_input git-hooks '{"url": "github:cachix/git-hooks.nix"}'
@@ -190,9 +195,17 @@ fi
 # .devenv/adopt-backup/ so their settings can be ported.
 for f in .claude/settings.json .mcp.json .pre-commit-config.yaml; do
   if git ls-files --error-unmatch -- "$f" >/dev/null 2>&1; then
-    git rm --cached -q -- "$f"
-    mkdir -p ".devenv/adopt-backup/$(dirname "$f")"
-    [[ -e $f && ! -L $f ]] && mv -- "$f" ".devenv/adopt-backup/$f"
+    # Backed up first: if that fails the file stays tracked, so a rerun
+    # tries again rather than skipping it.
+    if [[ -e $f && ! -L $f ]]; then
+      if ! { mkdir -p ".devenv/adopt-backup/$(dirname "$f")" && mv -- "$f" ".devenv/adopt-backup/$f"; }; then
+        note "$f is tracked but couldn't be moved to .devenv/adopt-backup/; move it and \`git rm --cached $f\`, then port its settings into devenv.nix."
+        continue
+      fi
+    fi
+    if ! git rm --cached -q -- "$f"; then
+      note "$f couldn't be untracked; run \`git rm --cached $f\`."
+    fi
     changed+=("$f (untracked)")
     case $f in
       .pre-commit-config.yaml) note "$f was tracked; git-hooks now generates it. Port any hooks it had to git-hooks.hooks in devenv.nix (old copy: .devenv/adopt-backup/$f)." ;;
@@ -208,7 +221,15 @@ if ((workflow)) && [[ ! -f $wf ]]; then
   if [[ -n $here ]]; then
     cp "$here/templates/update-coldlogic-devenv.yaml" "$wf"
   else
-    curl -fsSL "$raw/templates/update-coldlogic-devenv.yaml" -o "$wf"
+    # Downloaded beside it and moved in whole, so a failed download leaves
+    # nothing for a rerun to skip.
+    tmp=$(mktemp "$wf.XXXXXX")
+    if ! curl -fsSL "$raw/templates/update-coldlogic-devenv.yaml" -o "$tmp"; then
+      rm -f -- "$tmp"
+      echo "adopt: couldn't download the update workflow" >&2
+      exit 1
+    fi
+    mv -- "$tmp" "$wf"
   fi
   changed+=("$wf (new)")
 fi
@@ -226,10 +247,20 @@ if [[ -n $default_branch && $default_branch != origin/main ]]; then
 fi
 
 # --------------------------------------------------------------- the lock --
+# Whether devenv.yaml declares an input devenv.lock doesn't have, as when an
+# earlier run added inputs but couldn't lock them.
+unlocked_inputs() {
+  local locked
+  locked=$(yq -p json -o y '.nodes.root.inputs // {} | keys | .[]' devenv.lock 2>/dev/null) || return 0
+  while IFS= read -r input; do
+    [[ -n $input ]] && ! grep -qxF -- "$input" <<<"$locked" && return 0
+  done < <(yq '.inputs // {} | keys | .[]' devenv.yaml)
+  return 1
+}
 if ((update)); then
   if ! command -v devenv >/dev/null; then
     note "devenv isn't installed, so the new inputs aren't locked; run \`devenv update\` once it is."
-  elif [[ ! -f devenv.lock ]] || ((${#added_inputs[@]})); then
+  elif [[ ! -f devenv.lock ]] || ((${#added_inputs[@]})) || unlocked_inputs; then
     [[ -f devenv.lock ]] && changed+=(devenv.lock) || changed+=("devenv.lock (new)")
     # `devenv update <input>` moves every pin anyway (devenv 2.4), so this
     # updates them all at once; the PR's CI is the check.
