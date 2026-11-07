@@ -28,6 +28,8 @@ It never commits, and running it again changes nothing once a project is set up.
 
 Then enter the shell (`devenv shell`, or `direnv reload`) to generate the settings and hooks, check that the project builds, and open a PR. If the repository isn't in the infrastructure stack's `projects.ts` yet, register it there, so it gets the `coldlogic-ai` environment the update workflow needs.
 
+Claude Code loads an enabled plugin only once it is installed for the project, and it can't install one here: `claude plugin install --scope project` also writes `.claude/settings.json`, and won't write through the symlink into the store. So the shell installs each plugin the settings enable (`coldlogic` and its dependencies, and `cloudflare` under `rust-worker`) that this checkout lacks. It copies the plugin from the marketplace Claude Code has fetched into its plugin cache and records a project-scope install, as `claude plugin install` would. Nothing goes in user settings or `settings.local.json`. It warns instead when Claude Code hasn't fetched the marketplace yet (start Claude Code in the project once), or when the shell runs inside a Claude Code session, whose sandbox protects `~/.claude/plugins` (enter it from a terminal).
+
 Inside a Claude Code sandbox, devenv can't write `/tmp`. Run the script as `XDG_RUNTIME_DIR=$TMPDIR scripts/adopt.sh`.
 
 ## Using it
