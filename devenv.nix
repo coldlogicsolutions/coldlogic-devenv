@@ -13,6 +13,21 @@ let
       set = builtins.getEnv "GNUPGHOME";
     in
     if set != "" then set else "${builtins.getEnv "HOME"}/.gnupg";
+  # The agent's socket: in the home on macOS, usually under
+  # $XDG_RUNTIME_DIR/gnupg on Linux. Evaluation can't run gpgconf, so a
+  # socket elsewhere (a custom home's hashed runtime directory, a
+  # gpgconf.ctl override) is named with COLDLOGIC_GPG_AGENT_SOCKET, set to
+  # `gpgconf --list-dirs agent-socket`.
+  gpgAgentSockets =
+    let
+      set = builtins.getEnv "COLDLOGIC_GPG_AGENT_SOCKET";
+      runtime = builtins.getEnv "XDG_RUNTIME_DIR";
+    in
+    if set != "" then
+      [ set ]
+    else
+      [ "${gnupgHome}/S.gpg-agent" ]
+      ++ (if runtime != "" then [ "${runtime}/gnupg/S.gpg-agent" ] else [ ]);
 in
 {
   profiles.developer.module =
@@ -247,11 +262,11 @@ in
             # outside this sandbox, so this limits a mistake, not an attacker.
             allowUnixSockets = [
               "/nix/var/nix/daemon-socket/socket"
-              # Signs commits. The agent, outside the sandbox, holds the key
-              # and asks for the passphrase through pinentry when its cache
-              # has expired.
-              "${gnupgHome}/S.gpg-agent"
-            ];
+            ]
+            # Signs commits. The agent, outside the sandbox, holds the key
+            # and asks for the passphrase through pinentry when its cache
+            # has expired.
+            ++ gpgAgentSockets;
             # `wrangler dev` and the integration suites listen on localhost.
             allowLocalBinding = true;
             allowedDomains = [
