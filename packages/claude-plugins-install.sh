@@ -22,6 +22,12 @@ plugins="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/plugins"
 records="$plugins/installed_plugins.json"
 empty='{"version":2,"plugins":{}}'
 
+# Succeeds for a name safe as one path component: no "/", "." or "..".
+safe_component() {
+  case $1 in "" | . | .. | -*) return 1 ;; esac
+  [ -z "${1//[A-Za-z0-9._@+-]/}" ]
+}
+
 warn() {
   echo "Claude Code plugin $1 is enabled but not installed for this checkout, so sessions run without it: $2" >&2
 }
@@ -42,40 +48,56 @@ if ! jq -e '.version == 2' >/dev/null 2>&1 <<<"$(read_records)"; then
   exit 0
 fi
 
-# Succeeds when a record covers this checkout (user scope, or this root) and
-# its files are still in the cache.
+# Succeeds when a user-scope record, or a project-scope one for this root,
+# covers the plugin and its files are still in the cache.
 covered() {
   local path
   while IFS= read -r path; do
     [ -d "$path" ] && return 0
   done < <(read_records | jq -r --arg p "$1" --arg root "$root" \
-    '.plugins[$p][]? | select(.scope == "user" or .projectPath == $root) | .installPath // empty' 2>/dev/null)
+    '.plugins[$p][]? | select(.scope == "user" or (.scope == "project" and .projectPath == $root)) | .installPath // empty' 2>/dev/null)
   return 1
 }
 
-# Two shells (say, two worktrees under direnv) would otherwise lose each
-# other's records. Claude Code doesn't take this lock, so a session writing
-# the records at the same moment can still lose one; the next shell redoes it.
+# Taken before the first write, so a shell with nothing to install never
+# touches ~/.claude. Two shells (say, two worktrees under direnv) would
+# otherwise lose each other's records. Claude Code doesn't take this lock, so
+# a session writing the records at the same moment can still lose one; the
+# next shell redoes it.
 lock="$records.devenv-lock"
-for _ in 1 2 3 4 5 6 7 8 9 10; do
-  mkdir "$lock" 2>/dev/null && break
-  sleep 1
-done
-if [ ! -d "$lock" ]; then
+locked=""
+writable_hint="if this shell runs inside a sandboxed Claude Code session, enter it from a terminal"
+take_lock() {
+  [ -z "$locked" ] || return 0
+  if [ ! -w "$plugins" ]; then
+    echo "Can't write $plugins, so no Claude Code plugins were installed ($writable_hint)" >&2
+    exit 0
+  fi
+  for _ in 1 2 3 4 5 6 7 8 9 10; do
+    if mkdir "$lock" 2>/dev/null; then
+      locked=1
+      trap 'rmdir "$lock" 2>/dev/null' EXIT
+      return 0
+    fi
+    sleep 1
+  done
   echo "Couldn't take $lock, so no Claude Code plugins were installed. Remove it if no other shell is starting" >&2
   exit 0
-fi
-trap 'rmdir "$lock" 2>/dev/null' EXIT
+}
 
 now=$(date -u +%Y-%m-%dT%H:%M:%S.000Z)
 done_list=""
 # Installs one plugin, then the dependencies its plugin.json declares.
-install() {
-  local plugin=$1 name market clone catalog entry source base src sha version cache tmp record dep
+install_plugin() {
+  local plugin=$1 name market clone clone_real catalog entry source base src sha version cache tmp record dep
   case " $done_list " in *" $plugin "*) return ;; esac
   done_list="$done_list $plugin"
   name=${plugin%@*}
   market=${plugin##*@}
+  if ! safe_component "$name" || ! safe_component "$market"; then
+    warn "$plugin" "its name isn't one this can use as a folder name"
+    return
+  fi
   if ! grep -qxF "$plugin" <<<"$enabled"; then
     echo "Claude Code plugin $plugin is a dependency of an enabled plugin but isn't enabled in $settings; add it to enabledPlugins" >&2
   fi
@@ -92,11 +114,16 @@ install() {
     return
   fi
   source=$(jq -r '.source | strings' <<<"$entry")
+  # A relative path, "./" or "." for the marketplace's root; anything else
+  # (an object naming a repo or URL, or no source) this can't install.
   base=$(jq -r '.metadata.pluginRoot // "."' "$catalog")
   case "$source" in
-    ./* | "") src=$(cd "$clone/$base/${source:-.}" 2>/dev/null && pwd -P) || src="" ;;
+    ./* | .) src=$(cd "$clone/$base/$source" 2>/dev/null && pwd -P) || src="" ;;
     *) src="" ;;
   esac
+  # The source must stay inside the marketplace.
+  clone_real=$(cd "$clone" && pwd -P) || clone_real=""
+  case "$src/" in "$clone_real"/*) ;; *) src="" ;; esac
   if [ -z "$src" ]; then
     covered "$plugin" || warn "$plugin" "its source isn't a folder in the marketplace, which this can't install. Install it with Claude Code"
     return
@@ -109,19 +136,22 @@ install() {
     version=$(jq -r '.version // empty' "$src/.claude-plugin/plugin.json" 2>/dev/null) || version=""
     [ -n "$version" ] || version=$(jq -r '.version // empty' <<<"$entry")
     [ -n "$version" ] || version=${sha:0:12}
-    if [ -z "$version" ]; then
-      warn "$plugin" "couldn't work out its version"
+    if ! safe_component "$version"; then
+      warn "$plugin" "couldn't work out a usable version (got '$version')"
       return
     fi
 
+    take_lock
     cache="$plugins/cache/$market/$name/$version"
     if [ ! -d "$cache" ]; then
-      tmp="$cache.tmp.$$"
+      # Built beside the cache, not among the version directories, where
+      # Claude Code could take a leftover for a version.
+      tmp="$plugins/cache/.devenv-tmp.$$"
       # The source can be the marketplace's root, so leave its .git behind.
-      if ! { mkdir -p "$tmp" && tar -C "$src" --exclude=.git -cf - . | tar -C "$tmp" -xf - &&
-        chmod -R u+w "$tmp" && mv "$tmp" "$cache"; } 2>/dev/null; then
+      if ! err=$({ mkdir -p "$tmp" "$(dirname "$cache")" && tar -C "$src" --exclude=.git -cf - . | tar -C "$tmp" -xf - &&
+        chmod -R u+w "$tmp" && mv "$tmp" "$cache"; } 2>&1); then
         rm -rf "$tmp"
-        warn "$plugin" "couldn't write $cache (a shell inside a sandboxed Claude Code session can't; enter it from a terminal)"
+        warn "$plugin" "couldn't copy it to $cache: ${err:-unknown error}"
         return
       fi
     fi
@@ -131,25 +161,31 @@ install() {
        installedAt: $now, lastUpdated: $now}
       + (if $sha == "" then {} else {gitCommitSha: $sha} end)')
     tmp="$records.tmp.$$"
-    # Re-reads the records just before writing, and drops any stale record for
-    # this root (its files gone from the cache) that this one replaces.
+    # Re-reads the records just before writing, and drops the stale
+    # project-scope record for this root (its files gone) this one replaces.
     if { read_records | jq --arg p "$plugin" --arg root "$root" --argjson r "$record" \
-      '.plugins[$p] = ([(.plugins[$p] // [])[] | select(.projectPath != $root)] + [$r])' >"$tmp" &&
+      '.plugins[$p] = ([(.plugins[$p] // [])[] | select(.scope != "project" or .projectPath != $root)] + [$r])' >"$tmp" &&
       mv "$tmp" "$records"; } 2>/dev/null; then
       echo "Installed Claude Code plugin $plugin $version for this checkout" >&2
     else
       rm -f "$tmp"
-      warn "$plugin" "couldn't write $records (a shell inside a sandboxed Claude Code session can't; enter it from a terminal)"
+      warn "$plugin" "couldn't write $records ($writable_hint)"
       return
     fi
   fi
 
+  # "name@marketplace", or a bare name in the same marketplace.
   while IFS= read -r dep; do
-    [ -n "$dep" ] && install "$dep"
-  done < <(jq -r '.dependencies[]? | strings' "$src/.claude-plugin/plugin.json" 2>/dev/null)
+    case "$dep" in
+      "") ;;
+      "?"*) echo "Claude Code plugin $plugin declares a dependency this can't read (${dep#?}); install it with Claude Code" >&2 ;;
+      *@*) install_plugin "$dep" ;;
+      *) install_plugin "$dep@$market" ;;
+    esac
+  done < <(jq -r '.dependencies[]? | if type == "string" then . else "?" + tojson end' "$src/.claude-plugin/plugin.json" 2>/dev/null)
 }
 
 while IFS= read -r plugin; do
-  install "$plugin"
+  install_plugin "$plugin"
 done <<<"$enabled"
 exit 0
