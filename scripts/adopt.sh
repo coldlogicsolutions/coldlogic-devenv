@@ -53,7 +53,14 @@ while (($#)); do
     --no-workflow) workflow=0; shift ;;
     --no-update) update=0; shift ;;
     --allow-dirty) allow_dirty=1; shift ;;
-    -h | --help) sed -n '2,/^set -euo/{/^set -euo/d;s/^# \{0,1\}//;p;}' "${BASH_SOURCE[0]}" 2>/dev/null || echo "see $raw/scripts/adopt.sh"; exit 0 ;;
+    -h | --help)
+      if [[ -f ${BASH_SOURCE[0]:-} ]]; then
+        sed -n '2,/^set -euo/{/^set -euo/d;s/^# \{0,1\}//;p;}' "${BASH_SOURCE[0]}" 2>/dev/null || echo "see $raw/scripts/adopt.sh"
+      else
+        echo "see $raw/scripts/adopt.sh"
+      fi
+      exit 0
+      ;;
     *) echo "adopt: unknown option $1 (see --help)" >&2; exit 2 ;;
   esac
 done
