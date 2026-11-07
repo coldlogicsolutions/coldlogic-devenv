@@ -81,7 +81,7 @@ take_lock() {
   for _ in 1 2 3 4 5 6 7 8 9 10; do
     if mkdir "$lock" 2>/dev/null; then
       locked=1
-      trap 'rm -rf "$tmp_copy"; rmdir "$lock" 2>/dev/null' EXIT
+      trap 'rm -rf "$tmp_copy" || true; rmdir "$lock" 2>/dev/null || true' EXIT
       return 0
     fi
     if [ ! -d "$lock" ]; then
