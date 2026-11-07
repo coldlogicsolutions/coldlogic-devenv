@@ -66,6 +66,7 @@ covered() {
 # next shell redoes it.
 lock="$records.devenv-lock"
 locked=""
+tmp_copy=""
 writable_hint="if this shell runs inside a sandboxed Claude Code session, enter it from a terminal"
 take_lock() {
   [ -z "$locked" ] || return 0
@@ -73,11 +74,20 @@ take_lock() {
     echo "Can't write $plugins, so no Claude Code plugins were installed ($writable_hint)" >&2
     exit 0
   fi
+  # A lock older than ten minutes is left by a shell that was killed.
+  if [ -n "$(find "$lock" -maxdepth 0 -mmin +10 2>/dev/null)" ]; then
+    rmdir "$lock" 2>/dev/null || true
+  fi
   for _ in 1 2 3 4 5 6 7 8 9 10; do
     if mkdir "$lock" 2>/dev/null; then
       locked=1
-      trap 'rmdir "$lock" 2>/dev/null' EXIT
+      trap 'rm -rf "$tmp_copy"; rmdir "$lock" 2>/dev/null' EXIT
       return 0
+    fi
+    if [ ! -d "$lock" ]; then
+      # Not another shell: the write itself was refused.
+      echo "Can't write $plugins, so no Claude Code plugins were installed ($writable_hint)" >&2
+      exit 0
     fi
     sleep 1
   done
@@ -113,10 +123,11 @@ install_plugin() {
     covered "$plugin" || warn "$plugin" "the $market marketplace has no plugin named $name"
     return
   fi
-  source=$(jq -r '.source | strings' <<<"$entry")
+  source=$(jq -r '.source | strings' <<<"$entry" 2>/dev/null) || source=""
   # A relative path, "./" or "." for the marketplace's root; anything else
   # (an object naming a repo or URL, or no source) this can't install.
-  base=$(jq -r '.metadata.pluginRoot // "."' "$catalog")
+  base=$(jq -r '.metadata.pluginRoot? // "." | strings' "$catalog" 2>/dev/null) || base=.
+  [ -n "$base" ] || base=.
   case "$source" in
     ./* | .) src=$(cd "$clone/$base/$source" 2>/dev/null && pwd -P) || src="" ;;
     *) src="" ;;
@@ -131,10 +142,16 @@ install_plugin() {
 
   if ! covered "$plugin"; then
     # A git clone, or an archive download that records its commit in .gcs-sha.
-    sha=$(git -C "$clone" rev-parse HEAD 2>/dev/null) || sha=""
-    [ -n "$sha" ] || [ ! -f "$clone/.gcs-sha" ] || sha=$(tr -d '[:space:]' <"$clone/.gcs-sha")
-    version=$(jq -r '.version // empty' "$src/.claude-plugin/plugin.json" 2>/dev/null) || version=""
-    [ -n "$version" ] || version=$(jq -r '.version // empty' <<<"$entry")
+    # Only the clone's own repository: git would otherwise find a parent's,
+    # say a dotfiles repo holding ~/.claude.
+    sha=""
+    if [ -e "$clone/.git" ]; then
+      sha=$(git -C "$clone" rev-parse HEAD 2>/dev/null) || sha=""
+    elif [ -f "$clone/.gcs-sha" ]; then
+      sha=$(tr -d '[:space:]' <"$clone/.gcs-sha" 2>/dev/null) || sha=""
+    fi
+    version=$(jq -r '.version // empty | strings' "$src/.claude-plugin/plugin.json" 2>/dev/null) || version=""
+    [ -n "$version" ] || version=$(jq -r '.version // empty | strings' <<<"$entry" 2>/dev/null) || version=""
     [ -n "$version" ] || version=${sha:0:12}
     if ! safe_component "$version"; then
       warn "$plugin" "couldn't work out a usable version (got '$version')"
@@ -147,6 +164,7 @@ install_plugin() {
       # Built beside the cache, not among the version directories, where
       # Claude Code could take a leftover for a version.
       tmp="$plugins/cache/.devenv-tmp.$$"
+      tmp_copy=$tmp
       # The source can be the marketplace's root, so leave its .git behind.
       if ! err=$({ mkdir -p "$tmp" "$(dirname "$cache")" && tar -C "$src" --exclude=.git -cf - . | tar -C "$tmp" -xf - &&
         chmod -R u+w "$tmp" && mv "$tmp" "$cache"; } 2>&1); then
@@ -163,13 +181,14 @@ install_plugin() {
     tmp="$records.tmp.$$"
     # Re-reads the records just before writing, and drops the stale
     # project-scope record for this root (its files gone) this one replaces.
-    if { read_records | jq --arg p "$plugin" --arg root "$root" --argjson r "$record" \
-      '.plugins[$p] = ([(.plugins[$p] // [])[] | select(.scope != "project" or .projectPath != $root)] + [$r])' >"$tmp" &&
-      mv "$tmp" "$records"; } 2>/dev/null; then
+    if err=$({ read_records | jq -e --arg p "$plugin" --arg root "$root" --argjson r "$record" '
+      if .version != 2 then error("installed_plugins.json changed to a format this does not know")
+      else .plugins[$p] = ([(.plugins[$p] // [])[] | select(.scope != "project" or .projectPath != $root)] + [$r]) end
+    ' >"$tmp" && mv "$tmp" "$records"; } 2>&1); then
       echo "Installed Claude Code plugin $plugin $version for this checkout" >&2
     else
       rm -f "$tmp"
-      warn "$plugin" "couldn't write $records ($writable_hint)"
+      warn "$plugin" "couldn't write $records: ${err:-unknown error} ($writable_hint)"
       return
     fi
   fi

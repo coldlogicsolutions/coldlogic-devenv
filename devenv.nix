@@ -10,6 +10,7 @@ let
     name = "claude-plugins-install";
     runtimeInputs = with pkgs; [
       coreutils
+      findutils
       git
       gnugrep
       gnutar
