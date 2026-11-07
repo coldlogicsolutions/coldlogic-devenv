@@ -19,6 +19,7 @@
 #                    Cargo project with a wrangler config, rust-lib for any
 #                    other Cargo project, none otherwise.
 #   --no-workflow    Don't add .github/workflows/update-coldlogic-devenv.yaml.
+#   --no-envrc       Don't add an .envrc that loads the shell through direnv.
 #   --no-update      Don't lock the new inputs (run `devenv update` yourself).
 #   --allow-dirty    Run even with uncommitted changes.
 #   -h, --help       Show this help.
@@ -49,6 +50,7 @@ fi
 
 profile=auto
 workflow=1
+envrc=1
 update=1
 allow_dirty=0
 while (($#)); do
@@ -56,6 +58,7 @@ while (($#)); do
     --profile) profile=${2:?--profile needs a name}; shift 2 ;;
     --profile=*) profile=${1#*=}; shift ;;
     --no-workflow) workflow=0; shift ;;
+    --no-envrc) envrc=0; shift ;;
     --no-update) update=0; shift ;;
     --allow-dirty) allow_dirty=1; shift ;;
     -h | --help)
@@ -234,12 +237,25 @@ if ((workflow)) && [[ ! -f $wf ]]; then
   changed+=("$wf (new)")
 fi
 
+# -------------------------------------------------------------------- .envrc --
+# An existing one is the project's own and is only checked, never rewritten.
+if ((envrc)) && [[ ! -e .envrc ]]; then
+  cat >.envrc <<'EOF'
+# Loads the devenv shell (devenv.nix, devenv.yaml) through direnv.
+eval "$(devenv direnvrc)"
+use devenv
+EOF
+  changed+=(".envrc (new)")
+  note "Run \`direnv allow\` once to let direnv load the new .envrc."
+elif [[ -f .envrc ]] && grep -qE '^\s*use[ _]flake' .envrc; then
+  note ".envrc uses the flake; replace it with \`use devenv\` (or remove .envrc if nobody uses direnv here)."
+elif [[ -f .envrc ]] && ! grep -qE '^\s*use devenv' .envrc; then
+  note ".envrc doesn't load devenv; add \`eval \"\$(devenv direnvrc)\"\` and \`use devenv\` if direnv should load the shell."
+fi
+
 # ------------------------------------------------------------ what's left --
 if [[ -f flake.nix ]]; then
   note "flake.nix is still here. The guard hook denies a flake's dev shell, so move its devShell packages and env into devenv.nix, then remove the dev shell (and flake.nix and flake.lock if that's all it was for)."
-fi
-if [[ -f .envrc ]] && grep -qE '^\s*use[ _]flake' .envrc; then
-  note ".envrc uses the flake; replace it with \`use devenv\` (or remove .envrc if nobody uses direnv here)."
 fi
 default_branch=$(git symbolic-ref -q --short refs/remotes/origin/HEAD 2>/dev/null || true)
 if [[ -n $default_branch && $default_branch != origin/main ]]; then
