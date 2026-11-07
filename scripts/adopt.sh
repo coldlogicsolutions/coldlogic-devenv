@@ -168,7 +168,7 @@ fi
 # --------------------------------------------------------------- .gitignore --
 # The files devenv generates: settings.json and .mcp.json are Nix store
 # symlinks written by `claude.code`, .pre-commit-config.yaml by git-hooks.
-ignore=(.devenv* devenv.local.nix devenv.local.yaml /.claude/settings.json /.claude/worktrees/ .mcp.json .pre-commit-config.yaml)
+ignore=('.devenv*' devenv.local.nix devenv.local.yaml /.claude/settings.json /.claude/worktrees/ .mcp.json .pre-commit-config.yaml)
 missing=()
 touch .gitignore
 for line in "${ignore[@]}"; do grep -qxF -- "$line" .gitignore || missing+=("$line"); done
