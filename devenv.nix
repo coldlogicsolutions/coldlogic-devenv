@@ -177,9 +177,11 @@ in
         # committed.
         sandbox = {
           enabled = true;
-          # Off so that every command needs an allow rule, or the guard hook's
-          # allow for what runs inside a wrapper.
-          autoAllowBashIfSandboxed = false;
+          # A sandboxed command runs without a prompt: the sandbox's write and
+          # network limits are the boundary, and the deny and ask rules and
+          # the guard hook still apply. Requiring an allow rule for every
+          # command prompted on routine work (fetch, push, reading files).
+          autoAllowBashIfSandboxed = true;
           # Off so that a command the sandbox blocks fails rather than being
           # retried outside it. What a session legitimately needs goes into
           # this module, or the project's devenv.nix, through a reviewed PR.
