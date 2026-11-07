@@ -6,6 +6,18 @@
 let
   gh-app = import ./packages/gh-app.nix { inherit pkgs; };
   claude-guard = import ./packages/claude-guard.nix { inherit pkgs; };
+  claude-plugins-install = pkgs.writeShellApplication {
+    name = "claude-plugins-install";
+    runtimeInputs = with pkgs; [
+      coreutils
+      findutils
+      git
+      gnugrep
+      gnutar
+      jq
+    ];
+    text = builtins.readFile ./packages/claude-plugins-install.sh;
+  };
   # Where gpg keeps its sockets and lock files, so commits can be signed
   # inside the sandbox. devenv evaluates impurely, so this is the user's.
   gnupgHome =
@@ -170,7 +182,18 @@ in
             repo = "openai/codex-plugin-cc";
           };
         };
-        enabledPlugins."coldlogic@coldlogic-plugins" = true;
+        enabledPlugins = {
+          "coldlogic@coldlogic-plugins" = true;
+          # The coldlogic plugin's dependencies, from its plugin.json. Claude
+          # Code would enable them as it installs the plugin, but the install
+          # below writes no settings. It installs them from plugin.json, and
+          # warns when one there is missing here.
+          "codex@openai-codex" = true;
+          "pr-review-toolkit@claude-plugins-official" = true;
+          "code-review@claude-plugins-official" = true;
+          "commit-commands@claude-plugins-official" = true;
+          "context7@claude-plugins-official" = true;
+        };
         enabledMcpjsonServers = [ "mcp.devenv.sh" ];
 
         # Paths are absolute: the file is generated per checkout and never
@@ -344,6 +367,17 @@ in
           fi
           exit 0
         '';
+        before = [ "devenv:enterShell" ];
+      };
+
+      # Claude Code loads an enabled plugin only once it is installed for the
+      # project, and can't install one here (see the script). Installs each
+      # enabled plugin this checkout lacks, at project scope. A shell inside a
+      # sandboxed session can't write ~/.claude/plugins, so it warns instead.
+      # Never fails the shell.
+      tasks."coldlogic:plugins-installed" = {
+        exec = "${claude-plugins-install}/bin/claude-plugins-install \"${config.claude.code.settingsPath}\" \"$DEVENV_ROOT\"";
+        after = [ "devenv:files" ];
         before = [ "devenv:enterShell" ];
       };
     };
