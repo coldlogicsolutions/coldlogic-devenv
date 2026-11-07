@@ -269,6 +269,14 @@ BASH = [
     ("gh api repos/o/r/pulls/12 --jq .mergeable", NONE),
     ("gh pr list --search \"merge\"", NONE),
     ("gh-app api repos/o/r/pulls/12/reviews -f event=APPROVE", DENY),
+    # Answering a review thread isn't reviewing.
+    ("gh-app api graphql -f query='mutation($t:ID!,$b:String!){addPullRequestReviewThreadReply(input:{pullRequestReviewThreadId:$t,body:$b}){comment{url}}}' -f t=X -f b=done", NONE),
+    ("gh-app api graphql -f query='mutation($t:ID!){resolveReviewThread(input:{threadId:$t}){thread{isResolved}}}' -f t=X", NONE),
+    ("gh api graphql -f query='mutation($t:ID!,$b:String!){addPullRequestReviewThreadReply(input:{pullRequestReviewThreadId:$t,body:$b}){comment{url}}}' -f t=X -f b=done", NONE),
+    ("gh api graphql -f query='mutation($t:ID!){resolveReviewThread(input:{threadId:$t}){thread{isResolved}}}' -f t=X", NONE),
+    # Creating a review still is, whatever its event.
+    ("gh-app api graphql -f query='mutation{addPullRequestReview(input:{pullRequestId:\"X\",event:APPROVE}){clientMutationId}}'", DENY),
+    ("gh api graphql -f query='mutation{addPullRequestReview(input:{pullRequestId:\"X\"}){clientMutationId}}'", DENY),
     ("gh-app pr create -t \"fix: x\" -b \"body\"", NONE),
     ("gh-app pr view 12 --json reviews --jq '.reviews[].state'", ALLOW),
     ("git commit -m \"$(cat <<'EOF'\nfix(guard): handle x\nEOF\n)\"", ALLOW),

@@ -726,7 +726,9 @@ def api_changes_review(lowered, merging):
     """Whether a gh api call approves (or, with merging, merges) a PR, rather
     than reading one."""
     text = " ".join(lowered)
-    if re.search(r"event=approve|approvepullrequest|addpullrequestreview", text):
+    # addPullRequestReviewThreadReply only answers a comment thread, so the
+    # review prefix doesn't catch it.
+    if re.search(r"event=approve|approvepullrequest|addpullrequestreview(?!thread)", text):
         return True
     if merging and re.search(r"mergepullrequest|enablepullrequestautomerge", text):
         return True
