@@ -17,7 +17,8 @@ It picks a profile from the project (`rust-worker` for a Cargo project with a wr
 2. Creates an empty `devenv.nix` if there is none.
 3. Adds the generated files to `.gitignore`, and stops tracking any committed copies (`.claude/settings.json`, `.mcp.json`, `.pre-commit-config.yaml`), moving them to `.devenv/adopt-backup/` so their settings can be ported.
 4. Copies the update workflow into `.github/workflows/` (`--no-workflow` skips it).
-5. Runs `devenv update` (`--no-update` skips it). That moves every pin, `nixpkgs` included.
+5. Adds an `.envrc` that loads the shell through direnv, if there is none (`--no-envrc` skips it). An existing one is left alone; if it still uses the flake, or doesn't load devenv, that goes on the list at the end.
+6. Runs `devenv update` (`--no-update` skips it). That moves every pin, `nixpkgs` included.
 
 It never commits, and running it again changes nothing once a project is set up. It finishes with a list of what it couldn't do for you:
 
