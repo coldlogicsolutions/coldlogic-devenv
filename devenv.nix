@@ -215,6 +215,9 @@ in
               "${gnupgHome}/gpg-agent.conf"
               "${gnupgHome}/common.conf"
               "${gnupgHome}/dirmngr.conf"
+              "${gnupgHome}/scdaemon.conf"
+              "${gnupgHome}/gpgsm.conf"
+              "${gnupgHome}/tpm2daemon.conf"
               "${gnupgHome}/sshcontrol"
               "${gnupgHome}/private-keys-v1.d"
             ];
