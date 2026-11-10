@@ -38,7 +38,7 @@ jobs:
       - uses: cachix/install-nix-action@13d8dd58da0234aa297dedd986986ccb8e7f3e24 # v31.11.1
 
       - name: Install devenv
-        run: nix profile install nixpkgs#devenv
+        run: nix profile add nixpkgs#devenv
 
       - name: Update the pin
         run: devenv update coldlogic-devenv
@@ -70,8 +70,9 @@ jobs:
           path: updated
 
       # The first job ran third-party code, so its lock is only a source of
-      # three values, each checked: the revision must be the module's main as
-      # GitHub reports it, and the new lock is the repository's own with just
+      # three values, each checked: the revision must be on the module's main
+      # as GitHub reports it (main itself, or behind it if main moved since
+      # the first job), and the new lock is the repository's own with just
       # those values replaced. Nix verifies narHash when it fetches the
       # revision. Fails closed.
       - name: Take the new revision from the updated lock
@@ -83,9 +84,18 @@ jobs:
           rev=$(jq -er "$node.rev" updated/devenv.lock)
           nar_hash=$(jq -er "$node.narHash" updated/devenv.lock)
           last_modified=$(jq -er "$node.lastModified" updated/devenv.lock)
-          main=$(gh api repos/coldlogicsolutions/coldlogic-devenv/commits/main --jq .sha)
-          [[ $main =~ ^[0-9a-f]{40}$ ]] || { echo "could not resolve coldlogic-devenv's main" >&2; exit 1; }
-          [[ $rev == "$main" ]] || { echo "revision $rev is not coldlogic-devenv's main ($main)" >&2; exit 1; }
+          [[ $rev =~ ^[0-9a-f]{40}$ ]] || { echo "bad revision" >&2; exit 1; }
+          # main compared with the revision: "identical", or "ahead" when main
+          # has moved on from it. Anything else is a revision off main.
+          status=$(gh api "repos/coldlogicsolutions/coldlogic-devenv/compare/$rev...main" --jq .status)
+          [[ $status == identical || $status == ahead ]] ||
+            { echo "revision $rev is not on coldlogic-devenv's main ($status)" >&2; exit 1; }
+          # Nor behind the project's current pin: an update never rolls back.
+          current=$(jq -er "$node.rev" devenv.lock)
+          [[ $current =~ ^[0-9a-f]{40}$ ]] || { echo "bad current revision" >&2; exit 1; }
+          status=$(gh api "repos/coldlogicsolutions/coldlogic-devenv/compare/$current...$rev" --jq .status)
+          [[ $status == identical || $status == ahead ]] ||
+            { echo "revision $rev is behind the current pin $current ($status)" >&2; exit 1; }
           [[ $nar_hash =~ ^sha256-[A-Za-z0-9+/]+=*$ ]] || { echo "bad narHash" >&2; exit 1; }
           [[ $last_modified =~ ^[0-9]{1,12}$ ]] || { echo "bad lastModified" >&2; exit 1; }
           # devenv writes the lock without a trailing newline; so does this.
@@ -112,6 +122,9 @@ jobs:
           branch: chore/update-coldlogic-devenv
           add-paths: devenv.lock
           commit-message: "chore(devenv): update coldlogic-devenv"
+          # The App's bot user, not whoever triggered the run.
+          author: coldlogic-ai[bot] <319737866+coldlogic-ai[bot]@users.noreply.github.com>
+          committer: coldlogic-ai[bot] <319737866+coldlogic-ai[bot]@users.noreply.github.com>
           title: Update coldlogic-devenv
           body: |
             ## Summary
