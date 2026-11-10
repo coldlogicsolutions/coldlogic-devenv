@@ -136,6 +136,14 @@ in
             "**/.env"
             "**/secrets/**"
           ];
+          # Edits and writes anywhere in the checkout (its worktrees included)
+          # need no prompt: it is under git, and the gate and review still run
+          # before a commit. The deny rules above and below win over it, and
+          # the guard hook asks before a change to `.git` or `.claude`. An
+          # allow rule rather than `defaultMode = "acceptEdits"`, which would
+          # replace the mode the user picked (auto, say). `//` makes the path
+          # absolute: the file is generated per checkout.
+          rules.Edit.allow = [ "/${config.devenv.root}/**" ];
           rules.Edit.deny = [
             "**/.env"
             "**/secrets/**"

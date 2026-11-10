@@ -11,3 +11,6 @@ devenv.local.yaml
 /.claude/worktrees/
 .mcp.json
 .pre-commit-config.yaml
+
+# Python bytecode from running the guard tests.
+__pycache__/
