@@ -361,7 +361,25 @@ in
             *) exit 0 ;; # a local path: input while developing the module
           esac
           [ -n "$locked" ] || exit 0
-          latest=$(GIT_TERMINAL_PROMPT=0 timeout 3 git ls-remote "$remote" HEAD 2>/dev/null | cut -f1) || true
+          # The remote's HEAD, remembered for an hour so that not every shell
+          # waits on the network: `<time> <remote> <rev>`.
+          cache="''${DEVENV_STATE:-$DEVENV_ROOT/.devenv/state}/coldlogic-freshness"
+          now=$(date +%s)
+          latest=""
+          at="" cached_remote="" cached_rev=""
+          { read -r at cached_remote cached_rev <"$cache"; } 2>/dev/null || true
+          case "$at" in
+            "" | *[!0-9]*) at=0 ;;
+          esac
+          if [ "$cached_remote" = "$remote" ] && [ -n "$cached_rev" ] && [ $((now - at)) -lt 3600 ]; then
+            latest=$cached_rev
+          else
+            latest=$(GIT_TERMINAL_PROMPT=0 timeout 3 git ls-remote "$remote" HEAD 2>/dev/null | cut -f1) || true
+            if [ -n "$latest" ]; then
+              mkdir -p "$(dirname "$cache")" 2>/dev/null &&
+                echo "$now $remote $latest" >"$cache" 2>/dev/null || true
+            fi
+          fi
           if [ -n "$latest" ] && [ "$latest" != "$locked" ]; then
             echo "coldlogic-devenv is behind (locked ''${locked:0:7}, latest ''${latest:0:7}); run: devenv update coldlogic-devenv" >&2
           fi
