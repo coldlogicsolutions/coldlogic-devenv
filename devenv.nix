@@ -443,11 +443,18 @@ in
           done
           stamp="''${DEVENV_STATE:-$DEVENV_ROOT/.devenv/state}/coldlogic-openspec"
           want=${pkgs.openspec}
-          if [ "$(cat "$stamp" 2>/dev/null)" = "$want" ] && [ -f .claude/skills/openspec-explore/SKILL.md ] && [ -f .claude/commands/opsx/explore.md ]; then
+          # Any of them, not a named one: a later openspec may rename them.
+          present=""
+          if compgen -G '.claude/skills/openspec-*/SKILL.md' >/dev/null && compgen -G '.claude/commands/opsx/*.md' >/dev/null; then
+            present=1
+          fi
+          if [ "$(cat "$stamp" 2>/dev/null)" = "$want" ] && [ -n "$present" ]; then
             exit 0
           fi
           if out=$(DO_NOT_TRACK=1 OPENSPEC_TELEMETRY=0 openspec init --tools claude --no-animation </dev/null 2>&1); then
             mkdir -p "$(dirname "$stamp")" 2>/dev/null && echo "$want" >"$stamp" 2>/dev/null || true
+          elif [ -n "$present" ]; then
+            echo "coldlogic: OpenSpec's Claude Code skills may be out of date; enter the shell from a terminal, outside a Claude Code session, to regenerate them" >&2
           else
             echo "coldlogic: couldn't generate OpenSpec's Claude Code skills; enter the shell from a terminal, outside a Claude Code session" >&2
             printf '%s\n' "$out" | grep -m1 '^Failed' >&2 || true

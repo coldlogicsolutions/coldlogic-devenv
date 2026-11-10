@@ -222,8 +222,8 @@ done
 
 # OpenSpec's Claude Code skills and commands: the shell generates them now,
 # from the module's openspec. Nothing to port, and the working copies stay
-# until it rewrites them.
-if [[ -n $(git ls-files -- '.claude/skills/openspec-*' .claude/commands/opsx) ]]; then
+# until it rewrites them. Only where it will: a project with openspec/.
+if [[ -f openspec/config.yaml && -n $(git ls-files -- '.claude/skills/openspec-*' .claude/commands/opsx) ]]; then
   if git rm -r --cached -q --ignore-unmatch -- '.claude/skills/openspec-*' .claude/commands/opsx; then
     changed+=(".claude/skills/openspec-*, .claude/commands/opsx (untracked)")
   else
