@@ -3,8 +3,10 @@
 { pkgs, ... }:
 let
   # `topcoat fmt`, for the gate: at the Topcoat version the projects pin
-  # (packages/topcoat-cli.nix), not nixpkgs'.
-  topcoat-cli = import ../../packages/topcoat-cli.nix { inherit pkgs; };
+  # (packages/topcoat-cli.nix), not nixpkgs'. Built from the profile's own
+  # `config`: the file's is the evaluation without the profiles, so it never
+  # sees their `languages.rust`.
+  topcoat-cli = config: import ../../packages/topcoat-cli.nix { inherit pkgs config; };
 in
 {
   imports = [ ../rust-lib/devenv.nix ];
@@ -16,12 +18,16 @@ in
     ];
 
     # The gate's, not the build's.
-    ci.module.packages = [ topcoat-cli ];
+    ci.module =
+      { config, ... }:
+      {
+        packages = [ (topcoat-cli config) ];
+      };
 
     developer.module =
       { config, ... }:
       {
-        packages = [ topcoat-cli ];
+        packages = [ (topcoat-cli config) ];
 
         files."${config.claude.code.settingsPath}".json = {
           extraKnownMarketplaces.cloudflare.source = {

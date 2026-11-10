@@ -1,7 +1,7 @@
 # A Rust crate built for the host and wasm32 (neonjazz-topcoat). rust-worker
 # builds on it. Node is for scripts/check-package.sh, which builds a consumer
 # of the packaged crate.
-{ pkgs, ... }:
+{ pkgs, lib, ... }:
 {
   profiles = {
     build.module = {
@@ -10,6 +10,12 @@
       languages.rust = {
         enable = true;
         channel = "stable";
+        # The Rust the module supports, and what packages/topcoat-cli.nix
+        # builds with. Bump it here and every project moves with its next
+        # update. A project can set its own; what breaks then is its to fix.
+        # The release must be in the project's rust-overlay, which the update
+        # workflow aligns with the module's.
+        version = lib.mkDefault "1.99.1";
         components = [
           "rustc"
           "cargo"

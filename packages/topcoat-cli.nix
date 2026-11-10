@@ -3,9 +3,37 @@
 # behind, and the formatter has to read the macro syntax of the Topcoat
 # version the projects pin, so the version is set here and moves with that
 # pin: bump `version`, then both hashes (build once with `lib.fakeHash` to get
-# each).
-{ pkgs }:
-pkgs.rustPlatform.buildRustPackage (finalAttrs: {
+# each). A release that needs a newer Rust than the rust-lib profile's
+# `languages.rust.version` moves that too.
+#
+# It builds with the project's Rust (`languages.rust.channel` and `.version`)
+# rather than nixpkgs' rustc, which is whatever the project's nixpkgs has and
+# can be older than Topcoat's `rust-version` (#31). The minimal profile of
+# that release, so the ci and developer shells, whose components differ,
+# share one build.
+{ pkgs, config }:
+let
+  rust = config.languages.rust;
+
+  rust-overlay = config.lib.getInput {
+    name = "rust-overlay";
+    url = "github:oxalica/rust-overlay";
+    attribute = "the topcoat-cli package";
+    follows = [ "nixpkgs" ];
+  };
+  toolchain =
+    (rust-overlay.lib.mkRustBin { } pkgs.buildPackages).${rust.channel}.${rust.version}.minimal;
+  # A project that chose nixpkgs' Rust builds with it.
+  rustPlatform =
+    if rust.channel == "nixpkgs" then
+      pkgs.rustPlatform
+    else
+      pkgs.makeRustPlatform {
+        cargo = toolchain;
+        rustc = toolchain;
+      };
+in
+rustPlatform.buildRustPackage (finalAttrs: {
   pname = "topcoat-cli";
   version = "0.12.0";
 
