@@ -7,6 +7,10 @@ lexes each command as bash would, unwraps it, then:
 - denies the commands no session may run, however they are spelled;
 - denies reading or writing a secrets file, from a file tool or a command
   that names one;
+- denies changing a project file from Bash in the common ways (`sed -i`,
+  `perl -i`, `tee`, a `>` redirect, a script that opens a file for
+  writing), pointing to the Edit and Write tools, which the project's rules
+  allow without a prompt;
 - asks when a command inside matches an ask rule;
 - allows a command only when it is plain (no expansion, cd, redirect to a
   file, config override or construct this doesn't follow) and every part of
@@ -85,7 +89,11 @@ class Command:
         self.expands = False
         # A file it reads from or writes to by redirection.
         self.redirects = []
+        # The files among those it writes to.
+        self.writes = []
         self.heredocs = []
+        # Heredoc bodies fed to an interpreter.
+        self.scripts = []
         # Quoted strings in a script fed to an interpreter, checked as paths
         # for the secrets check only.
         self.mentions = []
@@ -180,6 +188,8 @@ def lex(text):
                 cmd.heredocs.append((word, was_quoted, op == "<<-"))
             elif word != "/dev/null":
                 cmd.redirects.append(word)
+                if op in (">", ">>", ">|", ">!", ">>!", ">&", "<>"):
+                    cmd.writes.append(word)
         else:
             cmd.words.append(word)
         word = None
@@ -211,12 +221,13 @@ def lex(text):
                 programs = {os.path.basename(w) for w in ended.words}
                 if SHELLS & programs or pipes_to_shell(text):
                     inner.append(body)
-                elif INTERPRETERS & programs:
+                elif any(interpreter(p) for p in programs):
                     # A script this can't read: no allow from here, so the
                     # sandbox and Claude Code's rules decide it. A string in
                     # it that looks like a path still can't name a secrets
                     # file.
                     ended.unread = True
+                    ended.scripts.append(body)
                     ended.mentions.extend(
                         m.group(2) for m in re.finditer(r"""(['"])([^'"\s]+)\1""", body)
                         if "/" in m.group(2) or m.group(2).startswith("."))
@@ -311,7 +322,8 @@ def lex(text):
             if fd is not None:
                 word = None
             end_word()
-            m = re.match(r"<<<|<<-|<<|>>|>&|<&|>\||<>|<|>", text[i:])
+            # `>!` and `>>!` are zsh's clobbering redirects.
+            m = re.match(r"<<<|<<-|<<|>>!|>>|>&|<&|>\||>!|<>|<|>", text[i:])
             op = m.group(0)
             i += len(op)
             if op in (">&", "<&"):
@@ -389,9 +401,14 @@ class Unwrapped:
         # GIT_SSH_COMMAND...), an expansion, a cd, a construct not followed.
         self.opaque = False
         self.wrapped = False
+        # Files redirected to, and scripts fed to an interpreter on stdin.
+        self.writes = []
+        self.scripts = []
 
     def add(self, other):
         self.commands.extend(other.commands)
+        self.writes.extend(other.writes)
+        self.scripts.extend(other.scripts)
         self.opaque |= other.opaque
         self.wrapped |= other.wrapped
 
@@ -405,6 +422,8 @@ def analyse(text):
     for cmd in commands:
         if cmd.expands or cmd.redirects or cmd.unread:
             result.opaque = True
+        result.writes.extend(cmd.writes)
+        result.scripts.extend(cmd.scripts)
         for target in cmd.redirects + cmd.mentions:
             # Kept as words for the secrets check.
             result.commands.append([">" + target])
@@ -693,7 +712,7 @@ def forbidden_from(head, args):
         if sub and sub[0] == "alias":
             return "gh aliases could hide a merge or an approval"
         if sub and sub[0] == "api":
-            if api_changes_review(lowered, merging=True):
+            if api_changes_review(lowered):
                 return "merging or reviewing through gh api with your credentials"
             text = " ".join(lowered)
             if "--input" in text or "=@" in text or re.search(r"(^| )@", text):
@@ -701,7 +720,9 @@ def forbidden_from(head, args):
     if head == "gh-app":
         # The App may merge a PR the developer team approved, but it must not
         # approve one: where the ruleset's file patterns miss a path, its
-        # approval would count.
+        # approval would count. It merges only through `gh-app pr merge`,
+        # whose wrapper checks the PR first (the App's own, not a draft, the
+        # ruleset, the head it was asked to merge); the API would skip that.
         lowered = [a.lower() for a in args]
         sub = gh_subcommand(lowered)
         if sub and sub[0] == "alias":
@@ -710,8 +731,8 @@ def forbidden_from(head, args):
             return "the App approving a PR"
         if sub and sub[0] == "api":
             text = " ".join(lowered)
-            if api_changes_review(lowered, merging=False):
-                return "the App reviewing a PR through gh-app api"
+            if api_changes_review(lowered):
+                return "the App merging or reviewing through gh-app api; merge with gh-app pr merge, which checks the PR first"
             if "--input" in text or "=@" in text or re.search(r"(^| )@", text):
                 raise Unparsable("gh-app api reading its request from a file")
     return None
@@ -736,18 +757,18 @@ def approves(args):
     return any(a.startswith("--approve") or re.match(r"^-[A-Za-z]*a[A-Za-z]*$", a) for a in args)
 
 
-def api_changes_review(lowered, merging):
-    """Whether a gh api call approves (or, with merging, merges) a PR, rather
-    than reading one."""
+def api_changes_review(lowered):
+    """Whether a gh api call approves or merges a PR, rather than reading
+    one."""
     text = " ".join(lowered)
     # addPullRequestReviewThreadReply only answers a comment thread, so the
     # review prefix doesn't catch it.
     if re.search(r"event=approve|approvepullrequest|addpullrequestreview(?!thread)", text):
         return True
-    if merging and re.search(r"mergepullrequest|enablepullrequestautomerge", text):
+    if re.search(r"mergepullrequest|enablepullrequestautomerge", text):
         return True
     writes = re.search(r"(^| )(-x|--method)[ =]?(post|put|patch)", text) or re.search(r"(^| )-[fF] ", text)
-    return bool(writes and ((merging and re.search(r"/pulls/[^/ ]+/merge", text)) or "/reviews" in text))
+    return bool(writes and (re.search(r"/pulls/[^/ ]+/merge", text) or "/reviews" in text))
 
 
 def names_file(word):
@@ -1114,6 +1135,144 @@ def normalize_git_loosely(words):
     return ["git"] + words[i:]
 
 
+def project_file(path):
+    """Whether a file a command writes is one of the project's, rather than
+    a device, a scratch file ($TMPDIR, /tmp, the session scratchpad) or
+    somewhere else outside the project. The project is its root and, for a
+    session working in a worktree beside it, the checkout it runs in. A path
+    behind any variable but $PWD or $CLAUDE_PROJECT_DIR, or behind a
+    substitution, is given the benefit of the doubt."""
+    m = re.match(r"\$(\{(PWD|CLAUDE_PROJECT_DIR)\}|(PWD|CLAUDE_PROJECT_DIR)\b)/?", path)
+    if m:
+        path = path[m.end():] or "."
+        if m.group(2) == "CLAUDE_PROJECT_DIR" or m.group(3) == "CLAUDE_PROJECT_DIR":
+            path = os.path.join(WORKING["root"] or ".", path)
+    if not path or path == "-" or path.startswith(("$", "~", PLACEHOLDER)):
+        return False
+    if ".git" in path.split("/"):
+        # Edit and Write refuse these too: other rules decide them.
+        return False
+    cwd, root = WORKING["cwd"], WORKING["root"]
+    if not root:
+        return not path.startswith("/")
+    real = os.path.realpath(os.path.join(cwd or root, path))
+    bases = [os.path.realpath(root), os.path.realpath(cwd or root)]
+
+    def under(base):
+        return real == base or real.startswith(base + os.sep)
+
+    if under(bases[0]):
+        return True
+    return not scratch(real) and under(bases[1])
+
+
+def in_place_files(prog, args):
+    """The files `sed -i` or `perl -i` edits, past its script, or None if it
+    doesn't edit in place. An empty list: the files come from elsewhere
+    (xargs, find -exec)."""
+    if prog in ("sed", "gsed"):
+        in_place = r"^-[nrEsuz]*i|^--in-place"
+        takes_script = r"^-[nrEsuz]*[ef]$|^--(expression|file)$"
+        names_script = r"^--(expression|file)="
+    else:
+        in_place = r"^-[0-9aplnsw]*i"
+        takes_script = r"^-[0-9aplnsw]*[eE]$"
+        names_script = None
+    if not any(re.match(in_place, a) for a in args):
+        return None
+    files, script_given, i = [], False, 0
+    while i < len(args):
+        a = args[i]
+        if re.match(takes_script, a):
+            script_given, i = True, i + 2
+            continue
+        if names_script and re.match(names_script, a):
+            script_given = True
+        elif a == "-i" and i + 1 < len(args) and (args[i + 1] == "" or args[i + 1].startswith(".")):
+            # BSD sed's backup suffix, `-i ''` or `-i .bak`.
+            i += 1
+        elif not (a.startswith("-") and a != "-"):
+            files.append(a)
+        i += 1
+    return files if script_given else files[1:]
+
+
+# A script opening a file for writing: Python's open() with a write mode or
+# pathlib's write_text, Node's fs writes, Perl's `open(F, ">x")`, Ruby's
+# File.write.
+WRITES_FILE = re.compile(
+    r"""\bopen\((?:[^\n()]|\([^\n()]*\))*?,\s*(?:mode\s*=\s*)?(['"])[rbt]*[wax+][rbt+]*\1"""
+    r"""|\.open\(\s*(?:mode\s*=\s*)?(['"])[rbt]*[wax+][rbt+]*\2"""
+    r"""|\.write_(?:text|bytes)\("""
+    r"""|\b(?:writeFileSync|writeFile|appendFileSync|appendFile|createWriteStream)\s*\("""
+    r"""|\bopen\s*\(?\s*(?:my\s+)?[$\w]+\s*,\s*['"]\+?>"""
+    r"""|\b(?:File|IO)\.write\b""")
+# A script naming a scratch location, whose writes are taken to go there.
+SCRATCH_SCRIPT = re.compile(r"TMPDIR|['\"]/(?:private/)?tmp/|\btempfile\b|\bmkdtemp|\btmpdir\(")
+
+
+def writing_script(script):
+    return bool(WRITES_FILE.search(script)) and not SCRATCH_SCRIPT.search(script)
+
+
+def inline_scripts(words):
+    """The scripts an interpreter is given on its command line: python's
+    -c, node's -e/-p/--eval/--print, perl's and ruby's -e/-E."""
+    scripts, k = [], 1
+    while k < len(words):
+        w = words[k]
+        name, eq, value = w.partition("=")
+        if eq and name in ("--eval", "--print"):
+            scripts.append(value)
+        elif w in ("--eval", "--print") or re.match(r"^-[A-Za-z0-9]*[ceEp]$", w):
+            if k + 1 < len(words):
+                scripts.append(words[k + 1])
+            k += 1
+        elif w in ("-W", "-X", "-I", "-r", "--require", "--import", "--loader"):
+            # An option's value (python's -W/-X, perl's and ruby's -I, node's
+            # -r), not the script.
+            k += 1
+        elif not w.startswith("-") or w == "-":
+            # A script file or stdin: the options after it are its own.
+            break
+        k += 1
+    return scripts
+
+
+def interpreter(prog):
+    """Whether a program runs a script this can't read."""
+    return prog in INTERPRETERS or bool(re.match(r"^python[0-9.]*$", prog))
+
+
+def shell_edit(result):
+    """How a command line changes a project file from Bash, or None. The
+    common forms only (not cp, mv, dd, patch...): this turns an easy mistake
+    into a redirect, it doesn't stop a determined one."""
+    for target in result.writes:
+        if project_file(target):
+            return f"redirecting to {target}"
+    for words in result.commands:
+        if words[0].startswith(">"):
+            continue
+        prog = program(words[0])
+        if prog in ("sed", "gsed", "perl"):
+            files = in_place_files(prog, words[1:])
+            if files is not None and (not files or any(project_file(f) for f in files)):
+                return f"{prog} -i"
+        if prog == "tee":
+            for f in words[1:]:
+                if not f.startswith("-") and project_file(f):
+                    return f"tee {f}"
+        # The interpreter may come behind a runner (`uv run python -c`).
+        k = next((k for k, w in enumerate(words) if interpreter(program(w))), None)
+        if k is not None and any(writing_script(s) for s in inline_scripts(words[k:])):
+            return f"a {program(words[k])} script writing a file"
+    for script in result.scripts:
+        if writing_script(script):
+            return "a script writing a file"
+    return None
+
+
 def decide(tool, tool_input, policy):
     """(decision, reason), or None to leave the call to Claude Code."""
     if tool in ("Read", "Edit", "Write", "MultiEdit", "NotebookEdit"):
@@ -1163,6 +1322,13 @@ def decide(tool, tool_input, policy):
         if reason:
             return "deny", reason
         return "ask", f"coldlogic guard can't follow this command ({e})."
+
+    edit = shell_edit(result)
+    if edit:
+        # A shell edit prompts the user, the Edit and Write tools don't.
+        return "deny", (f"coldlogic guard: {edit} changes a project file from Bash. Make the change "
+                        "with the Edit or Write tool instead, then run any command as its own Bash "
+                        "call. Scratch output can go to $TMPDIR or /dev/null.")
 
     commands = [w for w in result.commands if not w[0].startswith(">")]
     deny = [rule_regex(r, widen=True) for r in policy.get("deny", [])]

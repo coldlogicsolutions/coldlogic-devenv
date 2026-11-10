@@ -51,6 +51,14 @@ BASH = [
     ("gh-app pr review 12 --approve", DENY),
     ("gh-app api repos/o/r/pulls/12/reviews -f event=APPROVE", DENY),
     ("gh-app pr view 12", ALLOW),
+    # The App merges only through `gh-app pr merge`, which checks the PR.
+    ("gh-app api -X PUT repos/o/r/pulls/1/merge", DENY),
+    ("gh-app api --method=PUT repos/o/r/pulls/1/merge -f merge_method=squash", DENY),
+    ("devenv shell --quiet -- gh-app api graphql -f query='mutation{mergePullRequest(input:{pullRequestId:\"X\"}){clientMutationId}}'", DENY),
+    ("gh-app api graphql -f query='mutation{enablePullRequestAutoMerge(input:{pullRequestId:\"X\"}){clientMutationId}}'", DENY),
+    ("gh-app api repos/o/r/pulls/1/merge", NONE),
+    ("gh-app pr merge --auto --squash 12", NONE),
+    ("gh-app pr view 12 --json mergeable,mergeStateStatus", ALLOW),
     # From the security review.
     ("git status\ngit push --force", DENY),
     ("git log --oneline\nrm -rf build", NONE),
@@ -199,7 +207,7 @@ BASH = [
     ("cargo +nightly test", NONE),
     ("jq -n env", NONE),
     ("cat =ssh", NONE),
-    ("echo hi >&2x", NONE),
+    ("echo hi >&2x", DENY),
     ("echo hi >&2", NONE),
     ("ls *", NONE),
     ("cat .e*", DENY),
@@ -264,7 +272,8 @@ BASH = [
     ("git diff --no-index /tmp/a /tmp/b", ALLOW),
     ("git diff --no-index /etc/a /tmp/b", ASK),
     # Mentioning a secrets file without reading it.
-    ("echo .dev.vars >> .gitignore", NONE),
+    ("echo .dev.vars >> .gitignore", DENY),
+    ("echo .dev.vars >> \"$TMPDIR/ignore\"", NONE),
     ("git check-ignore -v .dev.vars", NONE),
     ("git rm --cached .env", NONE),
     ("ls -la .dev.vars", ALLOW),
@@ -332,7 +341,82 @@ BASH = [
     ("devenv shell --quiet -- rm -rf build", ASK),
     ("devenv shell -- cargo publish", DENY),
     # Writing a file isn't auto-allowed.
-    ("git log > out.txt", NONE),
+    ("git log > \"$TMPDIR/log.txt\"", NONE),
+    # Changing a project file from Bash is turned to the Edit and Write tools.
+    ("git log > out.txt", DENY),
+    ("sed -i 's/a/b/' src/main.rs", DENY),
+    ("sed -i '' 's/a/b/' src/main.rs", DENY),
+    ("sed -i.bak -e 's/a/b/' a.txt", DENY),
+    ("sed -E -i 's/a/b/' a.txt b.txt", DENY),
+    ("sed --in-place 's/a/b/' a.txt", DENY),
+    ("devenv shell --quiet -- sed -i 's/a/b/' src/main.rs", DENY),
+    ("perl -pi -e 's/a/b/' src/main.rs", DENY),
+    ("perl -i -pe 's/a/b/' src/main.rs", DENY),
+    ("grep -rl x src | xargs sed -i 's/a/b/'", DENY),
+    ("find src -name '*.rs' -exec sed -i 's/a/b/' {} +", DENY),
+    ("echo x | tee src/out.txt", DENY),
+    ("echo x | tee -a notes.md", DENY),
+    ("echo x > src/a.rs", DENY),
+    ("printf x >> README.md", DENY),
+    ("cat > src/a.rs <<'EOF'\nfn main() {}\nEOF", DENY),
+    ("cat <<'EOF' > src/a.rs\nfn main() {}\nEOF", DENY),
+    ("devenv shell --quiet -- cargo test 2> err.log", DENY),
+    ("devenv shell --quiet -- cargo test &> build.log", DENY),
+    ("bash -c 'echo x > src/a.rs'", DENY),
+    ("echo $(echo x > src/a.rs)", DENY),
+    ("python3 - <<'EOF'\nfrom pathlib import Path\np = Path('src/a.rs')\np.write_text(p.read_text().replace('a', 'b'))\nEOF\ndevenv shell --quiet -- cargo test", DENY),
+    ("python3 - <<'EOF'\nwith open('src/a.rs', 'w') as f:\n    f.write('x')\nEOF", DENY),
+    ("python3 <<EOF\nopen(\"src/a.rs\", mode=\"a\").write(\"x\")\nEOF", DENY),
+    ("python3 -c \"open('a.txt', 'w').write('x')\"", DENY),
+    ("python -c 'import pathlib; pathlib.Path(\"x\").open(\"w\")'", DENY),
+    ("node -e \"require('fs').writeFileSync('a.json', '{}')\"", DENY),
+    ("devenv shell --quiet -- node <<'EOF'\nconst fs = require('fs');\nfs.writeFileSync('a', 'b');\nEOF", DENY),
+    ("perl -e 'open(my $f, \">\", \"x.txt\")'", DENY),
+    ("ruby -e 'File.write(\"x.txt\", \"y\")'", DENY),
+    # Reading, and writing to a device or a scratch file, still pass.
+    ("cargo build >/dev/null 2>&1", NONE),
+    ("cargo build 2>/dev/null", NONE),
+    ("devenv shell --quiet -- cargo test 2>/dev/null", ASK),
+    ("echo x > \"$TMPDIR/body.md\"", NONE),
+    ("echo x > ${TMPDIR}/body.md", NONE),
+    ("echo x > /tmp/claude-501/scratch/x", NONE),
+    ("echo x >> /private/tmp/claude-501/scratch/log", NONE),
+    ("echo x > /dev/stderr", NONE),
+    ("echo x > ~/notes.txt", NONE),
+    ("cat <<'EOF'\nopen(f, 'w') and sed -i are mentioned here\nEOF", NONE),
+    ("gh-app pr create --title x --body-file - <<'EOF'\nNo more `sed -i` or `> file`; open(f, 'w') neither.\nEOF", NONE),
+    ("gh-app issue comment 3 --body-file \"$TMPDIR/body.md\"", NONE),
+    ("sed 's/a/b/' src/a.rs", NONE),
+    ("sed -n '1,20p' src/a.rs", NONE),
+    ("sed -e 's/a/b/' -n src/a.rs | head", NONE),
+    ("sed -i 's/a/b/' \"$TMPDIR/x\"", NONE),
+    ("sed -i '' 's/a/b/' /tmp/claude-501/x", NONE),
+    ("perl -ne 'print if /x/' src/a.rs", NONE),
+    ("echo x | tee /dev/null", NONE),
+    ("echo x | tee -a \"$TMPDIR/log\"", NONE),
+    ("cargo build 2>&1 | tee", NONE),
+    ("python3 - <<'EOF'\nprint(open('src/a.rs').read())\nEOF", NONE),
+    ("python3 -c 'import json; print(json.load(open(\"a.json\", \"rb\")))'", NONE),
+    ("node -e \"console.log(require('fs').readFileSync('a', 'utf8'))\"", NONE),
+    # From the review: reads that only look like writes, scratch writes from a
+    # script, a script's arguments, and paths spelled through the project.
+    ("python3 -c \"print(open('a').read(), 'which')\"", NONE),
+    ("python3 -c \"open(os.path.join('a', 'b'), 'w').write('x')\"", DENY),
+    ("python3 -c \"open('/tmp/claude-501/x', 'w').write('y')\"", NONE),
+    ("node -e \"require('fs').writeFileSync(process.env.TMPDIR + '/x', 'y')\"", NONE),
+    ("node script.js \"fs.writeFile(x)\"", NONE),
+    ("python3 tool.py --out \"open(x, 'w')\"", NONE),
+    ("echo x > \"$CLAUDE_PROJECT_DIR/src/a.rs\"", DENY),
+    ("echo x > \"$PWD/src/a.rs\"", DENY),
+    ("echo x > \"${PWD}/src/a.rs\"", DENY),
+    ("echo x > \"$OUT/a.rs\"", NONE),
+    ("echo x > .git/hooks/pre-commit", NONE),
+    ("python3.12 <<'EOF'\nopen('src/a.rs', 'w').write('x')\nEOF", DENY),
+    ("uv run python -c \"open('a.txt', 'w').write('x')\"", DENY),
+    ("python3 tool.py -c \"open(x, 'w')\"", NONE),
+    ("python3 -W ignore -c \"open('f', 'w').write('x')\"", DENY),
+    ("echo x >! out.txt", DENY),
+    ("echo x >! \"$TMPDIR/out.txt\"", NONE),
     # Nothing to say: Claude Code's rules decide.
     ("rm -rf build", NONE),
     ("npm run deploy", ASK),
@@ -472,6 +556,58 @@ with tempfile.TemporaryDirectory() as root:
             failures += 1
             print(f"FAIL {command!r} in {cwd}: expected {expected}, got {got}")
     guard.WORKING.update(cwd=None, root=None)
+
+# Shell edits by absolute path: inside the project they're turned to the
+# Edit and Write tools, outside it they're left to the rules.
+with tempfile.TemporaryDirectory() as root:
+    root = os.path.realpath(root)
+    os.makedirs(os.path.join(root, "src"))
+    guard.WORKING.update(cwd=root, root=root)
+    for command, expected in [
+        (f"echo x > {root}/src/a.rs", "deny"),
+        (f"sed -i '' 's/a/b/' {root}/src/a.rs", "deny"),
+        (f"echo x | tee {root}/notes.md", "deny"),
+        ("echo x > src/a.rs", "deny"),
+        ("echo x > ../elsewhere.txt", None),
+        ("echo x > /etc/elsewhere", None),
+        (f"echo x > {os.path.dirname(root)}/elsewhere.txt", None),
+    ]:
+        guard.WORKING.update(cwd=root, root=root)
+        got = guard.decide("Bash", {"command": command}, POLICY)
+        checks += 1
+        got = got[0] if got else None
+        if got != expected:
+            failures += 1
+            print(f"FAIL {command!r} in a project: expected {expected}, got {got}")
+    guard.WORKING.update(cwd=None, root=None)
+
+# A session in a worktree beside the project, outside its root. Both live in
+# a temporary directory here, which would otherwise count as scratch.
+with tempfile.TemporaryDirectory() as top:
+    top = os.path.realpath(top)
+    root, sibling = os.path.join(top, "proj"), os.path.join(top, "proj.worktrees", "x")
+    os.makedirs(root)
+    os.makedirs(sibling)
+    real_scratch = guard.scratch
+    guard.scratch = lambda path: False
+    try:
+        for command, expected in [
+            ("sed -i '' 's/a/b/' src/a.rs", "deny"),
+            ("echo x > src/a.rs", "deny"),
+            (f"echo x | tee {sibling}/notes.md", "deny"),
+            ("echo x > \"$TMPDIR/x\"", None),
+            (f"echo x > {top}/elsewhere.txt", None),
+        ]:
+            guard.WORKING.update(cwd=sibling, root=root)
+            got = guard.decide("Bash", {"command": command}, POLICY)
+            checks += 1
+            got = got[0] if got else None
+            if got != expected:
+                failures += 1
+                print(f"FAIL {command!r} in a sibling worktree: expected {expected}, got {got}")
+    finally:
+        guard.scratch = real_scratch
+        guard.WORKING.update(cwd=None, root=None)
 
 # File tools on the project's Claude Code configuration ask; files in its
 # worktrees, and anywhere else, are left to the Edit allow rule.
