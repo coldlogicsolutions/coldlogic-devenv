@@ -1,0 +1,19 @@
+# yaml-language-server: $schema=https://devenv.sh/devenv.schema.json
+# A stand-in project on the rust-worker profile. The cache job in
+# .github/workflows/dispatch-updates.yaml builds its shells with this
+# repository's devenv.lock copied in, so what it pushes is what a project's
+# shell needs once the update workflow has aligned its inputs to the
+# module's. The inputs are the ones a project declares (README, "Using it").
+inputs:
+  git-hooks:
+    url: github:cachix/git-hooks.nix
+  nixpkgs:
+    url: github:NixOS/nixpkgs/nixpkgs-unstable
+  rust-overlay:
+    url: github:oxalica/rust-overlay
+    inputs:
+      nixpkgs:
+        follows: nixpkgs
+imports:
+  - ../../..
+  - ../../../profiles/rust-worker

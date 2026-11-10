@@ -96,6 +96,40 @@ jobs:
           rm updated/devenv.lock
           rmdir updated
 
+      # Moves the inputs the module asks projects to declare to the revisions
+      # the module itself locks, read from GitHub at the revision checked
+      # above. The module's cache job (dispatch-updates.yaml) builds and
+      # pushes the shells with exactly these, so the project's shells
+      # download rather than build. An input the project declares differently
+      # (another branch, say) is left alone.
+      - name: Align nixpkgs, rust-overlay and git-hooks with the module's
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          rev=$(jq -er '.nodes."coldlogic-devenv".locked.rev' devenv.lock)
+          module=$(gh api -H 'Accept: application/vnd.github.raw' \
+            "repos/coldlogicsolutions/coldlogic-devenv/contents/devenv.lock?ref=$rev")
+          for input in nixpkgs rust-overlay git-hooks; do
+            # The node each lock names for the input; a `follows` is a list.
+            ours=$(jq -r --arg i "$input" '.nodes.root.inputs[$i] | strings' devenv.lock)
+            theirs=$(jq -r --arg i "$input" '.nodes.root.inputs[$i] | strings' <<<"$module")
+            if [[ -z $ours || -z $theirs ]]; then
+              echo "$input: not a direct input of both locks, left alone"
+              continue
+            fi
+            if ! jq -e --arg o "$ours" --arg t "$theirs" --argjson m "$module" \
+              '.nodes[$o].original == $m.nodes[$t].original' devenv.lock >/dev/null; then
+              echo "$input: declared differently from the module's, left alone"
+              continue
+            fi
+            new_lock=$(jq --arg o "$ours" --arg t "$theirs" --argjson m "$module" \
+              '.nodes[$o].locked = $m.nodes[$t].locked' devenv.lock)
+            printf '%s' "$new_lock" > devenv.lock.new
+            mv devenv.lock.new devenv.lock
+            echo "$input: $(jq -r --arg o "$ours" '.nodes[$o].locked.rev // "?"' devenv.lock)"
+          done
+
       # Limited to this repository and to what opening a PR needs.
       - id: app-token
         uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
@@ -106,7 +140,8 @@ jobs:
           permission-pull-requests: write
 
       # Opens the PR, or refreshes the open one, only when devenv.lock moved.
-      - uses: peter-evans/create-pull-request@5f6978faf089d4d20b00c7766989d076bb2fc7f1 # v8.1.1
+      - id: pr
+        uses: peter-evans/create-pull-request@5f6978faf089d4d20b00c7766989d076bb2fc7f1 # v8.1.1
         with:
           token: ${{ steps.app-token.outputs.token }}
           branch: chore/update-coldlogic-devenv
@@ -116,8 +151,19 @@ jobs:
           body: |
             ## Summary
             - Moves `coldlogic-devenv` in `devenv.lock` to the module's latest revision.
+            - Moves `nixpkgs`, `rust-overlay` and `git-hooks` to the revisions the module locks, where the project declares them the same way, so its shells come from the `coldlogic` cache.
 
             ## Test plan
-            - CI tests this PR.
+            - CI tests this PR. Auto-merge is on: it merges once approved and green.
           reviewers: derekjw
           draft: false
+
+      # Approval is still required (the ruleset): this only saves merging by
+      # hand once it's given and CI passes. Squash is the merge method every
+      # repository allows.
+      - name: Turn on auto-merge
+        if: steps.pr.outputs.pull-request-number != ''
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          PR: ${{ steps.pr.outputs.pull-request-number }}
+        run: gh pr merge "$PR" --repo "$GITHUB_REPOSITORY" --auto --squash

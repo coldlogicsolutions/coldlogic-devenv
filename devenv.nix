@@ -38,6 +38,10 @@ let
     if set != "" then set else "${gnupgHome}/S.gpg-agent";
 in
 {
+  # Every shell substitutes from the cache this repository's
+  # dispatch-updates workflow pushes the profiles' shells to.
+  cachix.pull = [ "coldlogic" ];
+
   profiles.developer.module =
     { config, lib, ... }:
     {
