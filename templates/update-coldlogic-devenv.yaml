@@ -96,13 +96,13 @@ jobs:
           rm updated/devenv.lock
           rmdir updated
 
-      # Moves the inputs the module asks projects to declare to the revisions
-      # the module itself locks, read from GitHub at the revision checked
+      # Moves the inputs the module asks projects to declare, and devenv, to
+      # the revisions the module itself locks, read from GitHub at the revision checked
       # above. The module's cache job (dispatch-updates.yaml) builds and
       # pushes the shells with exactly these, so the project's shells
       # download rather than build. An input the project declares differently
       # (another branch, say) is left alone.
-      - name: Align nixpkgs, rust-overlay and git-hooks with the module's
+      - name: Align nixpkgs, rust-overlay, git-hooks and devenv with the module's
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -110,7 +110,7 @@ jobs:
           rev=$(jq -er '.nodes."coldlogic-devenv".locked.rev' devenv.lock)
           module=$(gh api -H 'Accept: application/vnd.github.raw' \
             "repos/coldlogicsolutions/coldlogic-devenv/contents/devenv.lock?ref=$rev")
-          for input in nixpkgs rust-overlay git-hooks; do
+          for input in nixpkgs rust-overlay git-hooks devenv; do
             # The node each lock names for the input; a `follows` is a list.
             ours=$(jq -r --arg i "$input" '.nodes.root.inputs[$i] | strings' devenv.lock)
             theirs=$(jq -r --arg i "$input" '.nodes.root.inputs[$i] | strings' <<<"$module")
@@ -118,8 +118,12 @@ jobs:
               echo "$input: not a direct input of both locks, left alone"
               continue
             fi
-            if ! jq -e --arg o "$ours" --arg t "$theirs" --argjson m "$module" \
-              '.nodes[$o].original == $m.nodes[$t].original' devenv.lock >/dev/null; then
+            # Declared the same way: the same source, and the same `follows`
+            # (rust-overlay's nixpkgs), with any input of its own as its own.
+            if ! jq -e --arg o "$ours" --arg t "$theirs" --argjson m "$module" '
+              def shape: (.inputs // {}) | map_values(if type == "array" then . else "own" end);
+              .nodes[$o].original == $m.nodes[$t].original
+                and (.nodes[$o] | shape) == ($m.nodes[$t] | shape)' devenv.lock >/dev/null; then
               echo "$input: declared differently from the module's, left alone"
               continue
             fi
@@ -151,7 +155,7 @@ jobs:
           body: |
             ## Summary
             - Moves `coldlogic-devenv` in `devenv.lock` to the module's latest revision.
-            - Moves `nixpkgs`, `rust-overlay` and `git-hooks` to the revisions the module locks, where the project declares them the same way, so its shells come from the `coldlogic` cache.
+            - Moves `nixpkgs`, `rust-overlay`, `git-hooks` and `devenv` to the revisions the module locks, where the project declares them the same way, so its shells come from the `coldlogic` cache.
 
             ## Test plan
             - CI tests this PR. Auto-merge is on: it merges once approved and green.

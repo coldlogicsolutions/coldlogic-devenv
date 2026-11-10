@@ -1,8 +1,12 @@
-# Builds and caches the profiles' shells, then asks every repository in the
-# organization to update its coldlogic-devenv pin now, rather than at its
-# weekly run: runs whenever main moves, or by hand. Each repository whose update workflow listens for the
+# Builds the profiles' shells and pushes them to the coldlogic cachix cache,
+# then asks every repository in the organization to update its
+# coldlogic-devenv pin now, rather than at its weekly run. Runs whenever main
+# moves, or by hand. Each repository whose update workflow listens for the
 # `coldlogic-devenv-updated` event (templates/update-coldlogic-devenv.yaml)
 # runs it; one without the workflow is skipped.
+#
+# The cache job needs CACHIX_AUTH_TOKEN, which the infrastructure stack puts
+# in a `cachix` environment deployable only from main.
 #
 # Sends a repository_dispatch event, which needs Contents write, a permission
 # the coldlogic-ai App already holds. Starting the workflow directly would
@@ -16,9 +20,11 @@ on:
 
 permissions: {}
 
+# Queued, not cancelled: a run cancelled mid-build would waste its push, and
+# the latest pending run still covers every commit before it.
 concurrency:
   group: dispatch-updates
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 jobs:
   # Builds the shells a project on each profile enters, with the module's own
@@ -36,7 +42,9 @@ jobs:
       contents: read
     strategy:
       matrix:
-        # CI's platform, and the developers' machines.
+        # CI's platform, and the developers' machines. A failure on either
+        # holds back the dispatch to every project: rerun the failed job once
+        # it's fixed or found to be transient.
         runner: [ubuntu-latest, macos-latest]
     runs-on: ${{ matrix.runner }}
     steps:
