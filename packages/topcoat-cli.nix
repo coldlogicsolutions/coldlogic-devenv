@@ -25,6 +25,9 @@ pkgs.rustPlatform.buildRustPackage (finalAttrs: {
   # Its tests run Topcoat projects end to end; what's needed here is the
   # binary.
   doCheck = false;
+  # Checks the binary it installed reports this version.
+  nativeInstallCheckInputs = [ pkgs.versionCheckHook ];
+  doInstallCheck = true;
 
   meta = {
     description = "CLI for Topcoat, a Rust web framework for server-rendered apps";

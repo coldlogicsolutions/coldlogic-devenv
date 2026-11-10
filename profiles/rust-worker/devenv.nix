@@ -13,12 +13,16 @@ in
     build.module.packages = with pkgs; [
       worker-build
       wasm-pack
-      topcoat-cli
     ];
+
+    # The gate's, not the build's.
+    ci.module.packages = [ topcoat-cli ];
 
     developer.module =
       { config, ... }:
       {
+        packages = [ topcoat-cli ];
+
         files."${config.claude.code.settingsPath}".json = {
           extraKnownMarketplaces.cloudflare.source = {
             source = "github";
