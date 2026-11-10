@@ -316,7 +316,23 @@ in
               "static.rust-lang.org"
               "registry.npmjs.org"
               "workers.cloudflare.com"
-            ];
+              # Documentation and source a session reads from the shell.
+              "docs.rs"
+              "doc.rust-lang.org"
+              "raw.githubusercontent.com"
+              "developers.cloudflare.com"
+              "nixos.org"
+              "search.nixos.org"
+              # GitHub Actions logs (`gh run view --log`), so a session can
+              # read why CI failed: the results service, and the storage
+              # accounts it redirects to, as GitHub lists them in
+              # `gh api meta --jq .domains.actions`. Named one by one rather
+              # than *.blob.core.windows.net, which is anyone's Azure storage.
+              "results-receiver.actions.githubusercontent.com"
+            ]
+            ++ map (n: "productionresultssa${toString n}.blob.core.windows.net") (
+              lib.range 0 19 ++ lib.range 30 49 ++ lib.range 100 199
+            );
           };
         };
       };
