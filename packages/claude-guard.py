@@ -86,6 +86,11 @@ class Command:
         # A file it reads from or writes to by redirection.
         self.redirects = []
         self.heredocs = []
+        # Quoted strings in a script fed to an interpreter, checked as paths
+        # for the secrets check only.
+        self.mentions = []
+        # It runs a script this can't read.
+        self.unread = False
 
     def __bool__(self):
         return bool(self.words or self.redirects)
@@ -207,7 +212,17 @@ def lex(text):
                 if SHELLS & programs or pipes_to_shell(text):
                     inner.append(body)
                 elif INTERPRETERS & programs:
-                    raise Unparsable("a heredoc fed to an interpreter")
+                    # A script this can't read: no allow from here, so the
+                    # sandbox and Claude Code's rules decide it. A string in
+                    # it that looks like a path still can't name a secrets
+                    # file.
+                    ended.unread = True
+                    ended.mentions.extend(
+                        m.group(2) for m in re.finditer(r"""(['"])([^'"\s]+)\1""", body)
+                        if "/" in m.group(2) or m.group(2).startswith("."))
+                    if not delimiter_quoted:
+                        # bash expands the body before the interpreter reads it.
+                        quoted_text(body, inner, ended)
                 elif not delimiter_quoted:
                     # An unquoted delimiter: bash still expands the body.
                     quoted_text(body, inner, ended)
@@ -317,7 +332,6 @@ def lex(text):
 def pipes_to_shell(text):
     return bool(re.search(r"\|\s*(bash|sh|zsh|dash)\b", text))
 
-
 def take_body(text, i, delimiter, strip_tabs):
     """(a heredoc's body, the index after its closing line). Only `<<-`
     strips leading tabs from the closing line."""
@@ -389,9 +403,9 @@ def analyse(text):
     for script in inner:
         result.add(analyse(script))
     for cmd in commands:
-        if cmd.expands or cmd.redirects:
+        if cmd.expands or cmd.redirects or cmd.unread:
             result.opaque = True
-        for target in cmd.redirects:
+        for target in cmd.redirects + cmd.mentions:
             # Kept as words for the secrets check.
             result.commands.append([">" + target])
         if cmd.words:
@@ -1003,6 +1017,25 @@ def names_secret(path):
     return "secrets" in parts[:-1] or name == "secrets"
 
 
+def claude_config(path):
+    """Whether a path inside the project is in a `.claude` directory, other
+    than inside one of its worktrees (`.claude/worktrees/<name>/...`), which
+    are checkouts of the project."""
+    where = resolve(path)
+    if where is None or where[1] is None:
+        return False
+    parts = unicodedata.normalize("NFKC", where[1]).casefold().split(os.sep)
+    i = 0
+    while i < len(parts):
+        if parts[i] == ".claude":
+            if parts[i + 1:i + 2] == ["worktrees"] and len(parts) > i + 3:
+                i += 3
+                continue
+            return True
+        i += 1
+    return False
+
+
 def rule_regex(rule, widen=False):
     if rule == "*":
         return re.compile(r"[\s\S]*\Z")
@@ -1011,7 +1044,7 @@ def rule_regex(rule, widen=False):
 
 def _rule_regex(rule, widen=False):
     """A Bash permission rule as a regex. `*` matches anything but a
-    newline; a trailing ` *` is optional when it's the rule's only wildcard.
+    newline (matches() turns one inside a parsed word into text); a trailing ` *` is optional when it's the rule's only wildcard.
     The older `cmd:*` form means `cmd *`, or, for an ask or deny rule
     (widen), any command starting with `cmd`."""
     if rule.endswith(":*"):
@@ -1028,7 +1061,11 @@ def matches(rules, words):
     (`"git status x/evil"` runs a file of that name) matches nothing."""
     if re.search(r"\s", words[0]):
         return False
-    text = " ".join(words)
+    # A quoted argument may span lines (a PR body). The words are already
+    # parsed, so a newline in one is text that a rule's `*` covers, for every
+    # kind of rule alike. A stand-in no rule spells, so an exact rule
+    # (`git push origin main`) doesn't match `git push "origin\nmain"`.
+    text = " ".join(words).replace("\n", "\0")
     return any(r.match(text) for r in rules)
 
 
@@ -1087,6 +1124,10 @@ def decide(tool, tool_input, policy):
             # A repository's own files, config and hooks among them, which git
             # runs from.
             return "deny", f"{path} is inside a .git directory."
+        if tool != "Read" and claude_config(path):
+            # The project's settings, hooks, skills and agents, which the
+            # Edit allow rule would otherwise cover.
+            return "ask", f"{path} is part of the project's Claude Code configuration."
         return None
     if tool in ("Grep", "Glob"):
         # Glob only lists names, so its pattern may mention a secrets file.
@@ -1176,9 +1217,9 @@ PLAIN = re.compile(r"[A-Za-z0-9 _./:@%+,=-]")
 def simple_command(command):
     """The commands of a plain pipeline, optionally behind `devenv shell
     [--quiet] --`, that the shell runs as written: words with no expansion,
-    redirect, comment or escape outside quotes and nothing but text inside
-    them, joined only by `|`, with `2>&1` allowed. Anything else gets no allow
-    from this hook."""
+    redirect, comment or escape outside quotes and nothing but text, newlines
+    included, inside them, joined only by `|`, with `2>&1` allowed. Anything
+    else gets no allow from this hook."""
     text = command[len(m.group(0)):] if (m := WRAPPER.match(command)) else command
     commands, words, word, i = [], [], None, 0
     while i < len(text):
@@ -1199,13 +1240,13 @@ def simple_command(command):
             i += 1
         elif c == "'":
             j = text.find("'", i + 1)
-            if j < 0 or "\n" in text[i:j]:
+            if j < 0:
                 return None
             word = (word or "") + text[i + 1:j]
             i = j + 1
         elif c == '"':
             j = text.find('"', i + 1)
-            if j < 0 or re.search(r'[$`\\\n]', text[i + 1:j]):
+            if j < 0 or re.search(r'[$`\\]', text[i + 1:j]):
                 return None
             word = (word or "") + text[i + 1:j]
             i = j + 1

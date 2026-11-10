@@ -140,6 +140,14 @@ in
             "**/.env"
             "**/secrets/**"
           ];
+          # Edits and writes anywhere in the checkout (its worktrees included)
+          # need no prompt: it is under git, and the gate and review still run
+          # before a commit. The deny rules above and below win over it, and
+          # the guard hook asks before a change to `.git` or `.claude`. An
+          # allow rule rather than `defaultMode = "acceptEdits"`, which would
+          # replace the mode the user picked (auto, say). `//` makes the path
+          # absolute: the file is generated per checkout.
+          rules.Edit.allow = [ "/${config.devenv.root}/**" ];
           rules.Edit.deny = [
             "**/.env"
             "**/secrets/**"
@@ -365,7 +373,28 @@ in
             *) exit 0 ;; # a local path: input while developing the module
           esac
           [ -n "$locked" ] || exit 0
-          latest=$(GIT_TERMINAL_PROMPT=0 timeout 3 git ls-remote "$remote" HEAD 2>/dev/null | cut -f1) || true
+          # The remote's HEAD, remembered for an hour so that not every shell
+          # waits on the network: `<time> <remote> <rev>`. Only an entry that
+          # says the lock is current is used, so an update or a torn write
+          # just fetches again.
+          cache="''${DEVENV_STATE:-$DEVENV_ROOT/.devenv/state}/coldlogic-freshness"
+          now=$(date +%s)
+          latest=""
+          at="" cached_remote="" cached_rev=""
+          { read -r at cached_remote cached_rev <"$cache"; } 2>/dev/null || true
+          case "$at" in
+            "" | *[!0-9]*) at=0 ;;
+          esac
+          age=$((now - at))
+          if [ "$cached_remote" = "$remote" ] && [ "$cached_rev" = "$locked" ] && [ "$age" -ge 0 ] && [ "$age" -lt 3600 ]; then
+            latest=$cached_rev
+          else
+            latest=$(GIT_TERMINAL_PROMPT=0 timeout 3 git ls-remote "$remote" HEAD 2>/dev/null | cut -f1) || true
+            if [ -n "$latest" ]; then
+              mkdir -p "$(dirname "$cache")" 2>/dev/null &&
+                echo "$now $remote $latest" >"$cache" 2>/dev/null || true
+            fi
+          fi
           if [ -n "$latest" ] && [ "$latest" != "$locked" ]; then
             echo "coldlogic-devenv is behind (locked ''${locked:0:7}, latest ''${latest:0:7}); run: devenv update coldlogic-devenv" >&2
           fi

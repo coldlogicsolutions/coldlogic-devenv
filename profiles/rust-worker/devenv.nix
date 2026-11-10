@@ -1,6 +1,11 @@
 # A Rust Cloudflare Worker built with workers-rs (topcoat-workers,
 # derekjw.com, coldlogic).
 { pkgs, ... }:
+let
+  # `topcoat fmt`, for the gate: at the Topcoat version the projects pin
+  # (packages/topcoat-cli.nix), not nixpkgs'.
+  topcoat-cli = import ../../packages/topcoat-cli.nix { inherit pkgs; };
+in
 {
   imports = [ ../rust-lib/devenv.nix ];
 
@@ -10,9 +15,14 @@
       wasm-pack
     ];
 
+    # The gate's, not the build's.
+    ci.module.packages = [ topcoat-cli ];
+
     developer.module =
       { config, ... }:
       {
+        packages = [ topcoat-cli ];
+
         files."${config.claude.code.settingsPath}".json = {
           extraKnownMarketplaces.cloudflare.source = {
             source = "github";

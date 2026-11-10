@@ -18,3 +18,6 @@ devenv.local.yaml
 /tests/fixtures/*/.claude/
 /tests/fixtures/*/.mcp.json
 /tests/fixtures/*/.pre-commit-config.yaml
+
+# Python bytecode from running the guard tests.
+__pycache__/

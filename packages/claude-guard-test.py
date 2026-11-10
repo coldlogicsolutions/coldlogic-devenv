@@ -67,7 +67,30 @@ BASH = [
     ("git --git-dir=/x/.git log", ASK),
     ("bash <<'EOF'\ngit push --force\nEOF", DENY),
     ("cat <<EOF | sh\ngit reset --hard\nEOF", DENY),
-    ("python3 <<'EOF'\nimport os\nEOF", ASK),
+    # A script fed to an interpreter is left to the sandbox, unless a string
+    # in it names a secrets file.
+    ("python3 <<'EOF'\nimport os\nEOF", NONE),
+    ("python3 - <<'EOF'\nopen('src/a.rs').read()\nEOF\ndevenv shell --quiet -- cargo test", NONE),
+    ("python3 - <<'EOF'\nopen('.env').read()\nEOF", DENY),
+    ("devenv shell --quiet -- python3 - <<EOF\nopen(\"config/secrets/key\")\nEOF", DENY),
+    ("python3 <<'EOF'\nprint('x')\nEOF\ngit push --force", DENY),
+    ("python3 - <<EOF\n$(git push --force)\nEOF", DENY),
+    ("python3 - <<EOF\nx = `git reset --hard`\nEOF", DENY),
+    ("python3 - <<'EOF'\n$(git push --force)\nEOF", NONE),
+    ("python3 - <<'EOF'\nprint('secrets', \"no .env here\")\nEOF", NONE),
+    ("python3 - <<'EOF'\nprint('see ./config/secrets/ docs')\nEOF", NONE),
+    ("cat <<'EOF'\nopen('.env').read()\nEOF", NONE),
+    # A quoted argument spanning lines is still one plain argument.
+    ("git commit -m 'fix: x\n\nThe body.'", ALLOW),
+    ("git commit -m \"fix: x\n\nThe body.\"", ALLOW),
+    ("git commit -m \"fix: x\n$(rm -rf build)\"", NONE),
+    ("git push \"origin\nmain\"", ASK),
+    ("git status\n'x'", NONE),
+    ("git commit -m 'a\n' && git push --force", DENY),
+    ("git commit -m 'a\n' && rm -rf build", NONE),
+    ("git commit -m 'a\n'\nrm -rf build", NONE),
+    ("git commit -m 'a\r\nb'", ALLOW),
+    ("git commit -m 'a\n'; rm x '\n'", NONE),
     ("cat .e*", DENY),
     ("cat .dev.v?rs", DENY),
     ("./cat README.md", NONE),
@@ -448,6 +471,31 @@ with tempfile.TemporaryDirectory() as root:
         if got != expected:
             failures += 1
             print(f"FAIL {command!r} in {cwd}: expected {expected}, got {got}")
+    guard.WORKING.update(cwd=None, root=None)
+
+# File tools on the project's Claude Code configuration ask; files in its
+# worktrees, and anywhere else, are left to the Edit allow rule.
+with tempfile.TemporaryDirectory() as root:
+    root = os.path.realpath(root)
+    guard.WORKING.update(cwd=root, root=root)
+    for tool, path, expected in [
+        ("Edit", f"{root}/.claude/settings.json", "ask"),
+        ("Write", f"{root}/.claude/skills/x/SKILL.md", "ask"),
+        ("Edit", f"{root}/.CLAUDE/hooks/x.sh", "ask"),
+        ("Edit", ".claude/agents/x.md", "ask"),
+        ("Write", f"{root}/.claude/worktrees/x/src/main.rs", None),
+        ("Edit", f"{root}/.claude/worktrees/x/.claude/settings.json", "ask"),
+        ("Write", f"{root}/.claude/worktrees/x", "ask"),
+        ("Write", f"{root}/src/main.rs", None),
+        ("Write", "/elsewhere/.claude/projects/p/memory/x.md", None),
+        ("Read", f"{root}/.claude/settings.json", None),
+    ]:
+        got = guard.decide(tool, {"file_path": path}, POLICY)
+        checks += 1
+        got = got[0] if got else None
+        if got != expected:
+            failures += 1
+            print(f"FAIL {tool} {path}: expected {expected}, got {got}")
     guard.WORKING.update(cwd=None, root=None)
 
 total = checks
