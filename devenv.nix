@@ -44,6 +44,33 @@ in
 
   profiles.developer.module =
     { config, lib, ... }:
+    let
+      # Generated files a Claude Code session's sandbox can't write.
+      protectedFiles = builtins.filter (name: config.files ? ${name}) [
+        config.claude.code.settingsPath
+        ".mcp.json"
+      ];
+      # A status script: exits 0 (skip the task) in a session when a protected
+      # link is missing or stale and can't be fixed, else 1 (run it). It does
+      # the relink itself, as devenv:files would, so that the sandbox, not a
+      # guess, decides whether the session can write it. A path that is a real
+      # file is left to devenv:files to report. (A status's output isn't
+      # shown; coldlogic:generated-files-stale says why.)
+      sessionCannotRelink = lib.mkIf (protectedFiles != [ ]) ''
+        [ -n "''${CLAUDECODE:-}" ] || exit 1
+        cd "$DEVENV_ROOT" || exit 1
+        stale=""
+        ${lib.concatMapStringsSep "\n" (name: ''
+          f=${lib.escapeShellArg name}
+          want=${lib.escapeShellArg "${config.files.${name}.file}"}
+          if [ "$(readlink "$f" 2>/dev/null)" != "$want" ] && { [ -L "$f" ] || [ ! -e "$f" ]; }; then
+            { mkdir -p "$(dirname "$f")" && ln -sfn "$want" "$f"; } 2>/dev/null || stale="$stale $f"
+          fi
+        '') protectedFiles}
+        [ -n "$stale" ] || exit 1
+        exit 0
+      '';
+    in
     {
       packages = with pkgs; [
         git
@@ -345,6 +372,39 @@ in
           fi
         '';
         before = [ "devenv:git-hooks:install" ];
+      };
+
+      # The sandbox of a Claude Code session denies writes to the generated
+      # settings and .mcp.json, so `devenv:files` failed there whenever an
+      # update changed them, and every task after it (git hooks, plugins,
+      # enterShell) was skipped as a failed dependency (#37). Worse,
+      # `devenv:files:cleanup` first removed the old links (and orphans such
+      # as .claude/skills), leaving no settings at all. Both are built-in
+      # tasks, so this is their status check: a status that succeeds skips a
+      # task without failing it. In a session, when one of those links is
+      # missing or points at an old store path, skip both, leaving what is
+      # there; everything else runs as before. A shell from a terminal
+      # relinks them.
+      tasks."devenv:files".status = sessionCannotRelink;
+      tasks."devenv:files:cleanup".status = sessionCannotRelink;
+
+      # The one notice for the above (a status's output isn't shown). Silent
+      # outside a session and whenever the links are current. Never fails.
+      tasks."coldlogic:generated-files-stale" = lib.mkIf (protectedFiles != [ ]) {
+        exec = ''
+          [ -n "''${CLAUDECODE:-}" ] || exit 0
+          cd "$DEVENV_ROOT" || exit 0
+          stale=""
+          ${lib.concatMapStringsSep "\n" (name: ''
+            [ "$(readlink ${lib.escapeShellArg name} 2>/dev/null)" = ${lib.escapeShellArg "${config.files.${name}.file}"} ] || stale="$stale ${name}"
+          '') protectedFiles}
+          if [ -n "$stale" ]; then
+            echo "coldlogic: the generated files are out of date, and this Claude Code session can't write them:$stale. Enter the shell once from a terminal, outside a Claude Code session, with: devenv shell" >&2
+          fi
+          exit 0
+        '';
+        after = [ "devenv:files" ];
+        before = [ "devenv:enterShell" ];
       };
 
       # Warns when this module is locked behind its remote, and is otherwise
