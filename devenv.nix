@@ -70,6 +70,40 @@ in
         [ -n "$stale" ] || exit 1
         exit 0
       '';
+      # What no session reads or writes, at any depth in the checkout. Each
+      # `path` becomes a Read and an Edit deny rule (`**/<path>`) and sandbox
+      # denyRead entries; one with `denyWrite` also a sandbox denyWrite entry.
+      # Claude Code merges the Read rules into the sandbox, but there `**/`
+      # doesn't match the root, so the sandbox entries name each path twice:
+      # at the root and below it.
+      secrets = [
+        {
+          path = ".env";
+          # Its usual variants, kept from reads only, and only as sandbox
+          # denyRead entries: Claude Code applies denyRead to its own tools
+          # too, so a Read rule would add nothing. They are named rather than
+          # matched with `.env.*`: denyRead wins over allowRead there, so
+          # `.env.*` would also hide `.env.example`. The guard hook denies any other `.env.*` named in
+          # a command or a file tool. A write deny overrides allowWrite, so
+          # only `.env` itself is write-denied; the guard hook keeps other
+          # `.env.*` files from being written by name.
+          readVariants = [
+            ".env.local"
+            ".env.*.local"
+            ".env.development"
+            ".env.production"
+            ".env.staging"
+            ".env.test"
+          ];
+          denyWrite = true;
+        }
+        { path = "secrets/**"; }
+      ];
+      secretRules = map (secret: "**/${secret.path}") secrets;
+      inCheckout = path: [
+        "${config.devenv.root}/${path}"
+        "${config.devenv.root}/**/${path}"
+      ];
     in
     {
       packages = with pkgs; [
@@ -163,10 +197,7 @@ in
           # read or write them either. A file a tool in the shell needs, like
           # wrangler's `.dev.vars`, can't go here: the guard hook keeps Claude's
           # own tools, and commands naming it, away from it instead.
-          rules.Read.deny = [
-            "**/.env"
-            "**/secrets/**"
-          ];
+          rules.Read.deny = secretRules;
           # Edits and writes anywhere in the checkout (its worktrees included)
           # need no prompt: it is under git, and the gate and review still run
           # before a commit. The deny rules above and below win over it, and
@@ -175,10 +206,7 @@ in
           # replace the mode the user picked (auto, say). `//` makes the path
           # absolute: the file is generated per checkout.
           rules.Edit.allow = [ "/${config.devenv.root}/**" ];
-          rules.Edit.deny = [
-            "**/.env"
-            "**/secrets/**"
-          ];
+          rules.Edit.deny = secretRules;
         };
       };
 
@@ -252,67 +280,36 @@ in
           # Claude Code documents this as a possible way to exfiltrate data.
           enableWeakerNetworkIsolation = true;
           filesystem = {
-            # No command reads a `.env` file, or its usual variants, at any
-            # depth. They are named rather than matched with `.env.*`: Claude
-            # Code applies these to its own tools too, ignoring allowRead, so
-            # `.env.*` would also hide `.env.example`. The guard hook denies
-            # any other `.env.*` named in a command or a file tool. `**/`
-            # doesn't match the root here, so each is listed twice.
-            denyRead =
-              lib.concatMap
-                (name: [
-                  "${config.devenv.root}/${name}"
-                  "${config.devenv.root}/**/${name}"
-                ])
-                [
-                  ".env"
-                  ".env.local"
-                  ".env.*.local"
-                  ".env.development"
-                  ".env.production"
-                  ".env.staging"
-                  ".env.test"
-                ]
+            # The secrets above (see `secrets`).
+            denyRead = lib.concatMap (
+              secret: lib.concatMap inCheckout ([ secret.path ] ++ secret.readVariants or [ ])
+            ) secrets;
+            denyWrite =
+              lib.concatMap (secret: inCheckout secret.path) (
+                builtins.filter (secret: secret.denyWrite or false) secrets
+              )
               ++ [
-                "${config.devenv.root}/secrets/**"
-                "${config.devenv.root}/**/secrets/**"
+                # gpg needs to write its lock files in its home (allowWrite),
+                # but not its configuration or the private keys, which the
+                # agent holds outside the sandbox.
+                "${gnupgHome}/gpg.conf"
+                "${gnupgHome}/gpg-agent.conf"
+                "${gnupgHome}/common.conf"
+                "${gnupgHome}/dirmngr.conf"
+                "${gnupgHome}/scdaemon.conf"
+                "${gnupgHome}/gpgsm.conf"
+                "${gnupgHome}/tpm2daemon.conf"
+                "${gnupgHome}/sshcontrol"
+                "${gnupgHome}/private-keys-v1.d"
               ];
-            # A write deny overrides allowWrite, so only `.env` itself is
-            # listed. The guard hook keeps other `.env.*` files from being
-            # written by name.
-            denyWrite = [
-              "${config.devenv.root}/.env"
-              "${config.devenv.root}/**/.env"
-              # gpg needs to write its lock files in its home (allowWrite),
-              # but not its configuration or the private keys, which the
-              # agent holds outside the sandbox.
-              "${gnupgHome}/gpg.conf"
-              "${gnupgHome}/gpg-agent.conf"
-              "${gnupgHome}/common.conf"
-              "${gnupgHome}/dirmngr.conf"
-              "${gnupgHome}/scdaemon.conf"
-              "${gnupgHome}/gpgsm.conf"
-              "${gnupgHome}/tpm2daemon.conf"
-              "${gnupgHome}/sshcontrol"
-              "${gnupgHome}/private-keys-v1.d"
-            ];
-            # What `devenv shell` and the toolchains inside it write to.
+            # What `devenv shell` and the tools every shell has write to. A
+            # profile adds its toolchain's; the lists concatenate.
             allowWrite = [
               "~/.cache/nix"
               "~/.cache/devenv"
               "~/.local/share/devenv"
-              "~/.cargo/registry"
-              "~/.cargo/git"
               "~/.cache/prek"
               "~/.npm"
-              # wrangler's state and the Worker build tools' downloads, on
-              # macOS and Linux.
-              "~/Library/Preferences/.wrangler"
-              "~/.config/.wrangler"
-              "~/Library/Caches/worker-build"
-              "~/.cache/worker-build"
-              "~/Library/Caches/.wasm-pack"
-              "~/.cache/.wasm-pack"
               # gpg's lock files, for signed commits (see denyWrite).
               gnupgHome
             ];
@@ -329,6 +326,7 @@ in
             ++ [ gpgAgentSocket ];
             # `wrangler dev` and the integration suites listen on localhost.
             allowLocalBinding = true;
+            # A profile adds its toolchain's registries and documentation.
             allowedDomains = [
               "github.com"
               "api.github.com"
@@ -338,16 +336,9 @@ in
               "cache.nixos.org"
               "cachix.org"
               "*.cachix.org"
-              "crates.io"
-              "*.crates.io"
-              "static.rust-lang.org"
               "registry.npmjs.org"
-              "workers.cloudflare.com"
               # Documentation and source a session reads from the shell.
-              "docs.rs"
-              "doc.rust-lang.org"
               "raw.githubusercontent.com"
-              "developers.cloudflare.com"
               "nixos.org"
               "search.nixos.org"
               # GitHub Actions logs (`gh run view --log`), so a session can

@@ -35,6 +35,24 @@ in
             repo = "cloudflare/skills";
           };
           enabledPlugins."cloudflare@cloudflare" = true;
+
+          # Added to rust-lib's and the shared module's sandbox lists.
+          sandbox = {
+            # wrangler's state and the Worker build tools' downloads, on
+            # macOS and Linux.
+            filesystem.allowWrite = [
+              "~/Library/Preferences/.wrangler"
+              "~/.config/.wrangler"
+              "~/Library/Caches/worker-build"
+              "~/.cache/worker-build"
+              "~/Library/Caches/.wasm-pack"
+              "~/.cache/.wasm-pack"
+            ];
+            network.allowedDomains = [
+              "workers.cloudflare.com"
+              "developers.cloudflare.com"
+            ];
+          };
         };
 
         # The guard hook allows no package runner, so `npx wrangler dev` is

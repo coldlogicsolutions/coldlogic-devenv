@@ -62,41 +62,59 @@
 
     developer = {
       extends = [ "build" ];
-      module = {
-        languages.rust.components = [
-          "rustc"
-          "cargo"
-          "rust-std"
-          "clippy"
-          "rustfmt"
-          "rust-analyzer"
-          "rust-docs"
-          "rust-src"
-        ];
+      module =
+        { config, ... }:
+        {
+          languages.rust.components = [
+            "rustc"
+            "cargo"
+            "rust-std"
+            "clippy"
+            "rustfmt"
+            "rust-analyzer"
+            "rust-docs"
+            "rust-src"
+          ];
 
-        git-hooks.hooks = {
-          rustfmt = {
-            enable = true;
-            # Check-only: a hook that rewrites files sweeps unrelated fmt
-            # drift into whatever is being committed. `cargo fmt` stays
-            # available to run by hand.
-            settings.check = true;
+          git-hooks.hooks = {
+            rustfmt = {
+              enable = true;
+              # Check-only: a hook that rewrites files sweeps unrelated fmt
+              # drift into whatever is being committed. `cargo fmt` stays
+              # available to run by hand.
+              settings.check = true;
+            };
+            clippy.enable = true;
           };
-          clippy.enable = true;
-        };
 
-        # Builds and checks; the shared module's guard hook applies these
-        # inside the devenv wrapper too.
-        claude.code.permissions.rules.Bash.allow = [
-          "cargo check *"
-          "cargo build *"
-          "cargo test *"
-          "cargo clippy *"
-          "cargo fmt *"
-          "cargo tree *"
-          "cargo metadata *"
-        ];
-      };
+          # Builds and checks; the shared module's guard hook applies these
+          # inside the devenv wrapper too.
+          claude.code.permissions.rules.Bash.allow = [
+            "cargo check *"
+            "cargo build *"
+            "cargo test *"
+            "cargo clippy *"
+            "cargo fmt *"
+            "cargo tree *"
+            "cargo metadata *"
+          ];
+
+          # Added to the shared module's sandbox lists: cargo's downloads, and
+          # the registries and documentation a session reaches.
+          files."${config.claude.code.settingsPath}".json.sandbox = {
+            filesystem.allowWrite = [
+              "~/.cargo/registry"
+              "~/.cargo/git"
+            ];
+            network.allowedDomains = [
+              "crates.io"
+              "*.crates.io"
+              "static.rust-lang.org"
+              "docs.rs"
+              "doc.rust-lang.org"
+            ];
+          };
+        };
     };
   };
 }
