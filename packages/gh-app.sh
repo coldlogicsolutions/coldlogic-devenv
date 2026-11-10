@@ -12,11 +12,12 @@
 # last. GitHub's ruleset requires the approval too; this adds the author, so
 # a session can't merge someone else's approved PR. `--admin` is refused.
 #
-# `--auto` (and `--disable-auto`) skip the approval check, so auto-merge can
-# be turned on as soon as the PR opens: GitHub merges only once the ruleset
-# is satisfied, and every repository's ruleset requires the approver's team
-# and dismisses an approval when new commits are pushed. The author and
-# draft checks still apply.
+# `--auto` skips the approval check, so auto-merge can be turned on as soon
+# as the PR opens: GitHub then merges only once the ruleset is satisfied.
+# So it checks the ruleset instead, and refuses unless the base branch's
+# rules require an approval and dismiss it when new commits are pushed. The
+# author and draft checks, and pinning the head commit, still apply.
+# `--disable-auto` merges nothing and is passed through.
 #
 # If the App's private key is not present, this exits with a clear error
 # message on stderr.
@@ -42,6 +43,7 @@ if [[ "${1:-}" == pr && "${2:-}" == merge ]]; then
   repo=()
   match=""
   auto=0
+  disable=0
   args=("${@:3}")
   for ((i = 0; i < ${#args[@]}; i++)); do
     arg="${args[i]}"
@@ -55,7 +57,8 @@ if [[ "${1:-}" == pr && "${2:-}" == merge ]]; then
         i=$((i + 1))
         ;;
       --repo=*) repo=(--repo "${arg#--repo=}") ;;
-      --auto | --disable-auto) auto=1 ;;
+      --auto) auto=1 ;;
+      --disable-auto) disable=1 ;;
       # Options that take a value, so it isn't read as the PR.
       --match-head-commit)
         match="${args[i + 1]:-}"
@@ -68,11 +71,14 @@ if [[ "${1:-}" == pr && "${2:-}" == merge ]]; then
     esac
   done
 
-  if ! pr="$(gh pr view "${selector[@]}" "${repo[@]}" --json url,author,isDraft,headRefOid \
-    --jq '[.url, .author.login, (.isDraft|tostring), .headRefOid] | @tsv')"; then
+  if ((disable && !auto)); then
+    exec gh "$@"
+  fi
+  if ! pr="$(gh pr view "${selector[@]}" "${repo[@]}" --json url,author,isDraft,headRefOid,baseRefName \
+    --jq '[.url, .author.login, (.isDraft|tostring), .headRefOid, .baseRefName] | @tsv')"; then
     exit 1
   fi
-  IFS=$'\t' read -r url author draft head <<<"$pr"
+  IFS=$'\t' read -r url author draft head base <<<"$pr"
   if [[ "$author" != "app/coldlogic-ai" ]]; then
     echo "gh-app: $url was opened by $author, not the App; only its own PRs merge from a session" >&2
     exit 1
@@ -81,19 +87,28 @@ if [[ "${1:-}" == pr && "${2:-}" == merge ]]; then
     echo "gh-app: $url is a draft" >&2
     exit 1
   fi
-  # GitHub holds an auto-merge until the ruleset's approval is in.
+  slug="${url#https://github.com/}"
+  slug="${slug%/pull/*}"
   if ((auto)); then
-    exec gh "$@"
-  fi
-  # The approver's last review that decides anything, on the head commit.
-  api="${url#https://github.com/}"
-  api="repos/${api%/pull/*}/pulls/${api##*/pull/}/reviews"
-  if ! last="$(gh api --paginate "$api" --jq ".[] | select(.user.login == \"$approver\" and (.state == \"APPROVED\" or .state == \"CHANGES_REQUESTED\" or .state == \"DISMISSED\")) | [.state, .commit_id] | @tsv" | tail -n 1)"; then
-    exit 1
-  fi
-  if [[ "$last" != "APPROVED"$'\t'"$head" ]]; then
-    echo "gh-app: $approver hasn't approved $url at its head commit ${head:0:7}" >&2
-    exit 1
+    # GitHub holds an auto-merge until the ruleset's approval is in, so the
+    # ruleset must ask for one. Fails closed.
+    if ! required="$(gh api "repos/$slug/rules/branches/$base" --jq '[.[] | select(.type == "pull_request") | .parameters | select(.required_approving_review_count >= 1 and .dismiss_stale_reviews_on_push)] | length')"; then
+      exit 1
+    fi
+    if [[ ! "$required" =~ ^[1-9][0-9]*$ ]]; then
+      echo "gh-app: $slug's $base rules don't require an approval that a push dismisses; turn on auto-merge by hand" >&2
+      exit 1
+    fi
+  else
+    # The approver's last review that decides anything, on the head commit.
+    api="repos/$slug/pulls/${url##*/pull/}/reviews"
+    if ! last="$(gh api --paginate "$api" --jq ".[] | select(.user.login == \"$approver\" and (.state == \"APPROVED\" or .state == \"CHANGES_REQUESTED\" or .state == \"DISMISSED\")) | [.state, .commit_id] | @tsv" | tail -n 1)"; then
+      exit 1
+    fi
+    if [[ "$last" != "APPROVED"$'\t'"$head" ]]; then
+      echo "gh-app: $approver hasn't approved $url at its head commit ${head:0:7}" >&2
+      exit 1
+    fi
   fi
   # Merges only the commit checked, should the branch move meanwhile.
   if [[ -z "$match" ]]; then
