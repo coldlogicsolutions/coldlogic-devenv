@@ -15,7 +15,7 @@ It picks a profile from the project (`rust-worker` for a Cargo project with a wr
 
 1. Adds the `git-hooks`, `rust-overlay` and `coldlogic-devenv` inputs, the imports and `profile: developer` to `devenv.yaml`, creating it if needed. Existing inputs, `nixpkgs` included, are left alone.
 2. Creates an empty `devenv.nix` if there is none.
-3. Adds the generated files to `.gitignore`, and stops tracking any committed copies (`.claude/settings.json`, `.mcp.json`, `.pre-commit-config.yaml`), moving them to `.devenv/adopt-backup/` so their settings can be ported.
+3. Adds the generated files to `.gitignore`, and stops tracking any committed copies (`.claude/settings.json`, `.mcp.json`, `.pre-commit-config.yaml`), moving them to `.devenv/adopt-backup/` so their settings can be ported. OpenSpec's Claude Code skills and commands (`.claude/skills/openspec-*/`, `.claude/commands/opsx/`) are untracked too, and left in place: the shell regenerates them.
 4. Copies the update workflow into `.github/workflows/` (`--no-workflow` skips it).
 5. Adds an `.envrc` that loads the shell through direnv, if there is none (`--no-envrc` skips it). An existing one is left alone; if it still uses the flake, or doesn't load devenv, that goes on the list at the end.
 6. Runs `devenv update` (`--no-update` skips it). That moves every pin, `nixpkgs` included.
@@ -73,7 +73,7 @@ Copy `templates/update-coldlogic-devenv.yaml` to `.github/workflows/` and regist
 
 | Path | What it adds |
 | --- | --- |
-| `devenv.nix` | `developer`: `git`, `openspec`, `gh-app`; the nixfmt hook; `claude.code` permissions and deny rules; the guard hook; the marketplace, plugin and sandbox settings (what the shell may write and reach, and the `.env` files it may not read); per-worktree `core.hooksPath`; the freshness warning |
+| `devenv.nix` | `developer`: `git`, `openspec`, `gh-app`; the nixfmt hook; `claude.code` permissions and deny rules; the guard hook; the marketplace, plugin and sandbox settings (what the shell may write and reach, and the `.env` files it may not read); per-worktree `core.hooksPath`; the freshness warning; OpenSpec's Claude Code skills and commands, generated with the module's `openspec` where the project ignores them (the sandbox can't write `.claude/skills` or `.claude/commands`, so tracked copies broke `git stash`, `rebase` and `switch`) |
 | `packages/claude-guard.py` | The PreToolUse guard hook: denies force pushes, hard resets, deploys, a flake's dev shell, merges or approvals with the user's own `gh` credentials, approvals by the App, and secrets files (`.env`, `.dev.vars` and their variants, not `.example`), however a command spells or wraps them. It allows a command only when it is one plain command, optionally behind `devenv shell --`, that an allow rule names; everything else goes to Claude Code's own rules. A backstop, not a boundary. Its cases in `claude-guard-test.py` run when it builds. |
 | `profiles/rust-lib` | Rust with wasm32 in `build`, at the version the module supports (`languages.rust.version`, 1.99.1; a project can set its own); the slimmed `ci` toolchain; rust-analyzer, docs and the check-only `rustfmt` and `clippy` hooks in `developer` |
 | `profiles/rust-worker` | `rust-lib` plus `worker-build`, `wasm-pack`, `topcoat` (for `topcoat fmt`, built with the profile's Rust), and the `cloudflare` plugin |
