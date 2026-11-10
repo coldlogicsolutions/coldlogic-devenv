@@ -362,7 +362,9 @@ in
           esac
           [ -n "$locked" ] || exit 0
           # The remote's HEAD, remembered for an hour so that not every shell
-          # waits on the network: `<time> <remote> <rev>`.
+          # waits on the network: `<time> <remote> <rev>`. Only an entry that
+          # says the lock is current is used, so an update or a torn write
+          # just fetches again.
           cache="''${DEVENV_STATE:-$DEVENV_ROOT/.devenv/state}/coldlogic-freshness"
           now=$(date +%s)
           latest=""
@@ -371,7 +373,8 @@ in
           case "$at" in
             "" | *[!0-9]*) at=0 ;;
           esac
-          if [ "$cached_remote" = "$remote" ] && [ -n "$cached_rev" ] && [ $((now - at)) -lt 3600 ]; then
+          age=$((now - at))
+          if [ "$cached_remote" = "$remote" ] && [ "$cached_rev" = "$locked" ] && [ "$age" -ge 0 ] && [ "$age" -lt 3600 ]; then
             latest=$cached_rev
           else
             latest=$(GIT_TERMINAL_PROMPT=0 timeout 3 git ls-remote "$remote" HEAD 2>/dev/null | cut -f1) || true

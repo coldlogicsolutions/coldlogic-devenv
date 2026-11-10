@@ -90,6 +90,12 @@ jobs:
           status=$(gh api "repos/coldlogicsolutions/coldlogic-devenv/compare/$rev...main" --jq .status)
           [[ $status == identical || $status == ahead ]] ||
             { echo "revision $rev is not on coldlogic-devenv's main ($status)" >&2; exit 1; }
+          # Nor behind the project's current pin: an update never rolls back.
+          current=$(jq -er "$node.rev" devenv.lock)
+          [[ $current =~ ^[0-9a-f]{40}$ ]] || { echo "bad current revision" >&2; exit 1; }
+          status=$(gh api "repos/coldlogicsolutions/coldlogic-devenv/compare/$current...$rev" --jq .status)
+          [[ $status == identical || $status == ahead ]] ||
+            { echo "revision $rev is behind the current pin $current ($status)" >&2; exit 1; }
           [[ $nar_hash =~ ^sha256-[A-Za-z0-9+/]+=*$ ]] || { echo "bad narHash" >&2; exit 1; }
           [[ $last_modified =~ ^[0-9]{1,12}$ ]] || { echo "bad lastModified" >&2; exit 1; }
           # devenv writes the lock without a trailing newline; so does this.
