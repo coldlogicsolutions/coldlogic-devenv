@@ -81,7 +81,8 @@ Copy `templates/update-coldlogic-devenv.yaml` to `.github/workflows/` and regist
 | `packages/gh-app.nix` | `gh-app <gh args>`: one `gh` call as `coldlogic-ai[bot]`. `gh-app pr merge` merges only the App's own PRs, approved at their head commit, and refuses `--admin`. The key path comes from `GH_APP_KEY` (default `~/.config/github/coldlogic-ai.pem`) |
 | `scripts/adopt.sh` | Moves a project onto this module, or sets up a new one with it (see "Adopting it") |
 | `templates/` | The workflow that proposes `devenv update coldlogic-devenv` as a PR, weekly and whenever main moves |
-| `.github/workflows/dispatch-updates.yaml` | On every push to main, sends each repository with that workflow the `coldlogic-devenv-updated` event, so it updates now |
+| `.github/workflows/dispatch-updates.yaml` | On every push to main, builds the `ci` and `developer` shells of each fixture in `tests/fixtures` on Linux and macOS and pushes them to the `coldlogic` cachix cache, then sends each repository with the update workflow the `coldlogic-devenv-updated` event, so it updates now. The update workflow aligns the project's `nixpkgs`, `rust-overlay` and `git-hooks` with the module's lock, so those cached shells are the project's, and turns on auto-merge for the PR |
+| `tests/fixtures/` | A stand-in project per profile, built by the cache job with this repository's `devenv.lock` |
 
 `rust-gui` (proxcarta) and `node-web` (paintinator, voxcarta) are added when those projects move to devenv.
 

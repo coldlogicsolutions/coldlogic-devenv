@@ -1,8 +1,12 @@
-# Asks every repository in the organization to update its coldlogic-devenv
-# pin now, rather than at its weekly run: runs whenever main moves, or by
-# hand. Each repository whose update workflow listens for the
+# Builds the profiles' shells and pushes them to the coldlogic cachix cache,
+# then asks every repository in the organization to update its
+# coldlogic-devenv pin now, rather than at its weekly run. Runs whenever main
+# moves, or by hand. Each repository whose update workflow listens for the
 # `coldlogic-devenv-updated` event (templates/update-coldlogic-devenv.yaml)
 # runs it; one without the workflow is skipped.
+#
+# The cache job needs CACHIX_AUTH_TOKEN, which the infrastructure stack puts
+# in a `cachix` environment deployable only from main.
 #
 # Sends a repository_dispatch event, which needs Contents write, a permission
 # the coldlogic-ai App already holds. Starting the workflow directly would
@@ -16,12 +20,65 @@ on:
 
 permissions: {}
 
+# Queued, not cancelled: a run cancelled mid-build would waste its push, and
+# the latest pending run still covers every commit before it.
 concurrency:
   group: dispatch-updates
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 jobs:
+  # Builds the shells a project on each profile enters, with the module's own
+  # locked inputs (which the update workflow aligns projects to), and pushes
+  # what it built to the coldlogic cache. Projects are asked to update only
+  # once this has passed, so their update PRs, and the shells after them,
+  # download rather than build. A module commit that breaks a profile stops
+  # here, before any project hears of it.
+  cache:
+    # Only main may use the cache token: the environment enforces that, and
+    # this skips the job instead of failing it.
+    if: github.ref == 'refs/heads/main'
+    environment: cachix
+    permissions:
+      contents: read
+    strategy:
+      matrix:
+        # CI's platform, and the developers' machines. A failure on either
+        # holds back the dispatch to every project: rerun the failed job once
+        # it's fixed or found to be transient.
+        runner: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: cachix/install-nix-action@13d8dd58da0234aa297dedd986986ccb8e7f3e24 # v31.11.1
+
+      # Substitutes from the cache, and at the end of the job pushes every
+      # path this job built.
+      - uses: cachix/cachix-action@38b082610b782e7e93e209c35fd730d399dee866 # v17
+        with:
+          name: coldlogic
+          authToken: ${{ secrets.CACHIX_AUTH_TOKEN }}
+
+      - name: Install devenv
+        run: nix profile add nixpkgs#devenv
+
+      # Each fixture is a stand-in project on one profile (tests/fixtures).
+      - name: Build each profile's ci and developer shells
+        run: |
+          set -euo pipefail
+          for fixture in tests/fixtures/*/; do
+            cp devenv.lock "$fixture"
+            for profile in ci developer; do
+              echo "::group::$fixture $profile"
+              (cd "$fixture" && devenv --profile "$profile" shell -- true)
+              echo "::endgroup::"
+            done
+          done
+
   dispatch:
+    needs: cache
     # Only main may use the App key: the environment enforces that, and this
     # skips the job instead of failing it.
     if: github.ref == 'refs/heads/main'

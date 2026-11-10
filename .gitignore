@@ -12,5 +12,12 @@ devenv.local.yaml
 .mcp.json
 .pre-commit-config.yaml
 
+# The cache job copies the module's lock into each fixture.
+/tests/fixtures/*/devenv.lock
+/tests/fixtures/*/.devenv*
+/tests/fixtures/*/.claude/
+/tests/fixtures/*/.mcp.json
+/tests/fixtures/*/.pre-commit-config.yaml
+
 # Python bytecode from running the guard tests.
 __pycache__/
