@@ -413,5 +413,48 @@ in
         after = [ "devenv:files" ];
         before = [ "devenv:enterShell" ];
       };
+
+      # OpenSpec's Claude Code skills and commands, generated from the
+      # module's openspec rather than tracked: the sandbox doesn't let a
+      # session write .claude/skills or .claude/commands, so git failed
+      # partway through any stash, rebase or switch that rewrote tracked
+      # copies (#32). Only where the project ignores them (adopt.sh adds the
+      # lines), so a project still tracking them never has its tree changed.
+      # Other tools' files (.agents/, .github/prompts/) are left to the
+      # project. Runs again only when openspec changes or the files are
+      # gone. A shell inside a sandboxed session can't write them, so it
+      # warns instead. Never fails the shell.
+      tasks."coldlogic:openspec-files" = {
+        exec = ''
+          export PATH=${
+            pkgs.lib.makeBinPath (
+              with pkgs;
+              [
+                coreutils
+                git
+                openspec
+              ]
+            )
+          }:$PATH
+          cd "$DEVENV_ROOT" || exit 0
+          [ -f openspec/config.yaml ] || exit 0
+          for f in .claude/skills/openspec-explore/SKILL.md .claude/commands/opsx/explore.md; do
+            git check-ignore -q "$f" 2>/dev/null || exit 0
+          done
+          stamp="''${DEVENV_STATE:-$DEVENV_ROOT/.devenv/state}/coldlogic-openspec"
+          want=${pkgs.openspec}
+          if [ "$(cat "$stamp" 2>/dev/null)" = "$want" ] && [ -f .claude/skills/openspec-explore/SKILL.md ] && [ -f .claude/commands/opsx/explore.md ]; then
+            exit 0
+          fi
+          if out=$(DO_NOT_TRACK=1 OPENSPEC_TELEMETRY=0 openspec init --tools claude --no-animation </dev/null 2>&1); then
+            mkdir -p "$(dirname "$stamp")" 2>/dev/null && echo "$want" >"$stamp" 2>/dev/null || true
+          else
+            echo "coldlogic: couldn't generate OpenSpec's Claude Code skills; enter the shell from a terminal, outside a Claude Code session" >&2
+            printf '%s\n' "$out" | grep -m1 '^Failed' >&2 || true
+          fi
+          exit 0
+        '';
+        before = [ "devenv:enterShell" ];
+      };
     };
 }
