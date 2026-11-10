@@ -5,11 +5,18 @@
 #   gh-app issue create --title "foo"
 #   gh-app pr comment 123 --body "approved"
 #   gh-app pr merge 123 --squash
+#   gh-app pr merge 123 --auto --squash
 #
 # `gh-app pr merge` merges only a PR the App opened, that isn't a draft, and
 # whose head commit the approver (GH_APP_APPROVER, default derekjw) approved
 # last. GitHub's ruleset requires the approval too; this adds the author, so
 # a session can't merge someone else's approved PR. `--admin` is refused.
+#
+# `--auto` (and `--disable-auto`) skip the approval check, so auto-merge can
+# be turned on as soon as the PR opens: GitHub merges only once the ruleset
+# is satisfied, and every repository's ruleset requires the approver's team
+# and dismisses an approval when new commits are pushed. The author and
+# draft checks still apply.
 #
 # If the App's private key is not present, this exits with a clear error
 # message on stderr.
@@ -34,6 +41,7 @@ if [[ "${1:-}" == pr && "${2:-}" == merge ]]; then
   selector=()
   repo=()
   match=""
+  auto=0
   args=("${@:3}")
   for ((i = 0; i < ${#args[@]}; i++)); do
     arg="${args[i]}"
@@ -47,6 +55,7 @@ if [[ "${1:-}" == pr && "${2:-}" == merge ]]; then
         i=$((i + 1))
         ;;
       --repo=*) repo=(--repo "${arg#--repo=}") ;;
+      --auto | --disable-auto) auto=1 ;;
       # Options that take a value, so it isn't read as the PR.
       --match-head-commit)
         match="${args[i + 1]:-}"
@@ -71,6 +80,10 @@ if [[ "${1:-}" == pr && "${2:-}" == merge ]]; then
   if [[ "$draft" == true ]]; then
     echo "gh-app: $url is a draft" >&2
     exit 1
+  fi
+  # GitHub holds an auto-merge until the ruleset's approval is in.
+  if ((auto)); then
+    exec gh "$@"
   fi
   # The approver's last review that decides anything, on the head commit.
   api="${url#https://github.com/}"
