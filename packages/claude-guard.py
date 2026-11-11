@@ -623,6 +623,7 @@ def normalize_git(words):
     if os.path.basename(words[0]) != "git":
         return words
     i = 1
+    seen_dir = False
     while i < len(words) and words[i].startswith("-"):
         w = words[i]
         name, _, inline = w.partition("=")
@@ -632,12 +633,15 @@ def normalize_git(words):
             raise Unparsable(f"git {w}")
         if name in GIT_VALUE_FLAGS:
             value = inline or (words[i + 1] if i + 1 < len(words) else "")
-            if value not in (".", "./") and not checkout_dir(value):
+            if seen_dir or (value not in (".", "./") and not same_checkout(value)):
                 # Possibly another repository, whose own configuration (a
                 # pager, an fsmonitor) runs: no rule covers that. Dropped only
-                # for `.`, or, at the top of a checkout, the top of the
-                # project or of one of its own worktrees.
+                # for `.` or, at the top of a checkout, that checkout's own
+                # top, where git reads relative arguments from the same
+                # directory the guard does. A second `-C` is relative to the
+                # first: none is dropped then.
                 return words
+            seen_dir = True
             i += 1 if inline else 2
         elif w in GIT_FLAGS:
             i += 1
@@ -648,15 +652,16 @@ def normalize_git(words):
     return ["git"] + words[i:]
 
 
-def checkout_dir(value):
-    """Whether a `git -C` value names the top of the project or of one of its
-    own worktrees, from a command run at such a top. There, relative
-    arguments mean the same inside path from either directory."""
+def same_checkout(value):
+    """Whether a `git -C` value names the directory the command already runs
+    in, when that is the top of the project or of one of its own worktrees.
+    Another checkout's top is kept: git would read the command's relative
+    arguments from there, and the guard reads them from the cwd."""
     cwd = WORKING["cwd"]
     if not cwd or not WORKING["root"] or not at_top():
         return False
-    real = os.path.realpath(value if os.path.isabs(value) else os.path.join(cwd, value))
-    return checkout_of(real) == real
+    here = os.path.realpath(cwd)
+    return os.path.realpath(value if os.path.isabs(value) else os.path.join(cwd, value)) == here
 
 
 def long_option(arg, option, shortest):
@@ -901,11 +906,24 @@ def at_top():
 
 def checkout_of(path):
     """The top of the project's checkout a path is in: the root, or one of
-    its own worktrees wherever it sits. None when the first `.git` on the way
-    up belongs to anything else (a nested repository, another repository's
-    worktree, a look-alike), or when there is none."""
+    its own worktrees in either place they sit (see own_worktree). None when
+    the first `.git` on the way up belongs to anything else (a nested
+    repository, another repository's worktree, a look-alike, a worktree
+    elsewhere), or when there is none. Remembered per guard call (decide
+    clears it), by real path and project."""
     real = os.path.realpath(path)
     base = os.path.realpath(WORKING["root"] or WORKING["cwd"])
+    key = (real, base)
+    if key not in CHECKOUTS:
+        CHECKOUTS[key] = _checkout_of(real, base)
+    return CHECKOUTS[key]
+
+
+# checkout_of's answers in this guard call.
+CHECKOUTS = {}
+
+
+def _checkout_of(real, base):
     while True:
         if real == base:
             return base
@@ -919,10 +937,16 @@ def checkout_of(path):
 
 def own_worktree(here, base):
     """Whether here is the top of one of the project's own git worktrees,
-    under `.claude/worktrees/<name>` (EnterWorktree) or beside the project in
-    `<project>.worktrees/<name>` (a WorktreeCreate hook): its `.git` file
-    names a directory under the project's `.git/worktrees`, which names it
-    back, and whose commondir is the project's `.git`."""
+    in one of the two places they are made: `<project>/.claude/worktrees/<name>`
+    (EnterWorktree) or beside the project in `<project>.worktrees/<name>` (a
+    WorktreeCreate hook). Its `.git` file names a directory under the
+    project's `.git/worktrees`, which names it back, and whose commondir is
+    the project's `.git`. Paths in those files may be relative: git reads
+    the `.git` file's against the worktree, the others against the gitdir."""
+    here = os.path.realpath(here)
+    if os.path.dirname(here) not in (os.path.realpath(os.path.join(base, ".claude", "worktrees")),
+                                     os.path.realpath(os.path.realpath(base) + ".worktrees")):
+        return False
     try:
         with open(os.path.join(here, ".git")) as f:
             m = re.match(r"gitdir: (.+)", f.read().strip())
@@ -932,7 +956,7 @@ def own_worktree(here, base):
         if os.path.dirname(gitdir) != os.path.realpath(os.path.join(base, ".git", "worktrees")):
             return False
         with open(os.path.join(gitdir, "gitdir")) as f:
-            if os.path.realpath(os.path.dirname(f.read().strip())) != here:
+            if os.path.realpath(os.path.dirname(os.path.join(gitdir, f.read().strip()))) != here:
                 return False
         with open(os.path.join(gitdir, "commondir")) as f:
             common = os.path.realpath(os.path.join(gitdir, f.read().strip()))
@@ -1308,6 +1332,7 @@ def shell_edit(result):
 
 def decide(tool, tool_input, policy):
     """(decision, reason), or None to leave the call to Claude Code."""
+    CHECKOUTS.clear()
     if tool in ("Read", "Edit", "Write", "MultiEdit", "NotebookEdit"):
         path = tool_input.get("file_path") or tool_input.get("notebook_path") or ""
         if secret_path(path):

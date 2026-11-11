@@ -68,12 +68,16 @@ Tested by: none.
 - **THEN** Claude Code doesn't retry it outside the sandbox
 
 ### Requirement: The sandbox denies secrets and gpg configuration
-The sandbox SHALL deny reads of `.env`, its usual local and environment variants and `secrets/**`, both at the checkout root and below it. It SHALL deny writes to `.env` and to gpg's configuration files and private keys, while allowing writes to the rest of the gpg home so commits can be signed.
+The sandbox SHALL deny reads of `.env`, its usual local and environment variants and `secrets/**`, both at the checkout root and below it, and likewise at the top of each of the main checkout's sibling worktrees (`<main checkout>.worktrees/<name>`) and below it. It SHALL deny writes to `.env` in all of those places, and to gpg's configuration files and private keys, while allowing writes to the rest of the gpg home so commits can be signed.
 
 Tested by: none.
 
 #### Scenario: Reading a variant from a command
 - **WHEN** a sandboxed command reads `.env.production` at the checkout root
+- **THEN** the sandbox denies it
+
+#### Scenario: Reading a secret in an agent's worktree
+- **WHEN** a sandboxed command reads `<main checkout>.worktrees/agent-x/.env`
 - **THEN** the sandbox denies it
 
 #### Scenario: Example file stays readable
@@ -83,7 +87,7 @@ Tested by: none.
 ### Requirement: The sandbox reaches only what the shared tools need
 The sandbox SHALL allow writes to the nix, devenv, prek and npm caches, the gpg home, the main checkout's sibling worktree directory (`<main checkout>.worktrees`) and devenv's runtime directories (`/tmp/devenv-*`). It SHALL allow the nix daemon and gpg-agent sockets and local binding. It SHALL allow GitHub, Nix and cachix hosts, the npm registry, documentation hosts and GitHub Actions log storage. A profile or project SHALL add to these lists.
 
-Tested by: none.
+Tested by: manually, pending in #64.
 
 #### Scenario: Reading a CI log
 - **WHEN** a session runs `gh run view --log`
@@ -95,15 +99,23 @@ Tested by: none.
 
 #### Scenario: devenv shell in an agent's worktree
 - **WHEN** a subagent runs `devenv shell --quiet -- true` in `<main checkout>.worktrees/agent-x`
-- **THEN** the sandbox lets it write that worktree's `.devenv` directory
+- **THEN** the sandbox lets it write that worktree's `.devenv` directory (pending verification in #64)
 
 #### Scenario: A fresh worktree's first shell
 - **WHEN** a session runs `devenv shell` for the first time in a worktree whose `/tmp/devenv-<hash>` doesn't exist yet
-- **THEN** the sandbox lets devenv create it
+- **THEN** the sandbox lets devenv create it and write inside it (pending verification in #64: whether the sandbox honours the `/tmp/devenv-*` globs)
 
 #### Scenario: Settings generated from a worktree
 - **WHEN** the shell is entered from `<main checkout>.worktrees/x`, whose `.git` file names `<main checkout>/.git/worktrees/x`
 - **THEN** the generated allowWrite and Edit rule name `<main checkout>.worktrees`, not `<main checkout>.worktrees/x.worktrees`
+
+#### Scenario: Settings generated from a worktree with a relative gitdir
+- **WHEN** the shell is entered from `<main checkout>.worktrees/x`, whose `.git` file reads `gitdir: ../../<main>/.git/worktrees/x`
+- **THEN** the generated allowWrite and Edit rule name `<main checkout>.worktrees`
+
+#### Scenario: A .git file of another kind
+- **WHEN** the shell is entered from a checkout whose `.git` file doesn't name a directory under some `.git/worktrees` (a submodule's, say)
+- **THEN** the generated rules name `<that checkout>.worktrees`
 
 #### Scenario: Another project's worktrees stay closed
 - **WHEN** a session runs a command that writes under `<other project>.worktrees`

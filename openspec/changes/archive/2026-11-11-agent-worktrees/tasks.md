@@ -84,8 +84,8 @@ Run the guard's cases with `devenv shell --quiet -- python3 -I packages/claude-g
 
 ## 6. Integration check (needs Derek: a terminal shell and a fresh session)
 
-- [ ] 6.1 Derek enters `devenv shell` once from a terminal in the main checkout, so the settings relink. Then `jq '.sandbox.filesystem.allowWrite, .permissions.allow' .claude/settings.json` must list `/Users/derekjw/Projects/coldlogic-devenv.worktrees` (and `/tmp/devenv-*` unless 4.3 was skipped) and the new Edit rule.
-- [ ] 6.2 In a new Claude Code session, start a subagent with `isolation: worktree`. Have it run, each as its own Bash call: `git status`, `git log --oneline -3`, `git switch -c probe/agent-worktrees --no-track`, `git -C <its worktree> diff`, `devenv shell --quiet -- true` and `touch .devenv/probe`. Verify none prompts and none fails on the sandbox, and that the first `devenv shell` created a new `/tmp/devenv-<hash>` (unless 4.3 was skipped). If the glob isn't honoured, try `/private/tmp/devenv-*/**` per design.md's Risks before giving up on it. Remove the probe branch and file afterwards.
+- [ ] 6.1 (Manual, after merge — tracked in #64.) Derek enters `devenv shell` once from a terminal in the main checkout, so the settings relink. Then `jq '.sandbox.filesystem.allowWrite, .permissions.allow' .claude/settings.json` must list `/Users/derekjw/Projects/coldlogic-devenv.worktrees` (and `/tmp/devenv-*` unless 4.3 was skipped) and the new Edit rule.
+- [ ] 6.2 (Manual, after merge — tracked in #64.) In a new Claude Code session, start a subagent with `isolation: worktree`. Have it run, each as its own Bash call: `git status`, `git log --oneline -3`, `git switch -c probe/agent-worktrees --no-track`, `git -C <its worktree> diff`, `devenv shell --quiet -- true` and `touch .devenv/probe`. Verify none prompts and none fails on the sandbox, and that the first `devenv shell` created a new `/tmp/devenv-<hash>` (unless 4.3 was skipped). If the glob isn't honoured, try `/private/tmp/devenv-*/**` per design.md's Risks before giving up on it. Remove the probe branch and file afterwards.
 
 ## Workflow follow-up
 

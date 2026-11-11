@@ -103,6 +103,14 @@ siblingWorktrees = "${mainCheckout}.worktrees";
 
 Projects get it on their next module update. Nothing to migrate. Rollback is reverting the commit. Settings regenerate when the shell is next entered from a terminal (a session can't relink its own settings).
 
+## Revisions after review
+
+- Decision 1: `own_worktree` also requires the worktree to sit at `<root>/.claude/worktrees/<name>` or `<root>.worktrees/<name>`. A linked worktree anywhere else defers, as before this change. A relative back-pointer in `gitdir` is read against the gitdir, as git does, not against the cwd. `checkout_of` is memoized per guard call.
+- Decision 3: `-C` is dropped only when it names the directory the command already runs in (at a checkout's top). Another checkout's top is kept, because git would resolve relative arguments against it, not against the cwd. With a second `-C`, none is dropped.
+- Decision 4: `mainCheckout` reads a relative `gitdir:` against the worktree. Any other `.git` layout falls back to `config.devenv.root` on purpose. The parsing is a pure function, and asserts check it on every evaluation.
+- Decision 5: allowWrite lists `/tmp/devenv-*/**` and `/private/tmp/devenv-*/**` beside the bare forms. Verification of the globs is tracked in #64.
+- New: the sandbox's `.env`/`secrets` denyRead and denyWrite entries cover `<main>.worktrees/*/…` as well as the checkout.
+
 ## Open Questions
 
 - **Derek:** is opening `/tmp/devenv-*` (every devenv project's runtime dir) acceptable? If not, decision 5 and tasks 4.3 and 6.2's runtime check drop out. A fresh worktree's first `devenv shell` then still has to be entered from a terminal (#45 stays open for that item). Nothing else in the plan changes.

@@ -675,7 +675,24 @@ with tempfile.TemporaryDirectory() as top:
     os.makedirs(os.path.join(other, ".git", "worktrees"))
     ow = os.path.join(top, "other.worktrees", "w")
     linked(other, ow, "w")
-    policy = {**POLICY, "allow": POLICY["allow"] + ["git switch *"], "ask": POLICY["ask"] + ["git switch -f *"]}
+    # Linked worktrees of the project in neither place they are made.
+    away = os.path.join(top, "elsewhere", "wt")
+    linked(root, away, "away")
+    under_sub = os.path.join(root, "sub", "wt")
+    linked(root, under_sub, "us")
+    # A worktree whose `.git` file and back-pointer are relative (git's
+    # worktree.useRelativePaths), and one without a commondir.
+    rel = os.path.join(top, "proj.worktrees", "rel")
+    linked(root, rel, "rel")
+    rel_gitdir = os.path.join(root, ".git", "worktrees", "rel")
+    with open(os.path.join(rel, ".git"), "w") as f:
+        f.write(f"gitdir: {os.path.relpath(rel_gitdir, rel)}\n")
+    with open(os.path.join(rel_gitdir, "gitdir"), "w") as f:
+        f.write(os.path.relpath(os.path.join(rel, ".git"), rel_gitdir) + "\n")
+    nocd = os.path.join(top, "proj.worktrees", "nocd")
+    linked(root, nocd, "nocd")
+    os.remove(os.path.join(root, ".git", "worktrees", "nocd", "commondir"))
+    policy ={**POLICY, "allow": POLICY["allow"] + ["git switch *"], "ask": POLICY["ask"] + ["git switch -f *"]}
     try:
         for cwd, command, expected in [
             (sib, "git status", "allow"),
@@ -693,11 +710,24 @@ with tempfile.TemporaryDirectory() as top:
             (fake, "git status", "ask"),
             (bc, "git status", "ask"),
             (ow, "git status", "ask"),
+            (away, "git status", "ask"),
+            (under_sub, "git status", None),
+            (rel, "git status", "allow"),
+            (nocd, "git status", "ask"),
             (sib, f"git -C {sib} status", "allow"),
-            (root, f"git -C {sib} log --oneline", "allow"),
-            (sib, f"git -C {root} status", "allow"),
-            (root, f"git -C {nested} status", "allow"),
+            # Another checkout's top: git would read `packages/a.py` from
+            # there, the guard from the cwd.
+            (root, f"git -C {sib} log --oneline", None),
+            (sib, f"git -C {root} status", None),
+            (root, f"git -C {nested} status", None),
+            (root, f"git -C {sib} add packages/a.py", None),
             (sib, "git -C . status", "allow"),
+            (sib, "git -C ../x status", "allow"),
+            (sib, "git -C packages status", None),
+            (sib, "git -C ../rel status", None),
+            (sib, "git -C . -C . status", None),
+            (sib, f"git -C {sib} -C packages status", None),
+            (sib, "git -C . -C . push --force", "deny"),
             (os.path.join(root, "sub"), f"git -C {sib} status", None),
             (sib, f"git -C {sib}/packages status", None),
             (sib, f"git -C {fake} status", None),

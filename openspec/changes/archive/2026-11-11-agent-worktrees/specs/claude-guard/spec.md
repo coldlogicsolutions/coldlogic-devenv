@@ -3,7 +3,7 @@
 ## ADDED Requirements
 
 ### Requirement: The project's own worktrees are recognised by their git metadata
-The guard SHALL count a directory as one of the project's own worktrees, wherever it sits, only when its `.git` file names a directory under the project's `.git/worktrees`, that directory's `gitdir` names it back, and its `commondir` resolves to the project's `.git`.
+The guard SHALL count a directory as one of the project's own worktrees only when it is `<project>/.claude/worktrees/<name>` or `<project>.worktrees/<name>`, its `.git` file names a directory under the project's `.git/worktrees` that names it back, and that directory's `commondir` exists and resolves to the project's `.git`. Relative paths in these files SHALL be read as git reads them.
 
 Tested by: `claude-guard-test.py`, the "project's own worktrees" block.
 
@@ -14,6 +14,18 @@ Tested by: `claude-guard-test.py`, the "project's own worktrees" block.
 #### Scenario: Metadata that doesn't name the directory back
 - **WHEN** a directory's `.git` file names `<project>/.git/worktrees/x`, but that directory's `gitdir` names another directory
 - **THEN** the guard doesn't count it as one of the project's worktrees
+
+#### Scenario: A worktree of the project somewhere else
+- **WHEN** a session runs `git status` in `/elsewhere/wt`, a linked worktree of the project outside both places
+- **THEN** the guard returns no allow
+
+#### Scenario: Relative worktree paths
+- **WHEN** a sibling worktree's `.git` file and its `gitdir` back-pointer hold relative paths (git's `worktree.useRelativePaths`), and a session there runs `git status`
+- **THEN** the guard allows it
+
+#### Scenario: A worktree with no commondir
+- **WHEN** a sibling worktree's `.git/worktrees/x` has no `commondir`, and a session there runs `git status`
+- **THEN** the guard returns no allow
 
 ### Requirement: The project's own worktrees are judged like its root
 At the top of one of the project's own worktrees, or in a subdirectory of one with no other repository in between, a command SHALL get the same decision it would get in the project root. Paths inside such a worktree SHALL count as inside the project.
@@ -64,8 +76,8 @@ Tested by: `claude-guard-test.py`, the "project's own worktrees" block.
 - **WHEN** an allow rule covers `scripts/check.sh` and a session in `<project>.worktrees/x/packages` runs `scripts/check.sh`
 - **THEN** the guard asks
 
-### Requirement: git -C naming one of the project's checkouts is dropped before rules match
-When a command runs at the top of the project or one of its own worktrees, the guard SHALL drop a `git -C <dir>` whose `<dir>` is the top of the project or of one of its own worktrees, before allow rules match. Any other `-C` value SHALL stay, so the command matches no allow rule.
+### Requirement: git -C naming the checkout a command runs in is dropped before rules match
+At the top of the project or one of its own worktrees, the guard SHALL drop a single `git -C <dir>` naming that same directory, absolute or relative, before allow rules match. Any other `-C`, another checkout's top included, and every `-C` when there are several, SHALL stay, so the command matches no allow rule: git would read relative arguments from the other directory.
 
 Tested by: `claude-guard-test.py`, the "project's own worktrees" block.
 
@@ -73,9 +85,17 @@ Tested by: `claude-guard-test.py`, the "project's own worktrees" block.
 - **WHEN** an allow rule covers `git status *` and a session at the top of `<project>.worktrees/x` runs `git -C <project>.worktrees/x status`
 - **THEN** the guard allows it
 
+#### Scenario: A relative -C naming the same worktree
+- **WHEN** an allow rule covers `git status *` and a session at the top of `<project>.worktrees/x` runs `git -C ../x status`
+- **THEN** the guard allows it
+
 #### Scenario: -C naming another of the project's checkouts
 - **WHEN** an allow rule covers `git log *` and a session at the project root runs `git -C <project>.worktrees/x log --oneline`
-- **THEN** the guard allows it
+- **THEN** the guard returns no allow
+
+#### Scenario: Chained -C
+- **WHEN** an allow rule covers `git status *` and a session at the top of `<project>.worktrees/x` runs `git -C . -C . status`
+- **THEN** the guard returns no allow
 
 #### Scenario: -C naming a repository outside the project
 - **WHEN** an allow rule covers `git status *` and a session runs `git -C /elsewhere/repo status`
