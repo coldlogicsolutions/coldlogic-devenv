@@ -11,6 +11,10 @@ devenv.local.yaml
 /.claude/worktrees/
 .mcp.json
 .pre-commit-config.yaml
+# The shell generates OpenSpec's Claude Code skills and commands
+# (coldlogic:openspec-files in devenv.nix).
+/.claude/skills/openspec-*/
+/.claude/commands/opsx/
 
 # The cache job copies the module's lock into each fixture.
 /tests/fixtures/*/devenv.lock
