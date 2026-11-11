@@ -1,0 +1,45 @@
+# Runs the gate (scripts/check.sh) on every pull request and every push to
+# main: the module's tests, formatting, shellcheck, spec validation, and a
+# build of its own shell and of each fixture's ci and developer shells.
+#
+# Pull only: it substitutes from the coldlogic cache and never pushes to it, so
+# it needs no secrets. Main's cache job (dispatch-updates.yaml) fills the cache.
+# Linux only; the gate runs on macOS locally before each commit.
+name: Check
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions: {}
+
+# Only the latest head of a PR matters; main's runs each finish.
+concurrency:
+  group: check-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: cachix/install-nix-action@75c75c31ebece974e48ebc36b4ad125bd97bd97b # v31.11.3
+
+      # No auth token and skipPush: substitutes from the cache and pushes nothing.
+      - uses: cachix/cachix-action@38b082610b782e7e93e209c35fd730d399dee866 # v17
+        with:
+          name: coldlogic
+          skipPush: true
+
+      # From the nixpkgs revision devenv.lock pins, as the gate's tools are.
+      - name: Install devenv
+        run: nix profile add --impure --expr '(import ./scripts/pinned-nixpkgs.nix).devenv'
+
+      - name: Run the gate
+        run: scripts/check.sh
