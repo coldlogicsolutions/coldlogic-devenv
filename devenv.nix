@@ -104,6 +104,23 @@ in
         "${config.devenv.root}/${path}"
         "${config.devenv.root}/**/${path}"
       ];
+      # The main checkout, also when the shell is entered from a linked
+      # worktree, whose `.git` file reads `gitdir: <main>/.git/worktrees/<name>`.
+      # A WorktreeCreate hook can place agent worktrees (`isolation: worktree`)
+      # at `<main>.worktrees/<name>`, beside the main checkout. It goes by the
+      # common git dir, so agents spawned from a worktree land beside the main
+      # checkout too, not beside that worktree.
+      mainCheckout =
+        let
+          dotGit = "${config.devenv.root}/.git";
+          linked =
+            if builtins.pathExists dotGit && builtins.readFileType dotGit == "regular" then
+              builtins.match "gitdir: (.*)/\\.git/worktrees/[^/]+[[:space:]]*" (builtins.readFile dotGit)
+            else
+              null;
+        in
+        if linked == null then config.devenv.root else builtins.head linked;
+      siblingWorktrees = "${mainCheckout}.worktrees";
     in
     {
       packages = with pkgs; [
@@ -199,13 +216,18 @@ in
           # own tools, and commands naming it, away from it instead.
           rules.Read.deny = secretRules;
           # Edits and writes anywhere in the checkout (its worktrees included)
-          # need no prompt: it is under git, and the gate and review still run
-          # before a commit. The deny rules above and below win over it, and
-          # the guard hook asks before a change to `.git` or `.claude`. An
-          # allow rule rather than `defaultMode = "acceptEdits"`, which would
-          # replace the mode the user picked (auto, say). `//` makes the path
-          # absolute: the file is generated per checkout.
-          rules.Edit.allow = [ "/${config.devenv.root}/**" ];
+          # and in the main checkout's sibling worktrees (`<main>.worktrees`,
+          # see mainCheckout) need no prompt: they are under git, and the gate
+          # and review still run before a commit. The deny rules above and
+          # below win over it, and the guard hook asks before a change to
+          # `.git` or `.claude`. An allow rule rather than
+          # `defaultMode = "acceptEdits"`, which would replace the mode the
+          # user picked (auto, say). `//` makes the path absolute: the file is
+          # generated per checkout.
+          rules.Edit.allow = [
+            "/${config.devenv.root}/**"
+            "/${siblingWorktrees}/**"
+          ];
           rules.Edit.deny = secretRules;
         };
       };
@@ -312,6 +334,16 @@ in
               "~/.npm"
               # gpg's lock files, for signed commits (see denyWrite).
               gnupgHome
+              # The project's own sibling worktrees, where subagents started
+              # with `isolation: worktree` work (see mainCheckout, #45). No
+              # other project's.
+              siblingWorktrees
+              # devenv's runtime dir is `/tmp/devenv-<hash of the checkout>`,
+              # so a fresh worktree's first shell creates a new one (#45). The
+              # glob reaches other devenv projects' runtime dirs too. `/tmp`
+              # is a symlink on macOS.
+              "/tmp/devenv-*"
+              "/private/tmp/devenv-*"
             ];
           };
           network = {
