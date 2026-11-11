@@ -88,7 +88,7 @@ Tested by: `claude-guard-test.py`, the "project's own worktrees" block.
 ## MODIFIED Requirements
 
 ### Requirement: File tools ask before changing .git or Claude Code configuration
-The guard SHALL deny Edit, Write, MultiEdit and NotebookEdit on a path inside a `.git` directory. It SHALL ask before they change a path in the project's `.claude` directory, except inside `.claude/worktrees/<name>/`, which are checkouts of the project. The worktree directory itself, and a `.claude` directory inside any of the project's own worktrees (under `.claude/worktrees` or beside the project), SHALL still ask.
+The guard SHALL deny file-tool writes inside a `.git` directory. It SHALL ask before file tools change the project's `.claude` directory, except inside the checkouts under `.claude/worktrees/<name>/`. That directory itself, and the `.claude` directory of any of the project's own worktrees, SHALL still ask.
 
 Tested by: `claude-guard-test.py`, `FILES`, the `.claude` block and the "project's own worktrees" block.
 
