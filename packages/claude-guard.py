@@ -623,6 +623,7 @@ def normalize_git(words):
     if os.path.basename(words[0]) != "git":
         return words
     i = 1
+    seen_dir = False
     while i < len(words) and words[i].startswith("-"):
         w = words[i]
         name, _, inline = w.partition("=")
@@ -632,10 +633,15 @@ def normalize_git(words):
             raise Unparsable(f"git {w}")
         if name in GIT_VALUE_FLAGS:
             value = inline or (words[i + 1] if i + 1 < len(words) else "")
-            if value not in (".", "./"):
+            if seen_dir or (value not in (".", "./") and not same_checkout(value)):
                 # Possibly another repository, whose own configuration (a
-                # pager, an fsmonitor) runs: no rule covers that.
+                # pager, an fsmonitor) runs: no rule covers that. Dropped only
+                # for `.` or, at the top of a checkout, that checkout's own
+                # top, where git reads relative arguments from the same
+                # directory the guard does. A second `-C` is relative to the
+                # first: none is dropped then.
                 return words
+            seen_dir = True
             i += 1 if inline else 2
         elif w in GIT_FLAGS:
             i += 1
@@ -644,6 +650,18 @@ def normalize_git(words):
             # it for a subcommand.
             return words
     return ["git"] + words[i:]
+
+
+def same_checkout(value):
+    """Whether a `git -C` value names the directory the command already runs
+    in, when that is the top of the project or of one of its own worktrees.
+    Another checkout's top is kept: git would read the command's relative
+    arguments from there, and the guard reads them from the cwd."""
+    cwd = WORKING["cwd"]
+    if not cwd or not WORKING["root"] or not at_top():
+        return False
+    here = os.path.realpath(cwd)
+    return os.path.realpath(value if os.path.isabs(value) else os.path.join(cwd, value)) == here
 
 
 def long_option(arg, option, shortest):
@@ -817,9 +835,10 @@ def secret_path(word):
 
 def resolve(path):
     """(the real path, its part inside the project or None) for a relative
-    path from the cwd, or None when there is no cwd. realpath resolves
-    whatever prefix exists, so a link on the way to a path not yet created
-    counts too."""
+    path from the cwd, or None when there is no cwd. A path in one of the
+    project's own worktrees outside the root is inside the project, relative
+    to that worktree. realpath resolves whatever prefix exists, so a link on
+    the way to a path not yet created counts too."""
     cwd = WORKING["cwd"]
     if not cwd or path.startswith("-"):
         return None
@@ -830,6 +849,9 @@ def resolve(path):
         return resolved, "."
     if resolved.startswith(base + os.sep):
         return resolved, os.path.relpath(resolved, base)
+    top = checkout_of(resolved)
+    if top is not None and top != base:
+        return resolved, "." if resolved == top else os.path.relpath(resolved, top)
     return resolved, None
 
 
@@ -861,41 +883,70 @@ def outside(path):
 
 
 def away_from_root():
-    """Whether the command runs anywhere but the project root. Elsewhere a
-    relative program is another file, and git or gh-app may find another
-    repository, with its own config, in ways too many to list (a nested
-    .git, a bare layout, a worktree's commondir)."""
+    """Whether the command runs outside every checkout of the project: its
+    root, one of its own worktrees, or a subdirectory of either with no other
+    repository on the way. Elsewhere a relative program is another file, and
+    git or gh-app may find another repository, with its own config, in ways
+    too many to list (a nested .git, a bare layout, another commondir)."""
     cwd, root = WORKING["cwd"], WORKING["root"]
     if not cwd or not root:
         return False
-    if at_top():
-        return False
-    here, base = os.path.realpath(cwd), os.path.realpath(root)
-    if not here.startswith(base + os.sep):
-        return True
-    # A subdirectory of the project, unless a repository of its own sits on
-    # the way: git there would read that one's config.
-    while here != base:
-        if os.path.lexists(os.path.join(here, ".git")):
-            return True
-        here = os.path.dirname(here)
-    return False
+    return checkout_of(cwd) is None
 
 
 def at_top():
     """Whether the command runs at the project root or the top of one of its
-    own worktrees, where a relative program is the file the rule means."""
+    own worktrees, wherever that sits, where a relative program is the file
+    the rule means."""
     cwd, root = WORKING["cwd"], WORKING["root"]
     if not cwd or not root:
         return True
-    here, base = os.path.realpath(cwd), os.path.realpath(root)
-    return here == base or (here.startswith(base + os.sep) and own_worktree(here, base))
+    return checkout_of(cwd) == os.path.realpath(cwd)
+
+
+def checkout_of(path):
+    """The top of the project's checkout a path is in: the root, or one of
+    its own worktrees in either place they sit (see own_worktree). None when
+    the first `.git` on the way up belongs to anything else (a nested
+    repository, another repository's worktree, a look-alike, a worktree
+    elsewhere), or when there is none. Remembered per guard call (decide
+    clears it), by real path and project."""
+    real = os.path.realpath(path)
+    base = os.path.realpath(WORKING["root"] or WORKING["cwd"])
+    key = (real, base)
+    if key not in CHECKOUTS:
+        CHECKOUTS[key] = _checkout_of(real, base)
+    return CHECKOUTS[key]
+
+
+# checkout_of's answers in this guard call.
+CHECKOUTS = {}
+
+
+def _checkout_of(real, base):
+    while True:
+        if real == base:
+            return base
+        if os.path.lexists(os.path.join(real, ".git")):
+            return real if own_worktree(real, base) else None
+        parent = os.path.dirname(real)
+        if parent == real:
+            return None
+        real = parent
 
 
 def own_worktree(here, base):
-    """Whether here is the top of one of the project's own git worktrees
-    (EnterWorktree's `.claude/worktrees/<name>`): its `.git` file names a
-    directory under the project's `.git/worktrees`, which names it back."""
+    """Whether here is the top of one of the project's own git worktrees,
+    in one of the two places they are made: `<project>/.claude/worktrees/<name>`
+    (EnterWorktree) or beside the project in `<project>.worktrees/<name>` (a
+    WorktreeCreate hook). Its `.git` file names a directory under the
+    project's `.git/worktrees`, which names it back, and whose commondir is
+    the project's `.git`. Paths in those files may be relative: git reads
+    the `.git` file's against the worktree, the others against the gitdir."""
+    here = os.path.realpath(here)
+    if os.path.dirname(here) not in (os.path.realpath(os.path.join(base, ".claude", "worktrees")),
+                                     os.path.realpath(os.path.realpath(base) + ".worktrees")):
+        return False
     try:
         with open(os.path.join(here, ".git")) as f:
             m = re.match(r"gitdir: (.+)", f.read().strip())
@@ -905,7 +956,11 @@ def own_worktree(here, base):
         if os.path.dirname(gitdir) != os.path.realpath(os.path.join(base, ".git", "worktrees")):
             return False
         with open(os.path.join(gitdir, "gitdir")) as f:
-            return os.path.realpath(os.path.dirname(f.read().strip())) == here
+            if os.path.realpath(os.path.dirname(os.path.join(gitdir, f.read().strip()))) != here:
+                return False
+        with open(os.path.join(gitdir, "commondir")) as f:
+            common = os.path.realpath(os.path.join(gitdir, f.read().strip()))
+        return common == os.path.realpath(os.path.join(base, ".git"))
     except OSError:
         return False
 
@@ -1139,8 +1194,9 @@ def project_file(path):
     """Whether a file a command writes is one of the project's, rather than
     a device, a scratch file ($TMPDIR, /tmp, the session scratchpad) or
     somewhere else outside the project. The project is its root and, for a
-    session working in a worktree beside it, the checkout it runs in. A path
-    behind any variable but $PWD or $CLAUDE_PROJECT_DIR, or behind a
+    session working in a worktree beside it, the checkout it runs in: the
+    top of that worktree when it is one of the project's own, else the cwd.
+    A path behind any variable but $PWD or $CLAUDE_PROJECT_DIR, or behind a
     substitution, is given the benefit of the doubt."""
     m = re.match(r"\$(\{(PWD|CLAUDE_PROJECT_DIR)\}|(PWD|CLAUDE_PROJECT_DIR)\b)/?", path)
     if m:
@@ -1156,7 +1212,8 @@ def project_file(path):
     if not root:
         return not path.startswith("/")
     real = os.path.realpath(os.path.join(cwd or root, path))
-    bases = [os.path.realpath(root), os.path.realpath(cwd or root)]
+    checkout = checkout_of(cwd) if cwd else None
+    bases = [os.path.realpath(root), checkout or os.path.realpath(cwd or root)]
 
     def under(base):
         return real == base or real.startswith(base + os.sep)
@@ -1275,6 +1332,7 @@ def shell_edit(result):
 
 def decide(tool, tool_input, policy):
     """(decision, reason), or None to leave the call to Claude Code."""
+    CHECKOUTS.clear()
     if tool in ("Read", "Edit", "Write", "MultiEdit", "NotebookEdit"):
         path = tool_input.get("file_path") or tool_input.get("notebook_path") or ""
         if secret_path(path):

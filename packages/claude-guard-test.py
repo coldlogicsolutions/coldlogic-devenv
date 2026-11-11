@@ -522,6 +522,8 @@ with tempfile.TemporaryDirectory() as root:
         f.write(f"gitdir: {os.path.join(root, '.git', 'worktrees', 'x')}\n")
     with open(os.path.join(root, ".git", "worktrees", "x", "gitdir"), "w") as f:
         f.write(os.path.join(wt, ".git") + "\n")
+    with open(os.path.join(root, ".git", "worktrees", "x", "commondir"), "w") as f:
+        f.write("../..\n")
     fake = os.path.join(root, "fake")
     os.makedirs(fake)
     with open(os.path.join(fake, ".git"), "w") as f:
@@ -633,6 +635,146 @@ with tempfile.TemporaryDirectory() as root:
             failures += 1
             print(f"FAIL {tool} {path}: expected {expected}, got {got}")
     guard.WORKING.update(cwd=None, root=None)
+
+# The project's own worktrees, wherever they sit (agent worktrees).
+with tempfile.TemporaryDirectory() as top:
+    top = os.path.realpath(top)
+
+    def linked(root, wt, name):
+        gitdir = os.path.join(root, ".git", "worktrees", name)
+        os.makedirs(gitdir, exist_ok=True)
+        os.makedirs(wt, exist_ok=True)
+        with open(os.path.join(wt, ".git"), "w") as f:
+            f.write(f"gitdir: {gitdir}\n")
+        with open(os.path.join(gitdir, "gitdir"), "w") as f:
+            f.write(os.path.join(wt, ".git") + "\n")
+        with open(os.path.join(gitdir, "commondir"), "w") as f:
+            f.write("../..\n")
+
+    root = os.path.join(top, "proj")
+    os.makedirs(os.path.join(root, ".git", "worktrees"))
+    os.makedirs(os.path.join(root, "sub"))
+    sib = os.path.join(top, "proj.worktrees", "x")
+    linked(root, sib, "x")
+    for d in ("packages", "src", os.path.join("vendor", "lib", ".git")):
+        os.makedirs(os.path.join(sib, d))
+    os.makedirs(os.path.join(sib, ".claude", "skills", "y"))
+    open(os.path.join(sib, ".claude", "skills", "y", "SKILL.md"), "w").close()
+    nested = os.path.join(root, ".claude", "worktrees", "n")
+    linked(root, nested, "n")
+    os.makedirs(os.path.join(nested, "src"))
+    fake = os.path.join(top, "proj.worktrees", "fake")
+    os.makedirs(fake)
+    with open(os.path.join(fake, ".git"), "w") as f:
+        f.write(f"gitdir: {os.path.join(root, '.git', 'worktrees', 'x')}\n")
+    bc = os.path.join(top, "proj.worktrees", "bc")
+    linked(root, bc, "bc")
+    with open(os.path.join(root, ".git", "worktrees", "bc", "commondir"), "w") as f:
+        f.write(os.path.join(top, "other", ".git") + "\n")
+    other = os.path.join(top, "other")
+    os.makedirs(os.path.join(other, ".git", "worktrees"))
+    ow = os.path.join(top, "other.worktrees", "w")
+    linked(other, ow, "w")
+    # Linked worktrees of the project in neither place they are made.
+    away = os.path.join(top, "elsewhere", "wt")
+    linked(root, away, "away")
+    under_sub = os.path.join(root, "sub", "wt")
+    linked(root, under_sub, "us")
+    # A worktree whose `.git` file and back-pointer are relative (git's
+    # worktree.useRelativePaths), and one without a commondir.
+    rel = os.path.join(top, "proj.worktrees", "rel")
+    linked(root, rel, "rel")
+    rel_gitdir = os.path.join(root, ".git", "worktrees", "rel")
+    with open(os.path.join(rel, ".git"), "w") as f:
+        f.write(f"gitdir: {os.path.relpath(rel_gitdir, rel)}\n")
+    with open(os.path.join(rel_gitdir, "gitdir"), "w") as f:
+        f.write(os.path.relpath(os.path.join(rel, ".git"), rel_gitdir) + "\n")
+    nocd = os.path.join(top, "proj.worktrees", "nocd")
+    linked(root, nocd, "nocd")
+    os.remove(os.path.join(root, ".git", "worktrees", "nocd", "commondir"))
+    policy ={**POLICY, "allow": POLICY["allow"] + ["git switch *"], "ask": POLICY["ask"] + ["git switch -f *"]}
+    try:
+        for cwd, command, expected in [
+            (sib, "git status", "allow"),
+            (sib, "git log --oneline -5", "allow"),
+            (sib, "git switch -c feat/y", "allow"),
+            (sib, "git switch -f main", "ask"),
+            (sib, "git add packages/a.py", "allow"),
+            (os.path.join(sib, "packages"), "git add a.py", "allow"),
+            (os.path.join(sib, "packages"), "scripts/check.sh", "ask"),
+            (sib, "devenv shell --quiet -- scripts/check.sh", "allow"),
+            (sib, "git push --force", "deny"),
+            (os.path.join(sib, "vendor", "lib"), "git status", "ask"),
+            (sib, "cat ../y/README.md", None),
+            (os.path.join(nested, "src"), "git log", "allow"),
+            (fake, "git status", "ask"),
+            (bc, "git status", "ask"),
+            (ow, "git status", "ask"),
+            (away, "git status", "ask"),
+            (under_sub, "git status", None),
+            (rel, "git status", "allow"),
+            (nocd, "git status", "ask"),
+            (sib, f"git -C {sib} status", "allow"),
+            # Another checkout's top: git would read `packages/a.py` from
+            # there, the guard from the cwd.
+            (root, f"git -C {sib} log --oneline", None),
+            (sib, f"git -C {root} status", None),
+            (root, f"git -C {nested} status", None),
+            (root, f"git -C {sib} add packages/a.py", None),
+            (sib, "git -C . status", "allow"),
+            (sib, "git -C ../x status", "allow"),
+            (sib, "git -C packages status", None),
+            (sib, "git -C ../rel status", None),
+            (sib, "git -C . -C . status", None),
+            (sib, f"git -C {sib} -C packages status", None),
+            (sib, "git -C . -C . push --force", "deny"),
+            (os.path.join(root, "sub"), f"git -C {sib} status", None),
+            (sib, f"git -C {sib}/packages status", None),
+            (sib, f"git -C {fake} status", None),
+            (sib, f"git -C {other} status", None),
+            (sib, f"git -C {sib} push --force", "deny"),
+        ]:
+            guard.WORKING.update(cwd=cwd, root=root)
+            got = guard.decide("Bash", {"command": command}, policy)
+            checks += 1
+            got = got[0] if got else None
+            if got != expected:
+                failures += 1
+                print(f"FAIL {command!r} in {cwd}: expected {expected}, got {got}")
+        for cwd, tool, path, expected in [
+            (sib, "Edit", f"{sib}/.claude/skills/y/SKILL.md", "ask"),
+            (root, "Edit", f"{sib}/.claude/skills/y/SKILL.md", "ask"),
+            (sib, "Edit", f"{root}/.claude/settings.local.json", "ask"),
+            (sib, "Write", f"{sib}/src/main.rs", None),
+            (sib, "Write", f"{sib}/.git", "deny"),
+            (sib, "Edit", f"{ow}/.claude/settings.json", None),
+        ]:
+            guard.WORKING.update(cwd=cwd, root=root)
+            got = guard.decide(tool, {"file_path": path}, policy)
+            checks += 1
+            got = got[0] if got else None
+            if got != expected:
+                failures += 1
+                print(f"FAIL {tool} {path} in {cwd}: expected {expected}, got {got}")
+        real_scratch = guard.scratch
+        guard.scratch = lambda path: False
+        try:
+            for cwd, command, expected in [
+                (os.path.join(sib, "packages"), "echo x > ../src/b.rs", "deny"),
+                (sib, "echo x > src/a.rs", "deny"),
+                (sib, f"echo x > {top}/elsewhere.txt", None),
+            ]:
+                guard.WORKING.update(cwd=cwd, root=root)
+                got = guard.decide("Bash", {"command": command}, policy)
+                checks += 1
+                got = got[0] if got else None
+                if got != expected:
+                    failures += 1
+                    print(f"FAIL {command!r} in {cwd}: expected {expected}, got {got}")
+        finally:
+            guard.scratch = real_scratch
+    finally:
+        guard.WORKING.update(cwd=None, root=None)
 
 total = checks
 print(f"{total - failures}/{total} passed")

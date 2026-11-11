@@ -104,6 +104,64 @@ in
         "${config.devenv.root}/${path}"
         "${config.devenv.root}/**/${path}"
       ];
+      # The main checkout, also when the shell is entered from a linked
+      # worktree, whose `.git` file reads `gitdir: <main>/.git/worktrees/<name>`
+      # (`<main>` absolute, or relative to the worktree, as git writes it with
+      # worktree.useRelativePaths). A WorktreeCreate hook can place agent
+      # worktrees (`isolation: worktree`) at `<main>.worktrees/<name>`, beside
+      # the main checkout. It goes by the common git dir, so agents spawned
+      # from a worktree land beside the main checkout too, not beside that
+      # worktree. Any other `.git` (a directory, a submodule's
+      # `gitdir: ../.git/modules/<name>`, a layout not known here) leaves the
+      # checkout itself, on purpose: its own `.worktrees` is the closest guess,
+      # and it opens nothing outside the checkout's parent.
+      checkoutFromDotGit =
+        root: content:
+        let
+          linked = builtins.match "gitdir: (.*)/\\.git/worktrees/[^/]+[[:space:]]*" content;
+          dir = builtins.head linked;
+        in
+        if linked == null || dir == "" then
+          root
+        # `/. +` makes a path, which drops the `..` a relative one has.
+        else
+          toString (/. + (if lib.hasPrefix "/" dir then dir else "${root}/${dir}"));
+      # Evaluated with every shell: the layouts checkoutFromDotGit must read.
+      checkoutFromDotGitCases = [
+        (checkoutFromDotGit "/w" "gitdir: /a/m/.git/worktrees/x\n" == "/a/m")
+        (checkoutFromDotGit "/a/m.worktrees/x" "gitdir: ../../m/.git/worktrees/x\n" == "/a/m")
+        (checkoutFromDotGit "/a/m/.claude/worktrees/x" "gitdir: ../../../.git/worktrees/x" == "/a/m")
+        (checkoutFromDotGit "/a/m/sub" "gitdir: ../.git/modules/sub\n" == "/a/m/sub")
+        (checkoutFromDotGit "/w" "gitdir: /.git/worktrees/x\n" == "/w")
+        (checkoutFromDotGit "/w" "not a gitdir line" == "/w")
+      ];
+      mainCheckout =
+        let
+          dotGit = "${config.devenv.root}/.git";
+        in
+        assert lib.assertMsg (lib.all lib.id checkoutFromDotGitCases)
+          "coldlogic: checkoutFromDotGit misreads a worktree's .git file";
+        if builtins.pathExists dotGit && builtins.readFileType dotGit == "regular" then
+          checkoutFromDotGit config.devenv.root (builtins.readFile dotGit)
+        else
+          config.devenv.root;
+      siblingWorktrees = "${mainCheckout}.worktrees";
+      # Paths in each of the project's sibling worktrees, as inCheckout's in
+      # the checkout: at a worktree's top and below it.
+      inSiblingWorktrees = path: [
+        "${siblingWorktrees}/*/${path}"
+        "${siblingWorktrees}/*/**/${path}"
+      ];
+      # What a sibling worktree's sandbox write (allowWrite) must not reach
+      # at its top, as the main checkout's are protected: its `.git` file and
+      # its Claude Code settings, hooks and skills.
+      siblingWorktreeConfig = map (path: "${siblingWorktrees}/*/${path}") [
+        ".git"
+        ".claude/settings.json"
+        ".claude/settings.local.json"
+        ".claude/hooks"
+        ".claude/skills"
+      ];
     in
     {
       packages = with pkgs; [
@@ -199,13 +257,18 @@ in
           # own tools, and commands naming it, away from it instead.
           rules.Read.deny = secretRules;
           # Edits and writes anywhere in the checkout (its worktrees included)
-          # need no prompt: it is under git, and the gate and review still run
-          # before a commit. The deny rules above and below win over it, and
-          # the guard hook asks before a change to `.git` or `.claude`. An
-          # allow rule rather than `defaultMode = "acceptEdits"`, which would
-          # replace the mode the user picked (auto, say). `//` makes the path
-          # absolute: the file is generated per checkout.
-          rules.Edit.allow = [ "/${config.devenv.root}/**" ];
+          # and in the main checkout's sibling worktrees (`<main>.worktrees`,
+          # see mainCheckout) need no prompt: they are under git, and the gate
+          # and review still run before a commit. The deny rules above and
+          # below win over it, and the guard hook asks before a change to
+          # `.git` or `.claude`. An allow rule rather than
+          # `defaultMode = "acceptEdits"`, which would replace the mode the
+          # user picked (auto, say). `//` makes the path absolute: the file is
+          # generated per checkout.
+          rules.Edit.allow = [
+            "/${config.devenv.root}/**"
+            "/${siblingWorktrees}/**"
+          ];
           rules.Edit.deny = secretRules;
         };
       };
@@ -280,14 +343,19 @@ in
           # Claude Code documents this as a possible way to exfiltrate data.
           enableWeakerNetworkIsolation = true;
           filesystem = {
-            # The secrets above (see `secrets`).
+            # The secrets above (see `secrets`), in the checkout and in the
+            # sibling worktrees allowWrite opens.
             denyRead = lib.concatMap (
-              secret: lib.concatMap inCheckout ([ secret.path ] ++ secret.readVariants or [ ])
+              secret:
+              lib.concatMap (path: inCheckout path ++ inSiblingWorktrees path) (
+                [ secret.path ] ++ secret.readVariants or [ ]
+              )
             ) secrets;
             denyWrite =
-              lib.concatMap (secret: inCheckout secret.path) (
+              lib.concatMap (secret: inCheckout secret.path ++ inSiblingWorktrees secret.path) (
                 builtins.filter (secret: secret.denyWrite or false) secrets
               )
+              ++ siblingWorktreeConfig
               ++ [
                 # gpg needs to write its lock files in its home (allowWrite),
                 # but not its configuration or the private keys, which the
@@ -312,6 +380,20 @@ in
               "~/.npm"
               # gpg's lock files, for signed commits (see denyWrite).
               gnupgHome
+              # The project's own sibling worktrees, where subagents started
+              # with `isolation: worktree` work (see mainCheckout, #45). No
+              # other project's.
+              siblingWorktrees
+              # devenv's runtime dir is `/tmp/devenv-<hash of the checkout>`,
+              # so a fresh worktree's first shell creates a new one (#45). The
+              # glob reaches other devenv projects' runtime dirs too. `/tmp`
+              # is a symlink on macOS. Each is listed bare, for the directory,
+              # and with `/**`, for what is in it, until #64 settles which
+              # form the sandbox honours.
+              "/tmp/devenv-*"
+              "/tmp/devenv-*/**"
+              "/private/tmp/devenv-*"
+              "/private/tmp/devenv-*/**"
             ];
           };
           network = {
