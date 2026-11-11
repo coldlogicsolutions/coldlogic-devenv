@@ -563,7 +563,7 @@ in
           case "$at" in
             "" | *[!0-9]*) at=0 ;;
           esac
-          age=$((now - at))
+          age=$((now - 10#$at))
           if [ "$cached_remote" = "$remote" ] && [ "$cached_rev" = "$locked" ] && [ "$age" -ge 0 ] && [ "$age" -lt 3600 ]; then
             latest=$cached_rev
           else
