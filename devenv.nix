@@ -152,6 +152,16 @@ in
         "${siblingWorktrees}/*/${path}"
         "${siblingWorktrees}/*/**/${path}"
       ];
+      # What a sibling worktree's sandbox write (allowWrite) must not reach
+      # at its top, as the main checkout's are protected: its `.git` file and
+      # its Claude Code settings, hooks and skills.
+      siblingWorktreeConfig = map (path: "${siblingWorktrees}/*/${path}") [
+        ".git"
+        ".claude/settings.json"
+        ".claude/settings.local.json"
+        ".claude/hooks"
+        ".claude/skills"
+      ];
     in
     {
       packages = with pkgs; [
@@ -345,6 +355,7 @@ in
               lib.concatMap (secret: inCheckout secret.path ++ inSiblingWorktrees secret.path) (
                 builtins.filter (secret: secret.denyWrite or false) secrets
               )
+              ++ siblingWorktreeConfig
               ++ [
                 # gpg needs to write its lock files in its home (allowWrite),
                 # but not its configuration or the private keys, which the

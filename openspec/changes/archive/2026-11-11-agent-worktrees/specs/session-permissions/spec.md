@@ -28,6 +28,10 @@ Tested by: none.
 - **WHEN** a sandboxed command reads `<main checkout>.worktrees/agent-x/.env`
 - **THEN** the sandbox denies it
 
+#### Scenario: Changing an agent worktree's git link or Claude Code config
+- **WHEN** a sandboxed command writes `<main checkout>.worktrees/agent-x/.git`, its `.claude/settings.json` or `.claude/settings.local.json`, or anything under its `.claude/hooks` or `.claude/skills`
+- **THEN** the sandbox denies it
+
 #### Scenario: Example file stays readable
 - **WHEN** a sandboxed command reads `.env.example`
 - **THEN** the sandbox allows it
