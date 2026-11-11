@@ -179,6 +179,12 @@ in
           CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS = "1";
           # What a subagent runs on when nothing else picks a model.
           CLAUDE_CODE_SUBAGENT_MODEL = lib.mkDefault "sonnet";
+          # devenv makes its runtime dir at `${XDG_RUNTIME_DIR:-/tmp}/devenv-<hash
+          # of the checkout>` before it reads this file, so only the
+          # environment that launches it can move the dir. The sandbox can't
+          # write `/tmp` and drops glob entries from allowWrite (#64), so
+          # sessions keep the dir in the devenv cache, which it allows.
+          XDG_RUNTIME_DIR = "${builtins.getEnv "HOME"}/.cache/devenv/run";
         };
         permissions = {
           # A starting point. Anything broader belongs in the project.
@@ -384,16 +390,6 @@ in
               # with `isolation: worktree` work (see mainCheckout, #45). No
               # other project's.
               siblingWorktrees
-              # devenv's runtime dir is `/tmp/devenv-<hash of the checkout>`,
-              # so a fresh worktree's first shell creates a new one (#45). The
-              # glob reaches other devenv projects' runtime dirs too. `/tmp`
-              # is a symlink on macOS. Each is listed bare, for the directory,
-              # and with `/**`, for what is in it, until #64 settles which
-              # form the sandbox honours.
-              "/tmp/devenv-*"
-              "/tmp/devenv-*/**"
-              "/private/tmp/devenv-*"
-              "/private/tmp/devenv-*/**"
             ];
           };
           network = {
