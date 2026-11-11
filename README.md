@@ -82,6 +82,8 @@ Copy `templates/update-coldlogic-devenv.yaml` to `.github/workflows/` and regist
 | `scripts/adopt.sh` | Moves a project onto this module, or sets up a new one with it (see "Adopting it") |
 | `templates/` | The workflow that proposes `devenv update coldlogic-devenv` as a PR, weekly and whenever main moves |
 | `.github/workflows/dispatch-updates.yaml` | On every push to main, builds the `ci` and `developer` shells of each fixture in `tests/fixtures` on Linux and macOS and pushes them to the `coldlogic` cachix cache, then sends each repository with the update workflow the `coldlogic-devenv-updated` event, so it updates now. The update workflow aligns the project's `nixpkgs`, `rust-overlay` and `git-hooks` with the module's lock, so those cached shells are the project's, and turns on auto-merge for the PR |
+| `scripts/check.sh` | The gate every change to this repository passes before a commit: the guard's test cases, `nixfmt --check`, `shellcheck`, `openspec validate --all --strict`, and builds of this repository's shell and of each fixture's `ci` and `developer` shells. It runs every check, prints a summary and exits non-zero if any failed. Its tools come from the nixpkgs revision `devenv.lock` pins (`scripts/check-tools.nix`), so a session, a terminal and CI agree |
+| `.github/workflows/check.yaml` | Runs `scripts/check.sh` as the `check` job, on Linux, for every pull request and every push to main. It only reads the `coldlogic` cache and has no secrets |
 | `tests/fixtures/` | A stand-in project per profile, built by the cache job with this repository's `devenv.lock` |
 
 `rust-gui` (proxcarta) and `node-web` (paintinator, voxcarta) are added when those projects move to devenv.
@@ -89,6 +91,14 @@ Copy `templates/update-coldlogic-devenv.yaml` to `.github/workflows/` and regist
 ## Working on the module
 
 This repository's own `devenv.yaml` makes `devenv.nix` here its shell too, so sessions working on the module run under the settings, guard hook and plugin it gives every project.
+
+Run the gate before each commit:
+
+```
+devenv shell --quiet -- scripts/check.sh
+```
+
+It exits non-zero if any check failed, and the pull request runs it again as the `check` job.
 
 ## Staying current
 

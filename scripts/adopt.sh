@@ -111,6 +111,7 @@ changed=()
 added_inputs=()
 new_yaml=0
 if [[ ! -f devenv.yaml ]]; then
+  # shellcheck disable=SC2016 # $schema is literal text for the YAML language server
   printf '# yaml-language-server: $schema=https://devenv.sh/devenv.schema.json\ninputs: {}\n' >devenv.yaml
   new_yaml=1
 fi
@@ -169,6 +170,7 @@ EOF
 else
   # The module sets these; a project's own copy may duplicate or fight it.
   overlap=$(grep -nE 'claude\.code|git-hooks|pre-commit|openspec|\bgit\b *$|languages\.rust' devenv.nix || true)
+  # shellcheck disable=SC2001 # prefixes every line of a multi-line value; ${//} would miss the first
   [[ -z $overlap ]] || note "devenv.nix sets things the module or a profile may already provide; check each and drop what's duplicated (README, 'Using it'):
 $(sed 's/^/      /' <<<"$overlap")"
 fi
@@ -270,6 +272,9 @@ fi
 # ------------------------------------------------------------ what's left --
 if [[ -f flake.nix ]]; then
   note "flake.nix is still here. The guard hook denies a flake's dev shell, so move its devShell packages and env into devenv.nix, then remove the dev shell (and flake.nix and flake.lock if that's all it was for)."
+fi
+if [[ ! -f scripts/check.sh ]]; then
+  note "There is no scripts/check.sh. The conventions expect it as the gate every commit passes: it must run the project's tests, formatters and linters, and exit non-zero on any failure. coldlogic-devenv's is an example: https://github.com/coldlogicsolutions/coldlogic-devenv/blob/main/scripts/check.sh"
 fi
 default_branch=$(git symbolic-ref -q --short refs/remotes/origin/HEAD 2>/dev/null || true)
 if [[ -n $default_branch && $default_branch != origin/main ]]; then
