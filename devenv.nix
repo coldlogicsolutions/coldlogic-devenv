@@ -6,6 +6,7 @@
 let
   gh-app = import ./packages/gh-app.nix { inherit pkgs; };
   claude-guard = import ./packages/claude-guard.nix { inherit pkgs; };
+  session-relink = import ./packages/session-relink.nix { inherit pkgs; };
   claude-plugins-install = pkgs.writeShellApplication {
     name = "claude-plugins-install";
     runtimeInputs = with pkgs; [
@@ -50,26 +51,34 @@ in
         config.claude.code.settingsPath
         ".mcp.json"
       ];
-      # A status script: exits 0 (skip the task) in a session when a protected
-      # link is missing or stale and can't be fixed, else 1 (run it). It does
-      # the relink itself, as devenv:files would, so that the sandbox, not a
-      # guess, decides whether the session can write it. A path that is a real
-      # file is left to devenv:files to report. (A status's output isn't
-      # shown; coldlogic:generated-files-stale says why.)
-      sessionCannotRelink = lib.mkIf (protectedFiles != [ ]) ''
-        [ -n "''${CLAUDECODE:-}" ] || exit 1
-        cd "$DEVENV_ROOT" || exit 1
-        stale=""
-        ${lib.concatMapStringsSep "\n" (name: ''
-          f=${lib.escapeShellArg name}
-          want=${lib.escapeShellArg "${config.files.${name}.file}"}
-          if [ "$(readlink "$f" 2>/dev/null)" != "$want" ] && { [ -L "$f" ] || [ ! -e "$f" ]; }; then
-            { mkdir -p "$(dirname "$f")" && ln -sfn "$want" "$f"; } 2>/dev/null || stale="$stale $f"
-          fi
-        '') protectedFiles}
-        [ -n "$stale" ] || exit 1
-        exit 0
-      '';
+      # packages/session-relink.sh with `opts`, then each protected file and
+      # the store path it should link to. Run from $DEVENV_ROOT. Exits 1 when
+      # nothing is stale (and, with --state, cleanup is safe), 0 when it
+      # isn't, and anything else on an error.
+      sessionRelink =
+        opts:
+        "${session-relink}/bin/coldlogic-session-relink ${lib.escapeShellArgs opts} ${
+          lib.escapeShellArgs (
+            lib.concatMap (name: [
+              name
+              "${config.files.${name}.file}"
+            ]) protectedFiles
+          )
+        }";
+      # A status script: outside a session, always run the task (exit 1). In
+      # one, run it only on the check's explicit 1, and skip it (exit 0) on
+      # anything else, an error included. Both tasks fail open otherwise:
+      # cleanup unlinks, and devenv:files' own `ln -sf` is what #68's sandbox
+      # turned into a deletion.
+      sessionStatus =
+        opts:
+        lib.mkIf (protectedFiles != [ ]) ''
+          [ -n "''${CLAUDECODE:-}" ] || exit 1
+          cd "$DEVENV_ROOT" || exit 0
+          code=0
+          ${sessionRelink opts} || code=$?
+          [ "$code" -ne 1 ]
+        '';
       # What no session reads or writes, at any depth in the checkout. Each
       # `path` becomes a Read and an Edit deny rule (`**/<path>`) and sandbox
       # denyRead entries; one with `denyWrite` also a sandbox denyWrite entry.
@@ -467,24 +476,48 @@ in
       # as .claude/skills), leaving no settings at all. Both are built-in
       # tasks, so this is their status check: a status that succeeds skips a
       # task without failing it. In a session, when one of those links is
-      # missing or points at an old store path, skip both, leaving what is
-      # there; everything else runs as before. A shell from a terminal
-      # relinks them.
-      tasks."devenv:files".status = sessionCannotRelink;
-      tasks."devenv:files:cleanup".status = sessionCannotRelink;
+      # missing or points at an old store path, leave what is there;
+      # everything else runs as before. A shell from a terminal relinks them.
+      #
+      # Cleanup runs first and only checks: it is skipped while a protected
+      # link is stale. Cleanup also removes each link recorded in
+      # devenv:files' state that isn't an exact string among the current
+      # files, so a protected file recorded under another spelling (relative
+      # instead of absolute, after a devenv or module update) would look like
+      # an orphan, and cleanup would remove its live link with a plain unlink,
+      # which the sandbox lets through. So it is also skipped then, or when
+      # the state can't be read. The state file is the one devenv's cleanup
+      # script reads.
+      tasks."devenv:files:cleanup".status = sessionStatus [
+        "--check-only"
+        "--state"
+        "${config.devenv.state}/files.json"
+      ];
+      # devenv:files' status then tries the relink itself, as devenv:files
+      # would, so that the sandbox, not a guess, decides whether the session
+      # can write it: if it succeeds, devenv:files runs and finds the links
+      # current; if not, it is skipped. The relink is atomic, a temporary
+      # link renamed over the old one, since `ln -sf` unlinks first and the
+      # sandbox lets that unlink through while denying the create, which
+      # deleted the settings (#68). A path that is a real file is left to
+      # devenv:files to report.
+      tasks."devenv:files".status = sessionStatus [ ];
 
       # The one notice for the above (a status's output isn't shown). Silent
       # outside a session and whenever the links are current. Never fails.
+      # The same comparison as the statuses, without touching anything.
       tasks."coldlogic:generated-files-stale" = lib.mkIf (protectedFiles != [ ]) {
         exec = ''
           [ -n "''${CLAUDECODE:-}" ] || exit 0
           cd "$DEVENV_ROOT" || exit 0
-          stale=""
-          ${lib.concatMapStringsSep "\n" (name: ''
-            [ "$(readlink ${lib.escapeShellArg name} 2>/dev/null)" = ${lib.escapeShellArg "${config.files.${name}.file}"} ] || stale="$stale ${name}"
-          '') protectedFiles}
-          if [ -n "$stale" ]; then
-            echo "coldlogic: the generated files are out of date, and this Claude Code session can't write them:$stale. Enter the shell once from a terminal, outside a Claude Code session, with: devenv shell" >&2
+          if stale="$(${
+            sessionRelink [
+              "--check-only"
+              "--print"
+            ]
+          })" && [ -n "$stale" ]; then
+            stale="''${stale//$'\n'/ }"
+            echo "coldlogic: the generated files are out of date, and this Claude Code session can't write them: $stale. Enter the shell once from a terminal, outside a Claude Code session, with: devenv shell. If a terminal shell doesn't fix them, its evaluation may be stale: run devenv shell --refresh-eval-cache there." >&2
           fi
           exit 0
         '';
