@@ -118,8 +118,13 @@ exit 128'
 # run <args...>: the wrapper at $entry, from $run_dir, with $path, the
 # case's $extra variables and $stdin_file. Sets $code and $out; stderr goes
 # to log/stderr. The timeout turns a loop into a failure, not a hung build.
+# The timeout is a child of the substitution, not exec'd in its place, and
+# its status goes through a file: a wrapper that dies of SIGINT makes
+# timeout die of it too, and a command substitution that dies of SIGINT
+# would take this script with it.
 run() {
   code=0
+  : >"$case_dir/run-code"
   out="$(
     cd "$run_dir"
     export STUB_LOG="$case_dir/log"
@@ -131,8 +136,11 @@ run() {
       export "${kv?}"
     done
     export PATH="$path"
-    exec "$timeout_bin" 20 "$entry" "$@" <"$stdin_file" 2>"$case_dir/log/stderr"
-  )" || code=$?
+    rc=0
+    "$timeout_bin" 20 "$entry" "$@" <"$stdin_file" 2>"$case_dir/log/stderr" || rc=$?
+    echo "$rc" >"$case_dir/run-code"
+  )" || true
+  code="$(<"$case_dir/run-code")"
 }
 
 check() {
@@ -385,6 +393,25 @@ check "(m) dangling link: exit 1" exits 1
 check "(m) ... claude not started" absent claude
 check "(m) ... stderr says so" contains stderr "not starting claude"
 
+# (m2) a directory in the settings' place counts as missing too: Claude
+# Code reads no settings from it.
+fresh
+mkdir -p "$case_dir/proj/.claude/settings.json"
+extra=(STUB_DEVENV_EXIT=3)
+run
+check "(m2) directory: exit 1" exits 1
+check "(m2) ... claude not started" absent claude
+check "(m2) ... stderr says so" contains stderr "not starting claude"
+
+# (m3) a link to a regular file counts as there: the check follows it.
+fresh
+mkdir -p "$case_dir/proj/.claude"
+echo '{}' >"$case_dir/settings-target.json"
+ln -s "$case_dir/settings-target.json" "$case_dir/proj/.claude/settings.json"
+extra=(STUB_DEVENV_EXIT=3)
+run
+check "(m3) link to a file: claude ran" runs claude 1
+
 # (n) the override.
 fresh
 extra=(STUB_DEVENV_EXIT=3 COLDLOGIC_START_WITHOUT_SETTINGS=1)
@@ -472,7 +499,9 @@ check "(q2) ... and its stdout, to stderr" has stderr devenv-stdout
 check "(q2) ... stdout is only claude's" [ "$out" = claude-stdout ]
 
 # (q3) Ctrl-C during the refresh, which devenv catches and exits 1 on:
-# nothing starts, though the settings are there; one line, exit 130.
+# nothing starts, though the settings are there; one line, and the wrapper
+# dies of SIGINT, which the shell reports as 130 (as it would the fallback
+# exit 130). (q3b) and (q5) the same for SIGTERM and 143.
 fresh
 mkdir -p "$case_dir/proj/.claude"
 echo '{}' >"$case_dir/proj/.claude/settings.json"

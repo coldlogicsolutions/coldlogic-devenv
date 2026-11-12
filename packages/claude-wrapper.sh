@@ -200,9 +200,17 @@ trap - INT TERM
 # Interrupted: the developer meant to stop, or the machine did. Start
 # nothing, whatever the refresh's exit code and the settings. Its output
 # isn't shown; it is only the interruption, nor is its exit code, which may
-# be `wait`'s own. 130 for SIGINT, 143 for SIGTERM.
+# be `wait`'s own. The wrapper then dies of the same signal, the traps
+# reset, so its caller sees what stopped it (a shell reports 130 or 143);
+# 130 for SIGINT and 143 for SIGTERM only if it somehow survives. Its file
+# is removed first, as a death by signal may run no EXIT trap.
 if [ -n "$signal" ]; then
   echo "coldlogic: not starting claude: the refresh of the generated files in $checkout (devenv tasks run devenv:files) was interrupted by SIG$signal." >&2
+  if [ -n "$errlog" ]; then
+    "$rm_bin" -f "$errlog"
+  fi
+  trap - EXIT
+  kill -s "$signal" $$
   if [ "$signal" = TERM ]; then
     exit 143
   fi
@@ -219,7 +227,9 @@ if [ "$code" != 0 ]; then
     /*) settings="$settings_path" ;;
     *) settings="$checkout/$settings_path" ;;
   esac
-  if [ -e "$settings" ]; then
+  # A regular file, through any link: a dangling link or a directory gives
+  # Claude Code no settings either.
+  if [ -f "$settings" ]; then
     echo "coldlogic: couldn't refresh the generated files in $checkout (devenv tasks run devenv:files exited $code). Starting claude with the settings already there, which may be out of date. To see why, run there: devenv shell" >&2
   elif [ -n "${COLDLOGIC_START_WITHOUT_SETTINGS:-}" ]; then
     echo "coldlogic: couldn't refresh the generated files in $checkout (devenv tasks run devenv:files exited $code), and $settings is missing. Starting claude anyway, as COLDLOGIC_START_WITHOUT_SETTINGS is set: this session has none of the module's guard hook, sandbox settings or permissions." >&2

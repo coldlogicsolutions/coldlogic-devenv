@@ -165,7 +165,7 @@ Tested by: `packages/claude-wrapper-test.sh` at build.
 - **THEN** devenv isn't run
 
 ### Requirement: A failed refresh starts claude only with settings in place
-When the refresh fails, the wrapper SHALL show devenv's output on stderr and say so, with the checkout and the exit code. It SHALL then start Claude Code if the checkout's settings file (`claude.code.settingsPath`) resolves to a file, and otherwise exit 1 without starting it, naming the file and `COLDLOGIC_START_WITHOUT_SETTINGS`, unless that variable is set. A refresh that succeeds SHALL print nothing at all and SHALL be trusted.
+When the refresh fails, the wrapper SHALL show devenv's output on stderr and say so, with the checkout and the exit code. It SHALL then start Claude Code if the checkout's settings file (`claude.code.settingsPath`) resolves to a regular file, and otherwise exit 1 without starting it, naming the file and `COLDLOGIC_START_WITHOUT_SETTINGS`, unless that variable is set. A refresh that succeeds SHALL print nothing at all and SHALL be trusted.
 
 Tested by: `packages/claude-wrapper-test.sh` at build.
 
@@ -179,6 +179,10 @@ Tested by: `packages/claude-wrapper-test.sh` at build.
 
 #### Scenario: A dangling link
 - **WHEN** devenv fails and `.claude/settings.json` is a link whose target is gone
+- **THEN** it counts as missing, and Claude Code isn't started
+
+#### Scenario: A directory in the settings' place
+- **WHEN** devenv fails and `.claude/settings.json` is a directory
 - **THEN** it counts as missing, and Claude Code isn't started
 
 #### Scenario: The override
@@ -202,7 +206,7 @@ Tested by: `packages/claude-wrapper-test.sh` at build.
 - **THEN** Claude Code starts, and the wrapper prints nothing
 
 ### Requirement: An interrupted refresh starts nothing
-When the wrapper receives SIGINT or SIGTERM while the refresh runs, it SHALL pass the signal on to devenv at once and SHALL NOT start Claude Code, whatever devenv's exit code and the settings. It SHALL print one `coldlogic:` line on stderr, with the checkout and the signal but no exit code, and exit 130 for SIGINT or 143 for SIGTERM. Any non-zero exit without the signal is a failed refresh, as above.
+When the wrapper receives SIGINT or SIGTERM while the refresh runs, it SHALL pass the signal on to devenv at once and SHALL NOT start Claude Code, whatever devenv's exit code and the settings. It SHALL print one `coldlogic:` line on stderr, with the checkout and the signal but no exit code, and die of the same signal, or exit 130 for SIGINT or 143 for SIGTERM if it survives. Any non-zero exit without the signal is a failed refresh, as above.
 
 Tested by: `packages/claude-wrapper-test.sh` at build.
 
