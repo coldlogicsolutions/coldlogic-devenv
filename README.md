@@ -81,7 +81,8 @@ Start `claude` from the devenv shell (`devenv shell` or direnv), in the checkout
 - Only a git checkout with a `devenv.nix` or `devenv.yaml` at its top is refreshed. Anywhere else the wrapper starts `claude` at once, with no refresh and no check, even when the shell was entered in a project.
 - The refresh uses the profile `devenv.yaml` selects, whatever `--profile` the shell was entered with.
 - `COLDLOGIC_DEVENV_SESSION` marks a session. If a terminal has it (`printenv COLDLOGIC_DEVENV_SESSION`), it was opened from inside a session, and neither `claude` nor `devenv shell` refreshes there: open a fresh terminal.
-- A `claude` run inside a session that the wrapper didn't start is recognised through `CLAUDE_CODE_CHILD_SESSION`, which needs Claude Code 2.1.172 or later.
+- A `claude` run inside a session that the wrapper didn't start is recognised through `CLAUDE_CODE_CHILD_SESSION`, which needs Claude Code 2.1.172 or later. Before that version, run `claude` inside a session only with `COLDLOGIC_DEVENV_SESSION=1`.
+- After a module update changes the settings, starting `claude` refreshes the link, but any session already running in that checkout deletes it again at its next tool call (#94). So close or restart every other session in the checkout first.
 - A session that started without the settings and is still open can remove the link again (#100): close it.
 - If the refresh fails, the wrapper says so on stderr. It still starts `claude` when the settings file (`claude.code.settingsPath`, `.claude/settings.json` by default) is there, as those settings still protect the session. When it isn't, it refuses and exits 1, since the session would have none of the module's guard hook, sandbox settings or permissions. To start it anyway: `COLDLOGIC_START_WITHOUT_SETTINGS=1 claude`.
 - To run the real binary without the wrapper, take its path from `type -a claude`.
