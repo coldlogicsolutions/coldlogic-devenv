@@ -211,15 +211,23 @@ in
             "git switch *"
             "git branch *"
             "git worktree *"
+            "git fetch *"
+            "git rev-list *"
             # Sessions act on GitHub as the App (see gh-app).
             "gh-app pr view *"
             "gh-app pr checks *"
+            "gh-app pr list *"
+            "gh-app pr comment *"
             "gh-app pr create *"
             # gh-app merges only the App's own PRs, approved at their head
             # commit (packages/gh-app.sh); GitHub's ruleset requires the
             # approval as well.
             "gh-app pr merge *"
             "gh-app issue create *"
+            "gh-app issue view *"
+            "gh-app issue list *"
+            "gh-app issue comment *"
+            "gh-app issue edit *"
             "openspec *"
           ];
           # Covered by the allow rules above, but they throw away work the way
