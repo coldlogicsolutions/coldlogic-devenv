@@ -7,6 +7,7 @@ let
   gh-app = import ./packages/gh-app.nix { inherit pkgs; };
   claude-guard = import ./packages/claude-guard.nix { inherit pkgs; };
   session-relink = import ./packages/session-relink.nix { inherit pkgs; };
+  session-shell = import ./packages/session-shell.nix { inherit pkgs; };
   prune-worktrees = import ./packages/prune-worktrees.nix { inherit pkgs gh-app; };
   claude-plugins-install = pkgs.writeShellApplication {
     name = "claude-plugins-install";
@@ -71,6 +72,53 @@ in
             )
           )
         }";
+      # packages/session-shell.sh: what a shell does differently in a session.
+      sessionShell = "${session-shell}/bin/coldlogic-session-shell";
+      # The hooks devenv:git-hooks:install installs, worked out as devenv does:
+      # `expectedHooks` and `stageHookName` in devenv's
+      # src/modules/integrations/git-hooks.nix, over git-hooks.nix's read-only
+      # `installStages` (modules/pre-commit.nix: the enabled hooks' stages).
+      # The `or` covers devenv's stub module when git-hooks isn't an input.
+      expectedHooks =
+        let
+          stages = config.git-hooks.installStages or [ ];
+          hookName =
+            stage:
+            if stage == "manual" then
+              null
+            else if
+              builtins.elem stage [
+                "commit"
+                "merge-commit"
+                "push"
+              ]
+            then
+              "pre-${stage}"
+            else
+              stage;
+        in
+        lib.unique (
+          if stages == [ ] then
+            [ "pre-commit" ]
+          else
+            builtins.filter (hook: hook != null) (map hookName stages)
+        );
+      # Whether devenv installs any hook here (empty when every enabled hook
+      # is manual-stage).
+      hooksExpected = config.git-hooks.enable && expectedHooks != [ ];
+      # notice <key> <text>: once per session (packages/session-shell.sh), and
+      # printed anyway if the helper fails. forget <key>: when the condition is gone.
+      noticeFunctions = ''
+        notice() { ${sessionShell} notice "$1" "$2" || echo "$2" >&2; }
+        forget() { ${sessionShell} clear "$1" || true; }
+      '';
+      # The generated files only a session started in this checkout reads. A
+      # session that reads them from another checkout isn't told about these.
+      sessionOnlyFiles = [
+        config.claude.code.settingsPath
+        ".mcp.json"
+      ];
+      otherLinks = removeAttrs generatedLinks sessionOnlyFiles;
       # The status of devenv's two file tasks: skip (exit 0) in a session,
       # run (exit 1) outside one. Nothing else may decide it.
       skipInSession = ''
@@ -194,6 +242,11 @@ in
           # write `/tmp` and drops glob entries from allowWrite (#64), so
           # sessions keep the dir in the devenv cache, which it allows.
           XDG_RUNTIME_DIR = "${builtins.getEnv "HOME"}/.cache/devenv/run";
+          # The checkout these settings were generated for. A session carries
+          # it into every command, so a shell it enters in another checkout
+          # knows the session reads its settings, `.mcp.json` and skills from
+          # here (packages/session-shell.sh, own-checkout).
+          COLDLOGIC_SESSION_ROOT = config.devenv.root;
         };
         permissions = {
           # A starting point. Anything broader belongs in the project.
@@ -468,30 +521,34 @@ in
         };
       };
 
-      # git-hooks.nix installs the pre-commit hook into the *shared* hooks
-      # dir (`git rev-parse --git-dir`, which for worktrees resolves to the
-      # common .git/hooks) and bakes the installing worktree's absolute
-      # `.pre-commit-config.yaml` path into it. Whichever worktree last ran
-      # `devenv shell` wins for every other worktree. Give each worktree its
-      # own per-worktree hooks dir so `prek install` writes there instead.
-      # A task ordered before the install, not enterShell (which runs after
-      # it): otherwise a fresh worktree's first shell installs into the shared
-      # dir and then points itself at an empty one.
-      tasks."coldlogic:worktree-hooks-path" = {
+      # Hooks live in the hooks directory git resolves, which worktrees share
+      # (the main checkout's `.git/hooks`). Since devenv's change of 2026-10-19
+      # the hook there names its configuration by a relative path, so it reads
+      # the committing worktree's own; the module needs a devenv at least that
+      # new, and no longer gives each worktree a hooks path (#67).
+      #
+      # In a session, the install is skipped where it can't write that
+      # directory, which the sandbox protects. Exit 0 skips; any error exits
+      # non-zero, which runs the install as devenv defines it.
+      #
+      # Both this and the check below exist only when some hook is expected.
+      # With every enabled hook in the manual stage devenv installs none, and
+      # the script, given no hooks, would look for pre-commit and report it
+      # missing on every terminal shell.
+      tasks."devenv:git-hooks:install".status = lib.mkIf hooksExpected ''
+        ${sessionShell} skip-hooks-install ${lib.escapeShellArgs expectedHooks}
+      '';
+
+      # A status prints nothing, so this says when commits here will run no
+      # hook: the install was skipped, or didn't add one. Silent when every
+      # expected hook is in place. Never fails.
+      tasks."coldlogic:hooks-check" = lib.mkIf hooksExpected {
         exec = ''
-          git_dir="$(git -C "$DEVENV_ROOT" rev-parse --absolute-git-dir 2>/dev/null)" || git_dir=""
-          if [ -n "$git_dir" ]; then
-            # Writes only on a change: the sandbox can't write .git/config, and
-            # this runs on every `devenv shell` a session starts.
-            if [ "$(git -C "$DEVENV_ROOT" config --local --type=bool --get extensions.worktreeConfig)" != true ]; then
-              git -C "$DEVENV_ROOT" config extensions.worktreeConfig true
-            fi
-            if [ "$(git -C "$DEVENV_ROOT" config --worktree --get core.hooksPath)" != "$git_dir/hooks" ]; then
-              git -C "$DEVENV_ROOT" config --worktree core.hooksPath "$git_dir/hooks"
-            fi
-          fi
+          ${sessionShell} hooks-check ${lib.escapeShellArgs expectedHooks} || true
+          exit 0
         '';
-        before = [ "devenv:git-hooks:install" ];
+        after = [ "devenv:git-hooks:install" ];
+        before = [ "devenv:enterShell" ];
       };
 
       # In a Claude Code session, devenv's two file tasks never run. Both are
@@ -533,9 +590,12 @@ in
       };
 
       # The one notice for the above (a task's output isn't shown). Silent
-      # outside a session and whenever the links are current. Never fails.
-      # It compares every generated link, the settings included, and only
-      # compares (--check-only), so it writes nothing, not even beside them.
+      # outside a session and whenever the links are current, and printed
+      # once per session (packages/session-shell.sh). Never fails. It
+      # compares every generated link, the settings included, except where
+      # the session reads its settings and `.mcp.json` from another checkout
+      # (own-checkout), which leaves those two out. It only compares
+      # (--check-only), so it writes nothing, not even beside them.
       # Each path is shell-quoted (%q), so one with a space stays one path,
       # and a line of a kind it doesn't know is still listed, as printed, so
       # a new kind can't make the notice go quiet.
@@ -543,19 +603,39 @@ in
         exec = ''
           [ -n "''${CLAUDECODE:-}" ] || exit 0
           cd "$DEVENV_ROOT" || exit 0
+          ${noticeFunctions}
+          # 10: the session reads its own files from another checkout. Any
+          # other code (a crashed or missing helper included) compares
+          # everything, so a doubt still reports.
+          own=0
+          ${sessionShell} own-checkout || own=$?
           # 0: something to report; 1: all current; anything else (2 bad
           # usage, 3 a failed command, 127 no binary) means it couldn't
           # check, which gets a notice of its own rather than silence.
           code=0
-          out="$(${
-            sessionRelink [
-              "--check-only"
-              "--print"
-            ] generatedLinks
-          })" || code=$?
+          if [ "$own" = 10 ]; then
+            out="$(${
+              sessionRelink [
+                "--check-only"
+                "--print"
+              ] otherLinks
+            })" || code=$?
+          else
+            out="$(${
+              sessionRelink [
+                "--check-only"
+                "--print"
+              ] generatedLinks
+            })" || code=$?
+          fi
           if [ "$code" -gt 1 ]; then
-            echo "coldlogic: this Claude Code session couldn't check its generated files (the check exited $code). Enter the shell once from a terminal, outside a Claude Code session, with: devenv shell." >&2
+            text="coldlogic: this Claude Code session couldn't check its generated files (the check exited $code). Enter the shell once from a terminal, outside a Claude Code session, with: devenv shell."
+            notice generated-files-check "$text"
             exit 0
+          fi
+          forget generated-files-check
+          if [ "$code" = 1 ] || [ -z "$out" ]; then
+            forget generated-files
           fi
           if [ "$code" = 0 ] && [ -n "$out" ]; then
             # add <list> <item>: <list> with <item> shell-quoted on the end.
@@ -581,7 +661,8 @@ in
             [ -z "$stale" ] || what="''${what:+$what; }out of date: $stale"
             [ -z "$conflict" ] || what="''${what:+$what; }not links, move them aside first: $conflict"
             [ -z "$other" ] || what="''${what:+$what; }other: $other"
-            echo "coldlogic: this Claude Code session can't refresh these generated files ($what). Enter the shell once from a terminal, outside a Claude Code session, with: devenv shell. Then restart every Claude Code session open in this checkout, this one included, since a running session can undo the refresh. If a terminal shell doesn't fix them, its evaluation may be stale: run devenv shell --refresh-eval-cache there." >&2
+            text="coldlogic: this Claude Code session can't refresh these generated files ($what). Enter the shell once from a terminal, outside a Claude Code session, with: devenv shell. Then restart every Claude Code session open in this checkout, this one included, before any of them runs another command, since a running session can undo the refresh at its next tool call. If a terminal shell doesn't fix them, its evaluation may be stale: run devenv shell --refresh-eval-cache there."
+            notice generated-files "$text"
           fi
           exit 0
         '';
@@ -604,6 +685,7 @@ in
               ]
             )
           }:$PATH
+          ${noticeFunctions}
           lock="$DEVENV_ROOT/devenv.lock"
           [ -f "$lock" ] || exit 0
           node=$(jq -c '.nodes."coldlogic-devenv".locked // empty' "$lock")
@@ -638,7 +720,9 @@ in
             fi
           fi
           if [ -n "$latest" ] && [ "$latest" != "$locked" ]; then
-            echo "coldlogic-devenv is behind (locked ''${locked:0:7}, latest ''${latest:0:7}); run: devenv update coldlogic-devenv" >&2
+            notice freshness "coldlogic-devenv is behind (locked ''${locked:0:7}, latest ''${latest:0:7}); run: devenv update coldlogic-devenv"
+          elif [ -n "$latest" ]; then
+            forget freshness
           fi
           exit 0
         '';
@@ -679,7 +763,9 @@ in
       # Other tools' files (.agents/, .github/prompts/) are left to the
       # project. Runs again only when openspec changes or the files are
       # gone. A shell inside a sandboxed session can't write them, so it
-      # warns instead. Never fails the shell.
+      # warns instead, once per session (packages/session-shell.sh). A
+      # session that reads its skills from another checkout (own-checkout)
+      # generates nothing here and says nothing. Never fails the shell.
       tasks."coldlogic:openspec-files" = {
         exec = ''
           export PATH=${
@@ -693,6 +779,13 @@ in
             )
           }:$PATH
           cd "$DEVENV_ROOT" || exit 0
+          ${noticeFunctions}
+          # Only 10, which only a session gets, skips: a terminal shell, the
+          # session's own checkout and a helper that fails any other way
+          # run as before.
+          own=0
+          ${sessionShell} own-checkout || own=$?
+          [ "$own" != 10 ] || exit 0
           [ -f openspec/config.yaml ] || exit 0
           for f in .claude/skills/openspec-explore/SKILL.md .claude/commands/opsx/explore.md; do
             git check-ignore -q "$f" 2>/dev/null || exit 0
@@ -705,15 +798,17 @@ in
             present=1
           fi
           if [ "$(cat "$stamp" 2>/dev/null)" = "$want" ] && [ -n "$present" ]; then
+            forget openspec-files
             exit 0
           fi
           if out=$(DO_NOT_TRACK=1 OPENSPEC_TELEMETRY=0 openspec init --tools claude --no-animation </dev/null 2>&1); then
             mkdir -p "$(dirname "$stamp")" 2>/dev/null && echo "$want" >"$stamp" 2>/dev/null || true
+            forget openspec-files
           elif [ -n "$present" ]; then
-            echo "coldlogic: OpenSpec's Claude Code skills may be out of date; enter the shell from a terminal, outside a Claude Code session, to regenerate them" >&2
+            notice openspec-files "coldlogic: OpenSpec's Claude Code skills may be out of date; enter the shell from a terminal, outside a Claude Code session, to regenerate them"
           else
-            echo "coldlogic: couldn't generate OpenSpec's Claude Code skills; enter the shell from a terminal, outside a Claude Code session" >&2
-            printf '%s\n' "$out" | grep -m1 '^Failed' >&2 || true
+            detail=$(printf '%s\n' "$out" | grep -m1 '^Failed' || true)
+            notice openspec-files "coldlogic: couldn't generate OpenSpec's Claude Code skills; enter the shell from a terminal, outside a Claude Code session''${detail:+$'\n'$detail}"
           fi
           exit 0
         '';

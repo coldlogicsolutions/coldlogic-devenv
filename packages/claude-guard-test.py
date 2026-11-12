@@ -1405,6 +1405,7 @@ with tempfile.TemporaryDirectory() as top:
     open(os.path.join(root, ".git", "refs", "heads", "docs"), "w").close()
     os.makedirs(os.path.join(root, ".git", "refs", "remotes", "origin"))
     open(os.path.join(root, ".git", "refs", "remotes", "origin", "site"), "w").close()
+    open(os.path.join(root, ".git", "refs", "remotes", "origin", "main"), "w").close()
     with open(os.path.join(root, ".git", "packed-refs"), "w") as f:
         f.write("# pack-refs with: peeled fully-peeled sorted\n"
                 "1111111111111111111111111111111111111111 refs/heads/notes\n"
@@ -1493,6 +1494,10 @@ with tempfile.TemporaryDirectory() as top:
             (root, "git switch", "allow"),
             # A nested repository inside the main checkout isn't it.
             (os.path.join(root, "vendor", "lib"), "git switch -c feat/x", None),
+            (os.path.join(root, "vendor", "lib"), "git switch -c feat/x origin/main", None),
+            # A tracking switch elsewhere in the project is denied too.
+            (root, f"git -C {sib} switch -c feat/x origin/main", "deny"),
+            (sib, "cd packages/foo && git switch -c feat/x origin/main", "deny"),
             # A cd to a literal directory is followed.
             (sib, f"cd {root} && git switch -c feat/x", "deny"),
             (sib, f"cd {root}/sub && git switch -c feat/x", "deny"),
@@ -1596,8 +1601,10 @@ with tempfile.TemporaryDirectory() as top:
                 print(f"FAIL {command!r} in {cwd}, session in {sib}: expected {expected}, got {got}")
         # #44: in a linked worktree, creating a branch with no tracking gets
         # the allow, under the module's own git switch rules (devenv.nix,
-        # copied here: the build sees only packages/). --track and -C are
-        # allowed as before; the forced forms ask.
+        # copied here: the build sees only packages/). --track and a
+        # remote-tracking start point without --no-track are denied, since
+        # tracking writes .git/config; -C is judged as before otherwise; the
+        # forced forms ask.
         module = {**POLICY,
                   "allow": POLICY["allow"] + ["git switch *"],
                   "ask": POLICY["ask"] + [
@@ -1612,16 +1619,50 @@ with tempfile.TemporaryDirectory() as top:
                     ("git switch --no-track -c feat/x origin/main", "allow"),
                     ("git switch --no-track -c fix/guard-y origin/main", "allow"),
                     ("git switch -c feat/x", "allow"),
-                    ("git switch -c feat/x origin/main", "allow"),
-                    ("git switch --create feat/x origin/main", "allow"),
+                    ("git switch -c feat/x origin/main", "deny"),
+                    ("git switch --create feat/x origin/main", "deny"),
                     ("git switch --no-track --create feat/x origin/main", "allow"),
                     ("git switch -c feat/x --no-track origin/main", "allow"),
                     ("devenv shell --quiet -- git switch --no-track -c feat/x origin/main", "allow"),
                     ("git fetch origin main && git switch --no-track -c feat/x origin/main", "allow"),
                     ("git switch feat/x", "allow"),
                     ("git switch -", "allow"),
-                    ("git switch --track -c feat/x origin/main", "allow"),
-                    ("git switch -C feat/x origin/main", "allow"),
+                    ("git switch --track -c feat/x origin/main", "deny"),
+                    ("git switch -C feat/x origin/main", "deny"),
+                    # Tracking, in every spelling and wrapper.
+                    ("git switch -c feat/x origin/wip", "deny"),
+                    ("git switch -c feat/x origin/site", "deny"),
+                    ("git switch -cfeat/x origin/main", "deny"),
+                    ("git switch -qc feat/x origin/main", "deny"),
+                    ("git switch --cr feat/x origin/main", "deny"),
+                    ("git switch --create=feat/x origin/main", "deny"),
+                    ("git switch -c feat/x refs/remotes/origin/main", "deny"),
+                    ("git switch -c feat/x remotes/origin/main", "deny"),
+                    ("git switch -t origin/site", "deny"),
+                    ("git switch --track origin/site", "deny"),
+                    ("git switch --tr origin/site", "deny"),
+                    ("git switch --no-track --track -c feat/x origin/main", "deny"),
+                    ("git switch -c feat/x --track main", "deny"),
+                    ("git checkout -b feat/x origin/main", "deny"),
+                    ("git checkout -B feat/x origin/main", "deny"),
+                    ("git checkout -tb feat/x origin/main", "deny"),
+                    ("git checkout --track origin/site", "deny"),
+                    ("git fetch origin main && git switch -c feat/x origin/main", "deny"),
+                    ("devenv shell --quiet -- git switch -c feat/x origin/main", "deny"),
+                    ("bash -c 'git switch -c feat/x origin/main'", "deny"),
+                    # No tracking: the last of --track/--no-track wins, a
+                    # start that isn't a remote-tracking branch sets none.
+                    ("git switch --track --no-track -c feat/x origin/main", "allow"),
+                    ("git switch -c feat/x origin/gone", "allow"),
+                    ("git switch -c feat/x docs", "allow"),
+                    ("git switch -c feat/x main", "allow"),
+                    # As before this change (not a tracking start).
+                    ("git switch -c feat/x origin/main~1", "allow"),
+                    ("git switch --orphan feat/x", "allow"),
+                    ("git checkout --no-track -b feat/x origin/main", None),
+                    # git checkout has no allow rule.
+                    ("git checkout -b feat/x", None),
+                    ("git checkout origin/main -- README.md", None),
                     ("git switch -f feat/x", "ask"),
                     ("git switch -fc feat/x", "ask"),
                     ("git switch --discard-changes feat/x", "ask"),
@@ -1634,6 +1675,21 @@ with tempfile.TemporaryDirectory() as top:
                     if got_kind != expected:
                         failures += 1
                         print(f"FAIL #44 {command!r} in {cwd}, session in {session}: expected {expected}, got {got}")
+        # The tracking deny names --no-track; in the main checkout, the main
+        # checkout's deny comes first.
+        guard.WORKING.update(cwd=sib, root=root)
+        got = guard.decide("Bash", {"command": "git switch -c feat/x origin/main"}, module)
+        checks += 1
+        if (not got or got[0] != "deny" or "--no-track" not in got[1]
+                or "git switch --no-track -c feat/x origin/main" not in got[1]):
+            failures += 1
+            print(f"FAIL the tracking deny's message: got {got}")
+        guard.WORKING.update(cwd=root, root=root)
+        got = guard.decide("Bash", {"command": "git switch -c feat/x origin/main"}, module)
+        checks += 1
+        if not got or not got[1].startswith(guard.MAIN_CHECKOUT):
+            failures += 1
+            print(f"FAIL the main checkout's deny before tracking: got {got}")
         # The default branch is what origin/HEAD names.
         for command, expected in [
             ("git switch trunk", "allow"),
