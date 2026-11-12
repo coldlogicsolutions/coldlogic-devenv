@@ -224,7 +224,7 @@ Tested by: `packages/claude-wrapper-test.sh` at build, with a stand-in `devenv`;
 - **THEN** devenv's file tasks run, and Claude Code starts with `CLAUDECODE` as the terminal set it
 
 ### Requirement: The wrapper skips commands that start no session
-When the first argument is exactly one of `--version`, `-v`, `--help`, `-h`, `update`, `upgrade`, `doctor`, `mcp`, `config`, `auth`, `setup-token`, `install`, `migrate-installer`, `plugin`, `plugins`, `attach`, `logs`, `stop`, `kill`, `rm`, `purge`, `import`, `auto-mode`, `gateway` or `ultrareview`, the wrapper SHALL start Claude Code at once, with the marker and no refresh, settings check or message. Anything else SHALL refresh.
+When the first argument is exactly one of `--version`, `-v`, `--help`, `-h`, `update`, `upgrade`, `doctor`, `mcp`, `config`, `auth`, `setup-token`, `install`, `migrate-installer`, `plugin` or `plugins`, the wrapper SHALL start Claude Code at once, with the marker and no refresh, settings check or message. Anything else SHALL refresh: when in doubt, a command refreshes.
 
 Tested by: `packages/claude-wrapper-test.sh` at build.
 
@@ -237,7 +237,7 @@ Tested by: `packages/claude-wrapper-test.sh` at build.
 - **THEN** the refresh runs first
 
 #### Scenario: A command that starts sessions
-- **WHEN** a developer runs `claude agents` or `claude respawn`
+- **WHEN** a developer runs `claude agents`, `claude respawn` or `claude attach`
 - **THEN** the refresh runs first
 
 ### Requirement: The wrapper leaves other directories alone
