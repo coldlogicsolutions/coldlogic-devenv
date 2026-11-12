@@ -14,7 +14,7 @@
 set -eu
 
 # Also run by hand inside a session, which sets these.
-unset CLAUDECODE CLAUDE_CODE_CHILD_SESSION COLDLOGIC_DEVENV_SESSION COLDLOGIC_WRAPPERS_RUN COLDLOGIC_START_WITHOUT_SETTINGS DEVENV_ROOT DEVENV_DOTFILE DEVENV_STATE DEVENV_PROFILE DEVENV_RUNTIME git_bin settings_path
+unset CLAUDECODE CLAUDE_CODE_CHILD_SESSION COLDLOGIC_DEVENV_SESSION COLDLOGIC_WRAPPERS_RUN COLDLOGIC_START_WITHOUT_SETTINGS DEVENV_ROOT DEVENV_DOTFILE DEVENV_STATE DEVENV_PROFILE DEVENV_RUNTIME git_bin mktemp_bin rm_bin settings_path
 
 script="$(cd "$(dirname "${1:?usage: claude-wrapper-test.sh <claude-wrapper.sh>}")" && pwd)/$(basename "$1")"
 root="$(mktemp -d)"
@@ -23,6 +23,10 @@ trap 'rm -rf "$root"' EXIT
 
 bash_bin="$(command -v bash)"
 timeout_bin="$(command -v timeout)"
+# The built wrapper names these by store path; the tests name them too, so
+# cases with a narrow PATH still have them.
+mktemp_abs="$(command -v mktemp)"
+rm_abs="$(command -v rm)"
 outer_path="$PATH"
 passed=0
 failed=0
@@ -53,7 +57,7 @@ copy_stdin='copy_stdin() { local l; : >"$1"; while IFS= read -r l || [ -n "$l" ]
 fresh() {
   n=$((n + 1))
   case_dir="$root/case$n"
-  mkdir -p "$case_dir/stubs" "$case_dir/real/bin" "$case_dir/proj" "$case_dir/log"
+  mkdir -p "$case_dir/stubs" "$case_dir/real/bin" "$case_dir/proj" "$case_dir/log" "$case_dir/tmp"
   install_wrapper "$case_dir/wrap/bin"
   : >"$case_dir/proj/devenv.nix"
   write_exe "$case_dir/real/bin/claude" "$copy_stdin"'
@@ -109,6 +113,7 @@ run() {
   out="$(
     cd "$run_dir"
     export STUB_LOG="$case_dir/log"
+    export TMPDIR="$case_dir/tmp" mktemp_bin="$mktemp_abs" rm_bin="$rm_abs"
     if [ -n "$git_top" ]; then
       export STUB_GIT_TOP="$git_top"
     fi
@@ -179,6 +184,8 @@ args_are() {
 }
 # empty_file <log>: the log exists and is empty.
 empty_file() { [ -f "$case_dir/log/$1" ] && [ ! -s "$case_dir/log/$1" ]; }
+# tmp_clean: the wrapper left nothing in the case's TMPDIR.
+tmp_clean() { [ -z "$(ls -A "$case_dir/tmp")" ]; }
 
 # (a) the launch passes through; the refresh runs without the marker.
 fresh
@@ -193,7 +200,8 @@ check "(a) devenv runs the file tasks" has devenv "args=--quiet tasks run devenv
 check "(a) ... without the marker" has devenv "session=unset"
 check "(a) claude has the marker" has claude "session=1"
 check "(a) stdout is only claude's" [ "$out" = claude-stdout ]
-check "(a) stderr is only devenv's" [ "$(log stderr)" = devenv-stderr ]
+check "(a) stderr is empty: devenv's is held back on success" empty_file stderr
+check "(a) ... and its file removed" tmp_clean
 check "(a) claude gets PATH unchanged" has claude "path=$path"
 
 # (b) standard input reaches claude, not devenv.
@@ -327,6 +335,8 @@ check "(k) ... stderr says it couldn't refresh" contains stderr "couldn't refres
 check "(k) ... with the exit code" contains stderr "exited 3"
 check "(k) ... and that they may be out of date" contains stderr "may be out of date"
 check "(k) ... and claude has the marker" has claude "session=1"
+check "(k) ... devenv's stderr shown" has stderr devenv-stderr
+check "(k) ... and its file removed" tmp_clean
 
 # (l) the refresh fails, no settings: refused.
 fresh
@@ -337,6 +347,8 @@ check "(l) ... claude not started" absent claude
 check "(l) ... stderr says so" contains stderr "not starting claude"
 check "(l) ... names the settings" contains stderr "$case_dir/proj/.claude/settings.json"
 check "(l) ... and the override" contains stderr "COLDLOGIC_START_WITHOUT_SETTINGS=1 claude"
+check "(l) ... devenv's stderr shown" has stderr devenv-stderr
+check "(l) ... and its file removed on the refusal" tmp_clean
 
 # (m) a dangling settings link counts as missing.
 fresh
@@ -402,7 +414,17 @@ fresh
 extra=(STUB_DEVENV_EXIT=0)
 run
 check "(q) refresh works, no settings: claude ran" runs claude 1
-check "(q) ... and the wrapper printed nothing" [ "$(log stderr)" = devenv-stderr ]
+check "(q) ... and nothing on stderr, devenv's included" empty_file stderr
+check "(q) ... and its file removed" tmp_clean
+
+# (q2) without a file to hold it (mktemp fails), devenv's stderr goes
+# straight through, and the refresh still runs.
+fresh
+extra=(mktemp_bin="$case_dir/no-mktemp")
+run
+check "(q2) no mktemp: devenv ran" runs devenv 1
+check "(q2) ... claude ran" runs claude 1
+check "(q2) ... devenv's stderr went through" has stderr devenv-stderr
 
 # (r) the wrapper's directory twice on PATH.
 fresh

@@ -24,9 +24,10 @@
 # no settings; 127 when there is no Claude Code behind it on PATH.
 #
 # It uses only bash builtins, `git` (`$git_bin`, a store path in the built
-# application) and `devenv` (the developer's own, from PATH). The built
-# application also sets `$settings_path`, the module's
-# `claude.code.settingsPath` relative to the checkout.
+# application), `mktemp` and `rm` (`$mktemp_bin` and `$rm_bin`, likewise)
+# and `devenv` (the developer's own, from PATH). The built application also
+# sets `$settings_path`, the module's `claude.code.settingsPath` relative to
+# the checkout.
 set -euo pipefail
 
 self="${BASH_SOURCE[0]}"
@@ -34,6 +35,8 @@ if [ "${self#/}" = "$self" ]; then
   self="$PWD/$self"
 fi
 git_bin="${git_bin:-git}"
+mktemp_bin="${mktemp_bin:-mktemp}"
+rm_bin="${rm_bin:-rm}"
 settings_path="${settings_path:-.claude/settings.json}"
 seen="${COLDLOGIC_WRAPPERS_RUN:-}"
 
@@ -115,20 +118,36 @@ checkout="$top"
 # runs in: entered in another checkout, its DEVENV_ROOT, DEVENV_STATE and
 # the rest name that checkout, and devenv must work out this one from the
 # directory, as a terminal shell does. It can't read the wrapper's input (a
-# prompt piped to `claude -p`) or write to its output (often captured); its
-# stderr is what the developer needs when it fails.
+# prompt piped to `claude -p`) or write to its output (often captured). Its
+# stderr is held in a file and shown only when it fails, when it is what the
+# developer needs; a refresh that works prints nothing, warnings included.
+# The file is removed before claude starts, or on any exit before. Without
+# one (mktemp fails), devenv's stderr goes straight through.
 refresh() {
   local -a shell_vars=("${!DEVENV_@}")
   cd "$checkout" || return
   unset CLAUDECODE COLDLOGIC_DEVENV_SESSION ${shell_vars[@]+"${shell_vars[@]}"}
   exec devenv --quiet tasks run devenv:files
 }
+errlog=""
+if errlog="$("$mktemp_bin" "${TMPDIR:-/tmp}/coldlogic-claude.XXXXXX" 2>/dev/null)" && [ -n "$errlog" ]; then
+  trap '"$rm_bin" -f "$errlog"' EXIT
+else
+  errlog=""
+fi
 code=0
-(refresh) </dev/null >/dev/null || code=$?
+if [ -n "$errlog" ]; then
+  (refresh) </dev/null >/dev/null 2>"$errlog" || code=$?
+else
+  (refresh) </dev/null >/dev/null || code=$?
+fi
 
 # A refresh that succeeds is trusted: nothing printed, the link not looked
 # at. One that fails starts a session only with settings in place.
 if [ "$code" != 0 ]; then
+  if [ -n "$errlog" ] && [ -s "$errlog" ]; then
+    printf '%s\n' "$(<"$errlog")" >&2
+  fi
   case "$settings_path" in
     /*) settings="$settings_path" ;;
     *) settings="$checkout/$settings_path" ;;
@@ -143,4 +162,9 @@ if [ "$code" != 0 ]; then
   fi
 fi
 
+# exec runs no EXIT trap.
+if [ -n "$errlog" ]; then
+  "$rm_bin" -f "$errlog"
+fi
+trap - EXIT
 exec "$real" "$@"

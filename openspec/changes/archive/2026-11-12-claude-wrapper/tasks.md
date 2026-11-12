@@ -14,7 +14,7 @@ Run every tool through `devenv shell --quiet -- <cmd>`, one command per call, wi
   6. `if [ -n "$nested" ]; then exec "$real" "$@"; fi`.
   7. The checkout: `top="$("$git_bin" rev-parse --show-toplevel 2>/dev/null)" || top=""`. `checkout="$top"` when `top` is non-empty and `$top/devenv.nix` or `$top/devenv.yaml` is a file; else empty. Never `DEVENV_ROOT` (review fix R2).
   8. Empty: `exec "$real" "$@"`, with no message (review fix R2).
-  9. The refresh: `code=0`, then, in a subshell, `cd "$checkout"`, `unset CLAUDECODE COLDLOGIC_DEVENV_SESSION` and every `DEVENV_` variable (`"${!DEVENV_@}"`, review fix R1), and `exec devenv --quiet tasks run devenv:files`, with `</dev/null >/dev/null`; `|| code=$?`.
+  9. The refresh: `code=0`, then, in a subshell, `cd "$checkout"`, `unset CLAUDECODE COLDLOGIC_DEVENV_SESSION` and every `DEVENV_` variable (`"${!DEVENV_@}"`, review fix R1), and `exec devenv --quiet tasks run devenv:files`, with `</dev/null >/dev/null` and stderr to a `mktemp` file under `TMPDIR` (straight through when `mktemp` fails), removed before `claude` starts or by an EXIT trap (review fix R4); `|| code=$?`. When `code` isn't 0, print that file to stderr first.
   10. `settings="$checkout/$settings_path"`, where `settings_path` is the module's `claude.code.settingsPath` relative to the checkout, `.claude/settings.json` by default (review fix R3). When `code` is 0, print nothing and don't look at `$settings`. When it isn't:
       - `[ -e "$settings" ]`: print `coldlogic: couldn't refresh the generated files in $checkout (devenv tasks run devenv:files exited $code). Starting claude with the settings already there, which may be out of date. To see why, run there: devenv shell` to stderr.
       - else, `COLDLOGIC_START_WITHOUT_SETTINGS` non-empty: print `coldlogic: couldn't refresh the generated files in $checkout (devenv tasks run devenv:files exited $code), and $settings is missing. Starting claude anyway, as COLDLOGIC_START_WITHOUT_SETTINGS is set: this session has none of the module's guard hook, sandbox settings or permissions.` to stderr.
@@ -63,7 +63,8 @@ Run every tool through `devenv shell --quiet -- <cmd>`, one command per call, wi
   - (n) As (l), with `COLDLOGIC_START_WITHOUT_SETTINGS=1`: claude ran; stderr has `Starting claude anyway`.
   - (o) As (l), with the settings a regular file: claude ran.
   - (p) No `devenv` stub (and `$path` without the outer `PATH`'s devenv: build `$path` from the three case directories and the directory of `command -v timeout` only), settings present: claude ran, stderr has `exited 127`.
-  - (q) `STUB_DEVENV_EXIT=0`, no settings: claude ran and the wrapper printed nothing of its own (decision 5: a refresh that succeeds is trusted).
+  - (q) `STUB_DEVENV_EXIT=0`, no settings: claude ran, stderr is empty, devenv's `devenv-stderr` included, and the case's `TMPDIR` is empty (decision 5: a refresh that succeeds is trusted; review fix R4).
+  - (q2) `mktemp_bin` names no program: devenv and claude ran once each, and `devenv-stderr` went straight through (review fix R4).
   - (r) `$path` lists `wrap/bin` twice before `real/bin`: `log/claude` has one `ran` line, `log/devenv` one.
   - (s) `link/bin` is a link to `wrap/bin`, and `$path` is `link/bin`, `wrap/bin`, the rest; `$entry` is `link/bin/claude`: claude ran once.
   - (t) A second wrapper installed in `wrap2/bin`; `$path` is `wrap/bin`, `wrap2/bin`, the rest: claude ran once, its `wrappers=` names both wrappers, and `log/devenv` has one `ran` line (the second wrapper sees the first's marker).
@@ -183,6 +184,7 @@ Archived with 6.1 to 6.8 open by design: they are Derek's manual terminal checks
 - [x] R1 The refresh unsets every `DEVENV_` variable of the shell it runs in, so devenv works out the project from its directory. Test (g3): the stand-in devenv records `DEVENV_ROOT`, `DEVENV_DOTFILE`, `DEVENV_STATE`, `DEVENV_PROFILE` and `DEVENV_RUNTIME`, and all are unset; claude keeps them.
 - [x] R2 No fallback to `DEVENV_ROOT`: outside a devenv project (a git checkout without `devenv.nix` or `devenv.yaml`, or no checkout) the wrapper starts `claude` at once, with no refresh, no settings check and no message. Tests (h), (i), (j).
 - [x] R3 The settings file checked after a failed refresh is `claude.code.settingsPath`, made relative to the checkout in `devenv.nix` and substituted into the built wrapper as `settings_path`, as `git_bin` is. Tests (o2) and (o3) with `conf/claude.json`.
+- [x] R4 devenv's stderr goes to a `mktemp` file under `TMPDIR` and is shown only when the refresh fails, so a refresh that works prints nothing; the file is removed before `claude` starts and on the refusal. `mktemp` and `rm` are store paths in the built wrapper. Tests (a), (k), (l), (q), (q2).
 
 ## Workflow follow-up
 

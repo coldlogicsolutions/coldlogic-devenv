@@ -106,13 +106,13 @@ The spec's "Each status in `devenv.nix` is a single test of `CLAUDECODE`" become
 
 ### 4. The refresh is devenv's own file tasks, at the checkout's top
 
-`devenv --quiet tasks run devenv:files`, in a subshell: `cd` to the checkout, `unset CLAUDECODE COLDLOGIC_DEVENV_SESSION` and every `DEVENV_` variable, standard input from `/dev/null`, standard output to `/dev/null`, stderr left alone. The wrapper's own directory and environment never change.
+`devenv --quiet tasks run devenv:files`, in a subshell: `cd` to the checkout, `unset CLAUDECODE COLDLOGIC_DEVENV_SESSION` and every `DEVENV_` variable, standard input from `/dev/null`, standard output to `/dev/null`, stderr to a `mktemp` file under `TMPDIR`. The wrapper's own directory and environment never change.
 
 - The two variables are cleared so the shared test (decision 2) lets the file tasks run. `CLAUDECODE` is the one an IDE terminal sets. The marker is already exported by then, for the real `claude`.
 - The shell's `DEVENV_` variables (`DEVENV_ROOT`, `DEVENV_DOTFILE`, `DEVENV_STATE`, `DEVENV_PROFILE` and the rest) are cleared too (review finding): a shell entered in the main checkout and moved into a worktree names the main checkout in them, and devenv could work on its state. Without them devenv works out the project from the directory, as a terminal shell does. The real `claude` still gets them.
 - Standard input: the wrapper's may be a prompt piped to `claude -p`. devenv must not be able to read it.
 - Standard output: `claude -p` output is often captured, and devenv printed JSON there (checked).
-- Stderr: with `--quiet` devenv says nothing unless it fails, and then its error is what the developer needs. The wrapper adds nothing on success (Derek's decision).
+- Stderr: even with `--quiet`, devenv can warn on a refresh that works, and a `claude -p` caller would get those lines. So its stderr goes to a file, shown only when the refresh fails, when its error is what the developer needs. The file is removed before `claude` starts (`exec` runs no EXIT trap) and by an EXIT trap on the refusal. Without a file (`mktemp` fails), stderr goes straight through rather than being lost. The wrapper adds nothing on success (Derek's decision; review fix R4).
 
 The checkout is `git rev-parse --show-toplevel` when that directory has a `devenv.nix` or `devenv.yaml`; else none. Never `$DEVENV_ROOT`: a shell entered in the main checkout and moved into a worktree still has the main checkout's `DEVENV_ROOT` (this session does), and `claude` reads the settings of the directory it starts in, not that checkout's. With no checkout, the wrapper starts `claude` at once, with no refresh, no settings check and no message: there are no generated settings of the module's there to refresh or be without. (An earlier version fell back to `$DEVENV_ROOT`, and so refreshed, and refused on, another project's link; review finding.)
 

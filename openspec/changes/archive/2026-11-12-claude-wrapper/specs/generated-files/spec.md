@@ -148,13 +148,13 @@ Tested by: `packages/claude-wrapper-test.sh` at build.
 - **THEN** devenv isn't run
 
 ### Requirement: A failed refresh starts claude only with settings in place
-When the refresh fails, the wrapper SHALL say so on stderr, with the checkout and the exit code. It SHALL then start Claude Code if the checkout's settings file (`claude.code.settingsPath`) resolves to a file, and otherwise exit 1 without starting it, naming the file and `COLDLOGIC_START_WITHOUT_SETTINGS`, unless that variable is set. A refresh that succeeds SHALL print nothing and SHALL be trusted.
+When the refresh fails, the wrapper SHALL show devenv's stderr and say so, with the checkout and the exit code. It SHALL then start Claude Code if the checkout's settings file (`claude.code.settingsPath`) resolves to a file, and otherwise exit 1 without starting it, naming the file and `COLDLOGIC_START_WITHOUT_SETTINGS`, unless that variable is set. A refresh that succeeds SHALL print nothing, devenv's stderr included, and SHALL be trusted.
 
 Tested by: `packages/claude-wrapper-test.sh` at build.
 
 #### Scenario: The refresh fails, settings in place
 - **WHEN** devenv exits 3 and `.claude/settings.json` is a link to an existing file
-- **THEN** stderr has one `coldlogic:` line saying the refresh failed with exit 3 and the settings may be out of date, and Claude Code starts
+- **THEN** stderr has devenv's own error, then one `coldlogic:` line saying the refresh failed with exit 3 and the settings may be out of date, and Claude Code starts
 
 #### Scenario: The refresh fails, no settings
 - **WHEN** devenv exits 3 and `.claude/settings.json` doesn't exist
@@ -177,8 +177,8 @@ Tested by: `packages/claude-wrapper-test.sh` at build.
 - **THEN** it counts as a failed refresh
 
 #### Scenario: A refresh that works
-- **WHEN** devenv exits 0
-- **THEN** the wrapper prints nothing, and Claude Code starts
+- **WHEN** devenv exits 0 after writing a warning to stderr
+- **THEN** nothing reaches stderr, the warning included, no file of the wrapper's is left in `TMPDIR`, and Claude Code starts
 
 #### Scenario: A refresh that works, no settings
 - **WHEN** devenv exits 0 and `.claude/settings.json` doesn't exist

@@ -6,8 +6,8 @@
 # shell.
 #
 # No runtimeInputs: writeShellApplication exports them onto PATH, and every
-# session the wrapper starts would inherit that PATH. git is named by its
-# store path instead. No nix devenv either: the refresh must use the
+# session the wrapper starts would inherit that PATH. git, mktemp and rm are
+# named by their store paths instead. No nix devenv either: the refresh must use the
 # developer's own, the one that made the shell, with its evaluation cache.
 #
 # settingsPath: the module's `claude.code.settingsPath`, relative to the
@@ -36,6 +36,8 @@ let
     text = ''
       # Tested by ${tested}
       git_bin=${pkgs.git}/bin/git
+      mktemp_bin=${pkgs.coreutils}/bin/mktemp
+      rm_bin=${pkgs.coreutils}/bin/rm
       settings_path=${pkgs.lib.escapeShellArg settingsPath}
     ''
     + builtins.readFile ./claude-wrapper.sh;
