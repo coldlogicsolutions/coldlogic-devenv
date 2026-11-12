@@ -81,6 +81,10 @@ Tested by: `packages/session-relink-test.sh`; the notice isn't.
 - **WHEN** a reported path contains a space, or the relink prints a line of a kind the notice doesn't know
 - **THEN** the path is shell-quoted so it reads as one path, and the unknown line is still listed, so the notice is printed
 
+#### Scenario: The comparison itself fails
+- **WHEN** a session's shell runs the comparison and it exits with an error rather than reporting, for example because a command it runs fails
+- **THEN** stderr shows one `coldlogic:` notice that the generated files couldn't be checked, with the exit code, saying to enter the shell once from a terminal, and no task fails
+
 #### Scenario: Current links
 - **WHEN** every generated link is current
 - **THEN** the shell prints nothing about them

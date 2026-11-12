@@ -543,12 +543,21 @@ in
         exec = ''
           [ -n "''${CLAUDECODE:-}" ] || exit 0
           cd "$DEVENV_ROOT" || exit 0
-          if out="$(${
+          # 0: something to report; 1: all current; anything else (2 bad
+          # usage, 3 a failed command, 127 no binary) means it couldn't
+          # check, which gets a notice of its own rather than silence.
+          code=0
+          out="$(${
             sessionRelink [
               "--check-only"
               "--print"
             ] generatedLinks
-          })" && [ -n "$out" ]; then
+          })" || code=$?
+          if [ "$code" -gt 1 ]; then
+            echo "coldlogic: this Claude Code session couldn't check its generated files (the check exited $code). Enter the shell once from a terminal, outside a Claude Code session, with: devenv shell." >&2
+            exit 0
+          fi
+          if [ "$code" = 0 ] && [ -n "$out" ]; then
             # add <list> <item>: <list> with <item> shell-quoted on the end.
             add() {
               local q

@@ -89,6 +89,7 @@ From `/code-review high` on `ce047ec`.
 - [x] R.3 The scenario "The recorded state names a current file differently" described the removed `--state` check. It is now "An orphan in the recorded state", in both spec copies and the REMOVED Migration note; the main spec's Purpose covers every generated link and #94.
 - [x] R.4 The two statuses, `coldlogic:session-files` and the notice are guarded with `lib.mkIf` on there being files, so a module with no files gets no partial task. This doesn't decide whether a task runs in a session: that is still only the `CLAUDECODE` test (2.2). Not exercised, since this module always generates the settings file.
 - [x] R.5 Copy-mode and seed-mode files: none exist in the module, the profiles or the fixtures. Noted in design.md's Risks; no code change.
+- [x] R.6 (Re-review of `959ac63`.) When the comparison exits with an error (anything but 0 or 1), the notice treated it as nothing to report. It now prints its own one-line notice naming the exit code and saying to enter the shell from a terminal, and still exits 0. Checked by running copies of the generated script with the relink path replaced by a script exiting 3 and by a path that doesn't exist (127), and with the real path (normal notice).
 
 ## 5. Verification (manual, Derek, after merge)
 
