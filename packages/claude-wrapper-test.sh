@@ -64,6 +64,7 @@ log="$STUB_LOG/claude"
   echo "CLAUDECODE=${CLAUDECODE-unset}"
   echo "session=${COLDLOGIC_DEVENV_SESSION-unset}"
   echo "wrappers=${COLDLOGIC_WRAPPERS_RUN-unset}"
+  echo "path=$PATH"
   for a in "$@"; do echo "arg=<$a>"; done
 } >>"$log"
 copy_stdin "$STUB_LOG/claude-stdin"
@@ -189,6 +190,7 @@ check "(a) ... without the marker" has devenv "session=unset"
 check "(a) claude has the marker" has claude "session=1"
 check "(a) stdout is only claude's" [ "$out" = claude-stdout ]
 check "(a) stderr is only devenv's" [ "$(log stderr)" = devenv-stderr ]
+check "(a) claude gets PATH unchanged" has claude "path=$path"
 
 # (b) standard input reaches claude, not devenv.
 fresh
@@ -253,6 +255,14 @@ rm "$case_dir/proj/devenv.nix"
 run
 check "(g) devenv.yaml marks the checkout" has devenv "cwd=$case_dir/proj"
 
+# (g2) a sibling worktree: the shell's DEVENV_ROOT names another checkout,
+# and git's top, a devenv project, wins.
+fresh
+mkdir -p "$case_dir/other"
+extra=(DEVENV_ROOT="$case_dir/other")
+run
+check "(g2) git's top wins over DEVENV_ROOT" has devenv "cwd=$case_dir/proj"
+
 # (h) git's top is no devenv project: the shell's own checkout.
 fresh
 mkdir -p "$case_dir/plain" "$case_dir/other"
@@ -288,6 +298,7 @@ check "(k) failed refresh, settings there: claude ran" runs claude 1
 check "(k) ... stderr says it couldn't refresh" contains stderr "couldn't refresh"
 check "(k) ... with the exit code" contains stderr "exited 3"
 check "(k) ... and that they may be out of date" contains stderr "may be out of date"
+check "(k) ... and claude has the marker" has claude "session=1"
 
 # (l) the refresh fails, no settings: refused.
 fresh
@@ -315,6 +326,7 @@ extra=(STUB_DEVENV_EXIT=3 COLDLOGIC_START_WITHOUT_SETTINGS=1)
 run
 check "(n) override: claude ran" runs claude 1
 check "(n) ... and stderr says it starts anyway" contains stderr "Starting claude anyway"
+check "(n) ... and claude has the marker" has claude "session=1"
 
 # (o) a regular settings file counts as there.
 fresh
