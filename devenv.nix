@@ -47,39 +47,35 @@ in
   profiles.developer.module =
     { config, lib, ... }:
     let
-      # Generated files a Claude Code session's sandbox can't write.
-      protectedFiles = builtins.filter (name: config.files ? ${name}) [
-        config.claude.code.settingsPath
-        ".mcp.json"
-      ];
-      # packages/session-relink.sh with `opts`, then each protected file and
-      # the store path it should link to. Run from $DEVENV_ROOT. Exits 1 when
-      # nothing is stale (and, with --state, cleanup is safe), 0 when it
-      # isn't, and anything else on an error.
+      # The generated files devenv links (not its copy or seed modes). The
+      # notice compares all of them.
+      generatedLinks = lib.filterAttrs (_: file: (file.copyMode or "symlink") == "symlink") config.files;
+      # The ones a session links itself: all but the settings, which a session
+      # never creates, replaces or removes. Only a terminal shell refreshes it.
+      sessionLinks = removeAttrs generatedLinks [ config.claude.code.settingsPath ];
+      # packages/session-relink.sh with `opts`, then `--`, then each file in
+      # `links` and the store path it should link to. Run from $DEVENV_ROOT.
+      # Exits 1 when nothing is stale, 0 when something is, and anything else
+      # on an error.
       sessionRelink =
-        opts:
-        "${session-relink}/bin/coldlogic-session-relink ${lib.escapeShellArgs opts} ${
+        opts: links:
+        "${session-relink}/bin/coldlogic-session-relink ${
           lib.escapeShellArgs (
-            lib.concatMap (name: [
-              name
-              "${config.files.${name}.file}"
-            ]) protectedFiles
+            opts
+            ++ [ "--" ]
+            ++ lib.concatLists (
+              lib.mapAttrsToList (name: file: [
+                name
+                "${file.file}"
+              ]) links
+            )
           )
         }";
-      # A status script: outside a session, always run the task (exit 1). In
-      # one, run it only on the check's explicit 1, and skip it (exit 0) on
-      # anything else, an error included. Both tasks fail open otherwise:
-      # cleanup unlinks, and devenv:files' own `ln -sf` is what #68's sandbox
-      # turned into a deletion.
-      sessionStatus =
-        opts:
-        lib.mkIf (protectedFiles != [ ]) ''
-          [ -n "''${CLAUDECODE:-}" ] || exit 1
-          cd "$DEVENV_ROOT" || exit 0
-          code=0
-          ${sessionRelink opts} || code=$?
-          [ "$code" -ne 1 ]
-        '';
+      # The status of devenv's two file tasks: skip (exit 0) in a session,
+      # run (exit 1) outside one. Nothing else may decide it.
+      skipInSession = ''
+        [ -n "''${CLAUDECODE:-}" ]
+      '';
       # What no session reads or writes, at any depth in the checkout. Each
       # `path` becomes a Read and an Edit deny rule (`**/<path>`) and sandbox
       # denyRead entries; one with `denyWrite` also a sandbox denyWrite entry.
@@ -498,56 +494,94 @@ in
         before = [ "devenv:git-hooks:install" ];
       };
 
-      # The sandbox of a Claude Code session denies writes to the generated
-      # settings and .mcp.json, so `devenv:files` failed there whenever an
-      # update changed them, and every task after it (git hooks, plugins,
-      # enterShell) was skipped as a failed dependency (#37). Worse,
-      # `devenv:files:cleanup` first removed the old links (and orphans such
-      # as .claude/skills), leaving no settings at all. Both are built-in
-      # tasks, so this is their status check: a status that succeeds skips a
-      # task without failing it. In a session, when one of those links is
-      # missing or points at an old store path, leave what is there;
-      # everything else runs as before. A shell from a terminal relinks them.
+      # In a Claude Code session, devenv's two file tasks never run. Both are
+      # built-in, so this is their status: a status that succeeds skips a
+      # task without failing it. devenv:files replaces a link with `ln -sf`,
+      # which unlinks first, and the sandbox lets the unlink through while
+      # denying the create, which deleted the settings (#68). Cleanup unlinks
+      # outright. A check used to decide when they were safe to run, and #94
+      # showed a link could still vanish, so no check decides it now.
       #
-      # Cleanup runs first and only checks: it is skipped while a protected
-      # link is stale. Cleanup also removes each link recorded in
-      # devenv:files' state that isn't an exact string among the current
-      # files, so a protected file recorded under another spelling (relative
-      # instead of absolute, after a devenv or module update) would look like
-      # an orphan, and cleanup would remove its live link with a plain unlink,
-      # which the sandbox lets through. So it is also skipped then, or when
-      # the state can't be read. The state file is the one devenv's cleanup
-      # script reads.
-      tasks."devenv:files:cleanup".status = sessionStatus [
-        "--check-only"
-        "--state"
-        "${config.devenv.state}/files.json"
-      ];
-      # devenv:files' status then tries the relink itself, as devenv:files
-      # would, so that the sandbox, not a guess, decides whether the session
-      # can write it: if it succeeds, devenv:files runs and finds the links
-      # current; if not, it is skipped. The relink is atomic, a temporary
-      # link renamed over the old one, since `ln -sf` unlinks first and the
-      # sandbox lets that unlink through while denying the create, which
-      # deleted the settings (#68). A path that is a real file is left to
-      # devenv:files to report.
-      tasks."devenv:files".status = sessionStatus [ ];
+      # The session links the files itself instead (coldlogic:session-files),
+      # atomically and one at a time, so one file the sandbox refuses doesn't
+      # stop the rest (#78). It never writes the settings link, which only a
+      # terminal shell refreshes, in case a settings file changing under a
+      # running session is what makes Claude Code remove it (#94). devenv's
+      # state file is left as the last terminal shell wrote it, and the next
+      # terminal shell's cleanup removes any orphans.
+      #
+      # devenv defines both tasks only when there are files, so each of these
+      # four is guarded the same way: a module with no files gets no partial
+      # task holding only a status, and no task ordered against a missing one.
+      tasks."devenv:files:cleanup".status = lib.mkIf (config.files != { }) skipInSession;
+      tasks."devenv:files".status = lib.mkIf (config.files != { }) skipInSession;
 
-      # The one notice for the above (a status's output isn't shown). Silent
-      # outside a session and whenever the links are current. Never fails.
-      # The same comparison as the statuses, without touching anything.
-      tasks."coldlogic:generated-files-stale" = lib.mkIf (protectedFiles != [ ]) {
+      # The session's own linking: every symlink-mode generated file but the
+      # settings, through the atomic relink, which never unlinks a path it is
+      # given. It is the only relink-mode call here. devenv:files depends on
+      # it, so it never fails: a failure would skip every later task as a
+      # failed dependency (#37).
+      tasks."coldlogic:session-files" = lib.mkIf (config.files != { }) {
         exec = ''
           [ -n "''${CLAUDECODE:-}" ] || exit 0
           cd "$DEVENV_ROOT" || exit 0
-          if stale="$(${
+          ${sessionRelink [ ] sessionLinks} >/dev/null 2>&1 || true
+          exit 0
+        '';
+        after = [ "devenv:files:cleanup" ];
+        before = [ "devenv:files" ];
+      };
+
+      # The one notice for the above (a task's output isn't shown). Silent
+      # outside a session and whenever the links are current. Never fails.
+      # It compares every generated link, the settings included, and only
+      # compares (--check-only), so it writes nothing, not even beside them.
+      # Each path is shell-quoted (%q), so one with a space stays one path,
+      # and a line of a kind it doesn't know is still listed, as printed, so
+      # a new kind can't make the notice go quiet.
+      tasks."coldlogic:generated-files-stale" = lib.mkIf (generatedLinks != { }) {
+        exec = ''
+          [ -n "''${CLAUDECODE:-}" ] || exit 0
+          cd "$DEVENV_ROOT" || exit 0
+          # 0: something to report; 1: all current; anything else (2 bad
+          # usage, 3 a failed command, 127 no binary) means it couldn't
+          # check, which gets a notice of its own rather than silence.
+          code=0
+          out="$(${
             sessionRelink [
               "--check-only"
               "--print"
-            ]
-          })" && [ -n "$stale" ]; then
-            stale="''${stale//$'\n'/ }"
-            echo "coldlogic: the generated files are out of date, and this Claude Code session can't write them: $stale. Enter the shell once from a terminal, outside a Claude Code session, with: devenv shell. If a terminal shell doesn't fix them, its evaluation may be stale: run devenv shell --refresh-eval-cache there." >&2
+            ] generatedLinks
+          })" || code=$?
+          if [ "$code" -gt 1 ]; then
+            echo "coldlogic: this Claude Code session couldn't check its generated files (the check exited $code). Enter the shell once from a terminal, outside a Claude Code session, with: devenv shell." >&2
+            exit 0
+          fi
+          if [ "$code" = 0 ] && [ -n "$out" ]; then
+            # add <list> <item>: <list> with <item> shell-quoted on the end.
+            add() {
+              local q
+              printf -v q '%q' "$2"
+              printf '%s' "''${1:+$1 }$q"
+            }
+            missing=""
+            stale=""
+            conflict=""
+            other=""
+            while IFS= read -r line; do
+              case "$line" in
+                "missing "*) missing="$(add "$missing" "''${line#missing }")" ;;
+                "stale "*) stale="$(add "$stale" "''${line#stale }")" ;;
+                "conflict "*) conflict="$(add "$conflict" "''${line#conflict }")" ;;
+                *) other="$(add "$other" "$line")" ;;
+              esac
+            done <<<"$out"
+            what=""
+            [ -z "$missing" ] || what="missing: $missing"
+            [ -z "$stale" ] || what="''${what:+$what; }out of date: $stale"
+            [ -z "$conflict" ] || what="''${what:+$what; }not links, move them aside first: $conflict"
+            [ -z "$other" ] || what="''${what:+$what; }other: $other"
+            echo "coldlogic: this Claude Code session can't refresh these generated files ($what). Enter the shell once from a terminal, outside a Claude Code session, with: devenv shell. Then restart every Claude Code session open in this checkout, this one included, since a running session can undo the refresh. If a terminal shell doesn't fix them, its evaluation may be stale: run devenv shell --refresh-eval-cache there." >&2
           fi
           exit 0
         '';

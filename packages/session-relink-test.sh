@@ -4,16 +4,12 @@
 #   bash packages/session-relink-test.sh packages/session-relink.sh
 #
 # Needs no sandbox or session, but does need GNU coreutils on PATH (as in
-# `devenv shell`). A read-only directory stands in for a denied create, and a
+# `devenv shell`), for `touch -d`. A read-only directory stands in for a denied create, and a
 # failing `mv` on PATH for a denied rename. Targets are made-up store paths,
 # so the links dangle; the script only compares them.
 set -eu
 
 script="$(cd "$(dirname "${1:?usage: session-relink-test.sh <session-relink.sh>}")" && pwd)/$(basename "$1")"
-if ! realpath -ms / >/dev/null 2>&1; then
-  echo "session-relink-test: needs GNU realpath (coreutils) on PATH" >&2
-  exit 1
-fi
 root="$(mktemp -d)"
 live=""
 cleanup() {
@@ -128,10 +124,22 @@ done_case
 
 fresh
 echo '{}' >.mcp.json
-relink .mcp.json "$new"
-check "(f) regular file: exit 1" exits 1
+relink --print .mcp.json "$new"
+check "(f) regular file: exit 0" exits 0
+check "(f) ... prints it as a conflict" printed "conflict .mcp.json"
 check "(f) ... is still a regular file" [ ! -L .mcp.json ]
 check "(f) ... with its contents" [ "$(cat .mcp.json)" = '{}' ]
+done_case
+
+fresh
+mkdir -p .claude/settings.json
+touch .claude/settings.json/keep
+relink --print .claude/settings.json "$new"
+check "(f2) real directory: exit 0" exits 0
+check "(f2) ... prints it as a conflict" printed "conflict .claude/settings.json"
+check "(f2) ... is still a directory" [ -d .claude/settings.json ]
+check "(f2) ... not a link" [ ! -L .claude/settings.json ]
+check "(f2) ... with its contents, and nothing linked into it" [ "$(ls -A .claude/settings.json)" = keep ]
 done_case
 
 fresh
@@ -184,91 +192,12 @@ wait "$live" 2>/dev/null || true
 live=""
 
 fresh
-ln -s "$new" .claude/settings.json
-echo '{"managedFiles":[".mcp.json",".claude/settings.json"]}' >files.json
-relink --state files.json "$PWD/.claude/settings.json" "$new" .mcp.json "$new"
-check "(i) state spells settings relatively, current name absolute: exit 0" exits 0
-check "(i) ... and the link survives" points_at .claude/settings.json "$new"
-done_case
-
-fresh
-ln -s "$new" .claude/settings.json
-ln -s "$new" .mcp.json
-echo "{\"managedFiles\":[\".mcp.json\",\"$PWD/.claude/settings.json\"]}" >files.json
-relink --state files.json "$PWD/.claude/settings.json" "$new" .mcp.json "$new"
-check "(j) state spellings match: exit 1" exits 1
-done_case
-
-fresh
-ln -s "$new" .claude/settings.json
-echo '{"managedFiles":[' >files.json
-relink --state files.json .claude/settings.json "$new"
-check "(k) malformed state: exit 0" exits 0
-check "(k) ... and the link survives" points_at .claude/settings.json "$new"
-done_case
-
-for shape in '{"files":[".claude/settings.json"]}' '{"managedFiles":".claude/settings.json"}' \
-  '{"managedFiles":[1]}' '[".claude/settings.json"]' '' '{"managedFiles":[]} {"managedFiles":[]}'; do
-  fresh
-  ln -s "$new" .claude/settings.json
-  printf '%s' "$shape" >files.json
-  relink --state files.json .claude/settings.json "$new"
-  check "(l) state of the wrong shape '$shape': exit 0" exits 0
-  done_case
-done
-
-fresh
-ln -s "$new" .claude/settings.json
-echo '{"managedFiles":[]}' >files.json
-relink --state files.json .claude/settings.json "$new"
-check "(l2) state with no entries: exit 1" exits 1
-done_case
-
-fresh
-ln -s "$new" .claude/settings.json
-relink --state missing.json .claude/settings.json "$new"
-check "(l3) no state file yet: exit 1" exits 1
-done_case
-
-for spelling in .claude//settings.json x/../.claude/settings.json ./.claude/./settings.json; do
-  fresh
-  ln -s "$new" .claude/settings.json
-  echo "{\"managedFiles\":[\"$spelling\"]}" >files.json
-  relink --state files.json .claude/settings.json "$new"
-  check "(m) state spells settings '$spelling': exit 0" exits 0
-  check "(m) ... and the link survives" points_at .claude/settings.json "$new"
-  done_case
-done
-
-fresh
-ln -s "$new" .claude/settings.json
-echo "{\"managedFiles\":[\"$PWD/.claude/settings.json\"]}" >files.json
-relink --state files.json .claude/settings.json "$new"
-check "(m2) state spells settings absolutely, current name relative: exit 0" exits 0
-check "(m2) ... and the link survives" points_at .claude/settings.json "$new"
-done_case
-
-fresh
-ln -s "$new" .claude/settings.json
-echo "{\"managedFiles\":[\"$PWD/x/../.claude//settings.json\"]}" >files.json
-relink --state files.json "$PWD/.claude/settings.json" "$new"
-check "(m3) state spells the absolute name differently: exit 0" exits 0
-done_case
-
-fresh
-ln -s "$new" .claude/settings.json
-echo '{"managedFiles":["/elsewhere/.claude/settings.json",".claude/settings.json.bak"]}' >files.json
-relink --state files.json .claude/settings.json "$new"
-check "(m4) entries naming other paths: exit 1" exits 1
-done_case
-
-fresh
 ln -s "$old" .claude/settings.json
 ln -s "$old" ".claude/.settings.json.coldlogic-relink.$dead"
 backdate ".claude/.settings.json.coldlogic-relink.$dead"
 relink --check-only --print .claude/settings.json "$new"
 check "(n) --check-only, stale link: exit 0" exits 0
-check "(n) ... prints it" printed .claude/settings.json
+check "(n) ... prints it as stale" printed "stale .claude/settings.json"
 check "(n) ... leaves it alone" points_at .claude/settings.json "$old"
 check "(n) ... and doesn't sweep leftovers" [ -L ".claude/.settings.json.coldlogic-relink.$dead" ]
 done_case ".settings.json.coldlogic-relink.$dead"
@@ -285,25 +214,18 @@ echo '{}' >.mcp.json
 rmdir .claude
 relink --check-only --print .claude/settings.json "$new" .mcp.json "$new"
 check "(p) --check-only, missing link and real file: exit 0" exits 0
-check "(p) ... prints only the missing link" printed .claude/settings.json
+check "(p) ... prints the missing link, then the conflict" printed "missing .claude/settings.json
+conflict .mcp.json"
 check "(p) ... creates nothing" [ ! -e .claude ]
+check "(p) ... and leaves the real file" [ "$(cat .mcp.json)" = '{}' ]
 done_case
 
 fresh
 echo '{}' >.mcp.json
 ln -s "$new" .claude/settings.json
-echo '{"managedFiles":[".mcp.json",".claude/settings.json"]}' >files.json
-relink --check-only --print --state files.json .claude/settings.json "$new" .mcp.json "$new"
-check "(p2) --check-only --state, real file otherwise current: exit 1" exits 1
-check "(p2) ... prints nothing" printed ""
-done_case
-
-fresh
-ln -s "$new" .claude/settings.json
-echo '{"managedFiles":[".claude/settings.json"]}' >files.json
-relink --check-only --state files.json "$PWD/.claude/settings.json" "$new"
-check "(q) --check-only with a respelled state entry: exit 0" exits 0
-check "(q) ... prints nothing (no file is stale)" printed ""
+relink --check-only --print .claude/settings.json "$new" .mcp.json "$new"
+check "(p2) --check-only, real file otherwise current: exit 0" exits 0
+check "(p2) ... prints only the conflict" printed "conflict .mcp.json"
 done_case
 
 fresh
@@ -311,17 +233,61 @@ relink --bogus .claude/settings.json "$new"
 check "(r) unknown option: exit 2" exits 2
 relink .claude/settings.json
 check "(r) odd number of arguments: exit 2" exits 2
+relink --state files.json .claude/settings.json "$new"
+check "(r) the removed --state option: exit 2" exits 2
 done_case
 
-# A failing command must never come out as exit 1 (run the task).
+# A file the sandbox refuses must not stop the rest from being linked (#78).
+if [ "$(id -u)" = 0 ]; then
+  echo "skip (u) (u2) read-only dir: running as root, which ignores the mode"
+else
+  fresh
+  ln -s "$old" .claude/settings.json
+  chmod a-w .claude
+  relink .claude/settings.json "$new" .pre-commit-config.yaml "$new"
+  chmod u+w .claude
+  check "(u) refused file first, writable one after: exit 0" exits 0
+  check "(u) ... the refused link keeps its old target" points_at .claude/settings.json "$old"
+  check "(u) ... and the writable one is linked" points_at .pre-commit-config.yaml "$new"
+  done_case
+
+  fresh
+  ln -s "$old" .claude/settings.json
+  chmod a-w .claude
+  relink .pre-commit-config.yaml "$new" .claude/settings.json "$new"
+  chmod u+w .claude
+  check "(u2) writable file first, refused one after: exit 0" exits 0
+  check "(u2) ... the refused link keeps its old target" points_at .claude/settings.json "$old"
+  check "(u2) ... and the writable one is linked" points_at .pre-commit-config.yaml "$new"
+  done_case
+fi
+
 fresh
-ln -s "$new" .claude/settings.json
-echo '{"managedFiles":[".claude/settings.json"]}' >files.json
-shim realpath
-relink_shimmed --check-only --state files.json "$PWD/.claude/settings.json" "$new"
-check "(t) realpath fails during the state check: exit 3" exits 3
+ln -s "$old" b.json
+ln -s "$new" c.json
+echo '{}' >d.json
+relink --check-only --print a.json "$new" b.json "$new" c.json "$new" d.json "$new"
+check "(v) --check-only over missing, stale, current, real file: exit 0" exits 0
+check "(v) ... prints them in order, the real file as a conflict" printed "missing a.json
+stale b.json
+conflict d.json"
 done_case
 
+if [ "$(id -u)" = 0 ]; then
+  echo "skip (v2) read-only dir: running as root, which ignores the mode"
+else
+  fresh
+  chmod a-w .claude
+  relink --print .claude/settings.json "$new"
+  chmod u+w .claude
+  check "(v2) relink of a missing link, create denied: exit 0" exits 0
+  check "(v2) ... prints it as missing" printed "missing .claude/settings.json"
+  check "(v2) ... and creates no link" [ ! -L .claude/settings.json ]
+  check "(v2) ... nor anything else" [ ! -e .claude/settings.json ]
+  done_case
+fi
+
+# A failing command must never come out as exit 1 (nothing stale).
 fresh
 ln -s "$old" .claude/settings.json
 shim dirname
