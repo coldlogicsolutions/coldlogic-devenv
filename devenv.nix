@@ -9,7 +9,6 @@ let
   session-relink = import ./packages/session-relink.nix { inherit pkgs; };
   session-shell = import ./packages/session-shell.nix { inherit pkgs; };
   prune-worktrees = import ./packages/prune-worktrees.nix { inherit pkgs gh-app; };
-  claude-wrapper = import ./packages/claude-wrapper.nix { inherit pkgs; };
   claude-plugins-install = pkgs.writeShellApplication {
     name = "claude-plugins-install";
     runtimeInputs = with pkgs; [
@@ -56,6 +55,12 @@ in
       # never creates, replaces or removes. Only a terminal shell refreshes it,
       # or the `claude` wrapper before a session starts.
       sessionLinks = removeAttrs generatedLinks [ config.claude.code.settingsPath ];
+      # `claude`, which checks the settings path after a failed refresh, in
+      # whichever checkout it starts: so relative to the checkout.
+      claude-wrapper = import ./packages/claude-wrapper.nix {
+        inherit pkgs;
+        settingsPath = lib.removePrefix "${config.devenv.root}/" config.claude.code.settingsPath;
+      };
       # packages/session-relink.sh with `opts`, then `--`, then each file in
       # `links` and the store path it should link to. Run from $DEVENV_ROOT.
       # Exits 1 when nothing is stale, 0 when something is, and anything else

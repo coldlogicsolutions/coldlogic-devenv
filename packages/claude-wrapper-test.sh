@@ -14,7 +14,7 @@
 set -eu
 
 # Also run by hand inside a session, which sets these.
-unset CLAUDECODE CLAUDE_CODE_CHILD_SESSION COLDLOGIC_DEVENV_SESSION COLDLOGIC_WRAPPERS_RUN COLDLOGIC_START_WITHOUT_SETTINGS DEVENV_ROOT DEVENV_DOTFILE DEVENV_STATE DEVENV_PROFILE DEVENV_RUNTIME git_bin
+unset CLAUDECODE CLAUDE_CODE_CHILD_SESSION COLDLOGIC_DEVENV_SESSION COLDLOGIC_WRAPPERS_RUN COLDLOGIC_START_WITHOUT_SETTINGS DEVENV_ROOT DEVENV_DOTFILE DEVENV_STATE DEVENV_PROFILE DEVENV_RUNTIME git_bin settings_path
 
 script="$(cd "$(dirname "${1:?usage: claude-wrapper-test.sh <claude-wrapper.sh>}")" && pwd)/$(basename "$1")"
 root="$(mktemp -d)"
@@ -363,6 +363,28 @@ echo '{}' >"$case_dir/proj/.claude/settings.json"
 extra=(STUB_DEVENV_EXIT=3)
 run
 check "(o) regular settings file: claude ran" runs claude 1
+
+# (o2) a non-default settings path, as the built wrapper gets it from
+# claude.code.settingsPath: that file is the one checked, in the checkout.
+fresh
+mkdir -p "$case_dir/proj/conf" "$case_dir/proj/src"
+echo '{}' >"$case_dir/proj/conf/claude.json"
+run_dir="$case_dir/proj/src"
+extra=(STUB_DEVENV_EXIT=3 settings_path=conf/claude.json)
+run
+check "(o2) custom settings path there: claude ran" runs claude 1
+check "(o2) ... and stderr says they may be out of date" contains stderr "may be out of date"
+
+# (o3) the custom file missing refuses, though .claude/settings.json is
+# there, and names the custom file.
+fresh
+mkdir -p "$case_dir/proj/.claude"
+echo '{}' >"$case_dir/proj/.claude/settings.json"
+extra=(STUB_DEVENV_EXIT=3 settings_path=conf/claude.json)
+run
+check "(o3) custom settings path missing: exit 1" exits 1
+check "(o3) ... claude not started" absent claude
+check "(o3) ... names the custom file" contains stderr "$case_dir/proj/conf/claude.json is missing"
 
 # (p) no devenv on PATH is a failed refresh. PATH holds only the case's
 # directories, so no outer devenv can answer.

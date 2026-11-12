@@ -128,7 +128,7 @@ The checkout is `git rev-parse --show-toplevel` when that directory has a `deven
 
 Derek's decision, made exact:
 
-- The settings are "there" when `<checkout>/.claude/settings.json` resolves to a file (`[ -e ]`). A link whose store path is gone counts as missing: Claude Code would read nothing through it. A regular file, as in a project not yet adopted, counts as there.
+- The settings are "there" when `<checkout>/<settingsPath>` resolves to a file (`[ -e ]`). `settingsPath` is the module's `claude.code.settingsPath`, made relative to the checkout and substituted into the built wrapper as `git_bin` is; `.claude/settings.json` by default (review finding: the wrapper had hard-coded it). A link whose store path is gone counts as missing: Claude Code would read nothing through it. A regular file, as in a project not yet adopted, counts as there.
 - There: one `coldlogic:` line on stderr (the checkout, the exit code, "may be out of date", and `devenv shell` to see why), then start.
 - Missing: one line naming the file, what the session would lack, and `COLDLOGIC_START_WITHOUT_SETTINGS=1 claude`; exit 1. With the variable set to anything non-empty: one line, then start.
 - `devenv` missing from `PATH` is a failed refresh (the subshell exits 127), not a special case.

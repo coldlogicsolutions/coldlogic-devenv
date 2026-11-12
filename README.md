@@ -83,7 +83,7 @@ Start `claude` from the devenv shell (`devenv shell` or direnv), in the checkout
 - `COLDLOGIC_DEVENV_SESSION` marks a session. If a terminal has it (`printenv COLDLOGIC_DEVENV_SESSION`), it was opened from inside a session, and neither `claude` nor `devenv shell` refreshes there: open a fresh terminal.
 - A `claude` run inside a session that the wrapper didn't start is recognised through `CLAUDE_CODE_CHILD_SESSION`, which needs Claude Code 2.1.172 or later.
 - A session that started without the settings and is still open can remove the link again (#100): close it.
-- If the refresh fails, the wrapper says so on stderr. It still starts `claude` when `.claude/settings.json` is there, as those settings still protect the session. When it isn't, it refuses and exits 1, since the session would have none of the module's guard hook, sandbox settings or permissions. To start it anyway: `COLDLOGIC_START_WITHOUT_SETTINGS=1 claude`.
+- If the refresh fails, the wrapper says so on stderr. It still starts `claude` when the settings file (`claude.code.settingsPath`, `.claude/settings.json` by default) is there, as those settings still protect the session. When it isn't, it refuses and exits 1, since the session would have none of the module's guard hook, sandbox settings or permissions. To start it anyway: `COLDLOGIC_START_WITHOUT_SETTINGS=1 claude`.
 - To run the real binary without the wrapper, take its path from `type -a claude`.
 
 ## What's here

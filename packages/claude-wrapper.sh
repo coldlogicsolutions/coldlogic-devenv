@@ -13,7 +13,7 @@
 #   COLDLOGIC_DEVENV_SESSION   set: a session is running, refresh nothing
 #   CLAUDE_CODE_CHILD_SESSION  the same, for a session started another way
 #   COLDLOGIC_START_WITHOUT_SETTINGS  set: after a failed refresh, start even
-#                              with no .claude/settings.json
+#                              with no settings file
 #   COLDLOGIC_WRAPPERS_RUN     the wrappers already run in this launch, which
 #                              are never started again
 # It sets, for the real `claude`:
@@ -24,7 +24,9 @@
 # no settings; 127 when there is no Claude Code behind it on PATH.
 #
 # It uses only bash builtins, `git` (`$git_bin`, a store path in the built
-# application) and `devenv` (the developer's own, from PATH).
+# application) and `devenv` (the developer's own, from PATH). The built
+# application also sets `$settings_path`, the module's
+# `claude.code.settingsPath` relative to the checkout.
 set -euo pipefail
 
 self="${BASH_SOURCE[0]}"
@@ -32,6 +34,7 @@ if [ "${self#/}" = "$self" ]; then
   self="$PWD/$self"
 fi
 git_bin="${git_bin:-git}"
+settings_path="${settings_path:-.claude/settings.json}"
 seen="${COLDLOGIC_WRAPPERS_RUN:-}"
 
 # Read before the marker is exported below. CLAUDECODE is not part of this
@@ -126,7 +129,10 @@ code=0
 # A refresh that succeeds is trusted: nothing printed, the link not looked
 # at. One that fails starts a session only with settings in place.
 if [ "$code" != 0 ]; then
-  settings="$checkout/.claude/settings.json"
+  case "$settings_path" in
+    /*) settings="$settings_path" ;;
+    *) settings="$checkout/$settings_path" ;;
+  esac
   if [ -e "$settings" ]; then
     echo "coldlogic: couldn't refresh the generated files in $checkout (devenv tasks run devenv:files exited $code). Starting claude with the settings already there, which may be out of date. To see why, run there: devenv shell" >&2
   elif [ -n "${COLDLOGIC_START_WITHOUT_SETTINGS:-}" ]; then

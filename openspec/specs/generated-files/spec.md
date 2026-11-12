@@ -271,7 +271,7 @@ Tested by: `packages/claude-wrapper-test.sh` at build.
 - **THEN** devenv isn't run
 
 ### Requirement: A failed refresh starts claude only with settings in place
-When the refresh fails, the wrapper SHALL say so on stderr, with the checkout and the exit code. It SHALL then start Claude Code if the checkout's `.claude/settings.json` resolves to a file, and otherwise SHALL exit 1 without starting it, unless `COLDLOGIC_START_WITHOUT_SETTINGS` is set. The refusal SHALL name the missing file and that variable. A refresh that succeeds SHALL print nothing and SHALL be trusted.
+When the refresh fails, the wrapper SHALL say so on stderr, with the checkout and the exit code. It SHALL then start Claude Code if the checkout's settings file (`claude.code.settingsPath`) resolves to a file, and otherwise exit 1 without starting it, naming the file and `COLDLOGIC_START_WITHOUT_SETTINGS`, unless that variable is set. A refresh that succeeds SHALL print nothing and SHALL be trusted.
 
 Tested by: `packages/claude-wrapper-test.sh` at build.
 
@@ -290,6 +290,10 @@ Tested by: `packages/claude-wrapper-test.sh` at build.
 #### Scenario: The override
 - **WHEN** devenv fails, `.claude/settings.json` doesn't exist and `COLDLOGIC_START_WITHOUT_SETTINGS=1` is set
 - **THEN** stderr says the session starts without the module's settings, and Claude Code starts
+
+#### Scenario: A settings path of the project's own
+- **WHEN** the project sets `claude.code.settingsPath` to another file, devenv fails, and that file is missing though `.claude/settings.json` is there
+- **THEN** Claude Code isn't started, and stderr names that file
 
 #### Scenario: No devenv on PATH
 - **WHEN** `devenv` can't be found

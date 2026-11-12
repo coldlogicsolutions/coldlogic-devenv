@@ -15,7 +15,7 @@ Run every tool through `devenv shell --quiet -- <cmd>`, one command per call, wi
   7. The checkout: `top="$("$git_bin" rev-parse --show-toplevel 2>/dev/null)" || top=""`. `checkout="$top"` when `top` is non-empty and `$top/devenv.nix` or `$top/devenv.yaml` is a file; else empty. Never `DEVENV_ROOT` (review fix R2).
   8. Empty: `exec "$real" "$@"`, with no message (review fix R2).
   9. The refresh: `code=0`, then, in a subshell, `cd "$checkout"`, `unset CLAUDECODE COLDLOGIC_DEVENV_SESSION` and every `DEVENV_` variable (`"${!DEVENV_@}"`, review fix R1), and `exec devenv --quiet tasks run devenv:files`, with `</dev/null >/dev/null`; `|| code=$?`.
-  10. `settings="$checkout/.claude/settings.json"`. When `code` is 0, print nothing and don't look at `$settings`. When it isn't:
+  10. `settings="$checkout/$settings_path"`, where `settings_path` is the module's `claude.code.settingsPath` relative to the checkout, `.claude/settings.json` by default (review fix R3). When `code` is 0, print nothing and don't look at `$settings`. When it isn't:
       - `[ -e "$settings" ]`: print `coldlogic: couldn't refresh the generated files in $checkout (devenv tasks run devenv:files exited $code). Starting claude with the settings already there, which may be out of date. To see why, run there: devenv shell` to stderr.
       - else, `COLDLOGIC_START_WITHOUT_SETTINGS` non-empty: print `coldlogic: couldn't refresh the generated files in $checkout (devenv tasks run devenv:files exited $code), and $settings is missing. Starting claude anyway, as COLDLOGIC_START_WITHOUT_SETTINGS is set: this session has none of the module's guard hook, sandbox settings or permissions.` to stderr.
       - else: print `coldlogic: not starting claude. Couldn't refresh the generated files in $checkout (devenv tasks run devenv:files exited $code), and $settings is missing, so the session would have none of the module's guard hook, sandbox settings or permissions. To see why, run there: devenv shell. To start it anyway: COLDLOGIC_START_WITHOUT_SETTINGS=1 claude` to stderr and `exit 1`.
@@ -182,6 +182,7 @@ Archived with 6.1 to 6.8 open by design: they are Derek's manual terminal checks
 
 - [x] R1 The refresh unsets every `DEVENV_` variable of the shell it runs in, so devenv works out the project from its directory. Test (g3): the stand-in devenv records `DEVENV_ROOT`, `DEVENV_DOTFILE`, `DEVENV_STATE`, `DEVENV_PROFILE` and `DEVENV_RUNTIME`, and all are unset; claude keeps them.
 - [x] R2 No fallback to `DEVENV_ROOT`: outside a devenv project (a git checkout without `devenv.nix` or `devenv.yaml`, or no checkout) the wrapper starts `claude` at once, with no refresh, no settings check and no message. Tests (h), (i), (j).
+- [x] R3 The settings file checked after a failed refresh is `claude.code.settingsPath`, made relative to the checkout in `devenv.nix` and substituted into the built wrapper as `settings_path`, as `git_bin` is. Tests (o2) and (o3) with `conf/claude.json`.
 
 ## Workflow follow-up
 
