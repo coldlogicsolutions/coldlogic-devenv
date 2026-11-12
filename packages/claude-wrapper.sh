@@ -42,7 +42,8 @@ seen="${COLDLOGIC_WRAPPERS_RUN:-}"
 
 # Read before the marker is exported below. CLAUDECODE is not part of this
 # test: an IDE extension sets it in its terminals, where no session runs yet
-# and the refresh must.
+# and the refresh must. So it differs on purpose from the shell tasks'
+# session test (`inSession` in devenv.nix), which counts CLAUDECODE.
 nested=""
 if [ -n "${COLDLOGIC_DEVENV_SESSION:-}" ] || [ -n "${CLAUDE_CODE_CHILD_SESSION:-}" ]; then
   nested=1

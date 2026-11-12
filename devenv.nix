@@ -129,9 +129,14 @@ in
       # Inside a Claude Code session: the `claude` wrapper's marker
       # (packages/claude-wrapper.sh), or Claude Code's own variable, for a
       # session the wrapper didn't start (the desktop app, an IDE extension).
-      # The one session test in this module: nothing else may decide it, and
+      # The shell tasks' session test: no task may decide it another way, and
       # it must never be narrower than CLAUDECODE alone, or such a session
-      # would run devenv's link step in its sandbox (#68).
+      # would run devenv's link step in its sandbox (#68). The `claude`
+      # wrapper's nested check (packages/claude-wrapper.sh) differs on
+      # purpose: it reads CLAUDE_CODE_CHILD_SESSION, not CLAUDECODE, since an
+      # IDE extension sets CLAUDECODE in its terminals, where no session runs
+      # yet and the wrapper must refresh. Its refresh clears both variables
+      # so this test lets the file tasks run.
       inSession = ''{ [ -n "''${COLDLOGIC_DEVENV_SESSION:-}" ] || [ -n "''${CLAUDECODE:-}" ]; }'';
       # The status of devenv's two file tasks: skip (exit 0) in a session,
       # run (exit 1) outside one.
