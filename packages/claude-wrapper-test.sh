@@ -280,29 +280,40 @@ check "(g3) ... no DEVENV_PROFILE" has devenv "DEVENV_PROFILE=unset"
 check "(g3) ... no DEVENV_RUNTIME" has devenv "DEVENV_RUNTIME=unset"
 check "(g3) ... and claude keeps them" has claude "DEVENV_ROOT=$case_dir/other"
 
-# (h) git's top is no devenv project: the shell's own checkout.
+# (h) git's top is no devenv project: nothing refreshed or checked, even
+# with the shell's DEVENV_ROOT naming a project whose refresh would fail and
+# whose settings are missing.
 fresh
-mkdir -p "$case_dir/plain" "$case_dir/other"
+mkdir -p "$case_dir/plain"
 git_top="$case_dir/plain"
-extra=(DEVENV_ROOT="$case_dir/other")
+run_dir="$case_dir/plain"
+extra=(DEVENV_ROOT="$case_dir/proj" STUB_DEVENV_EXIT=3)
 run
-check "(h) no devenv files at the top: DEVENV_ROOT" has devenv "cwd=$case_dir/other"
+check "(h) no devenv files at the top: no devenv" absent devenv
+check "(h) ... no refusal: claude ran" runs claude 1
+check "(h) ... in its directory" has claude "cwd=$case_dir/plain"
+check "(h) ... with the marker" has claude "session=1"
+check "(h) ... and nothing on stderr" empty_file stderr
 
-# (i) not in git: the shell's own checkout.
+# (i) not in git: the same.
 fresh
-mkdir -p "$case_dir/other"
+mkdir -p "$case_dir/elsewhere"
 git_top=""
-extra=(DEVENV_ROOT="$case_dir/other")
+run_dir="$case_dir/elsewhere"
+extra=(DEVENV_ROOT="$case_dir/proj" STUB_DEVENV_EXIT=3)
 run
-check "(i) git fails: DEVENV_ROOT" has devenv "cwd=$case_dir/other"
+check "(i) git fails: no devenv" absent devenv
+check "(i) ... no refusal: claude ran" runs claude 1
+check "(i) ... in its directory" has claude "cwd=$case_dir/elsewhere"
+check "(i) ... and nothing on stderr" empty_file stderr
 
-# (j) no project at all.
+# (j) no project and no shell's project.
 fresh
 git_top=""
 run
 check "(j) no project: no devenv" absent devenv
 check "(j) ... claude ran with the marker" has claude "session=1"
-check "(j) ... and stderr says so" contains stderr "no devenv project found"
+check "(j) ... and nothing on stderr" empty_file stderr
 
 # (k) the refresh fails, settings in place.
 fresh

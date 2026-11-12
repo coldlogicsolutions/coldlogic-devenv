@@ -199,7 +199,7 @@ Tested by: none. `devenv.nix` defines the test once; the change's tasks search f
 - **THEN** it is outside a session
 
 ### Requirement: The claude wrapper refreshes the generated files before a session starts
-The developer shell SHALL put a `claude` command on `PATH` ahead of Claude Code. Outside a session, every invocation, whatever its arguments, SHALL first run devenv's file tasks at the top of the checkout the current directory is in, as a terminal shell runs them, and only then start Claude Code. A `CLAUDECODE` set by an IDE terminal SHALL NOT stop it.
+The developer shell SHALL put a `claude` command on `PATH` ahead of Claude Code. Outside a session, every invocation, whatever its arguments, SHALL first run devenv's file tasks at the top of the devenv project the current directory is in, as a terminal shell runs them, and only then start Claude Code. A `CLAUDECODE` set by an IDE terminal SHALL NOT stop it.
 
 Tested by: `packages/claude-wrapper-test.sh` at build, with a stand-in `devenv`; the change's terminal runs.
 
@@ -219,17 +219,22 @@ Tested by: `packages/claude-wrapper-test.sh` at build, with a stand-in `devenv`;
 - **WHEN** a shell entered in the main checkout has changed directory into a worktree with its own `devenv.nix`, and the developer runs `claude`
 - **THEN** the worktree's generated files are refreshed, not the main checkout's
 
-#### Scenario: Outside any checkout
-- **WHEN** a developer in a devenv shell runs `claude` from a directory that is in no checkout with a `devenv.nix` or `devenv.yaml`
-- **THEN** the shell's own checkout is refreshed, and Claude Code starts in that directory
-
 #### Scenario: An IDE terminal
 - **WHEN** a developer runs `claude` in an IDE extension's terminal, where `CLAUDECODE` is set and neither `COLDLOGIC_DEVENV_SESSION` nor `CLAUDE_CODE_CHILD_SESSION` is
 - **THEN** devenv's file tasks run, and Claude Code starts with `CLAUDECODE` as the terminal set it
 
-#### Scenario: No project
-- **WHEN** the current directory is in no checkout with a `devenv.nix` or `devenv.yaml` and the shell names none
-- **THEN** stderr says nothing was refreshed, and Claude Code starts
+### Requirement: The wrapper leaves other directories alone
+Where the git checkout the current directory is in has no `devenv.nix` or `devenv.yaml` at its top, or the directory is in no git checkout, the wrapper SHALL start Claude Code at once, with no refresh, no settings check and no message. It SHALL NOT fall back to the shell's own checkout.
+
+Tested by: `packages/claude-wrapper-test.sh` at build.
+
+#### Scenario: A checkout that isn't a devenv project
+- **WHEN** a developer in a devenv shell runs `claude` in a git checkout with no `devenv.nix` or `devenv.yaml`
+- **THEN** devenv isn't run, not even for the shell's own checkout, no settings are checked, nothing is printed, and Claude Code starts in that directory
+
+#### Scenario: Outside any checkout
+- **WHEN** a developer in a devenv shell runs `claude` from a directory in no git checkout
+- **THEN** devenv isn't run, not even for the shell's own checkout, no settings are checked, nothing is printed, and Claude Code starts in that directory
 
 ### Requirement: The wrapper marks the session it starts
 The wrapper SHALL start Claude Code with `COLDLOGIC_DEVENV_SESSION=1` in its environment, on every path that starts it, so everything that session runs inherits the marker. The devenv run that refreshes the files SHALL NOT have the marker, `CLAUDECODE`, or any `DEVENV_` variable of the shell the wrapper runs in, so devenv works out the checkout from its directory.

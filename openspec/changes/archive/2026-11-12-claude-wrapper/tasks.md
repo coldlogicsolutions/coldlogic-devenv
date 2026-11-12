@@ -12,9 +12,9 @@ Run every tool through `devenv shell --quiet -- <cmd>`, one command per call, wi
   4. Find the real one: split `${PATH:-}` on `:` the same way; for each non-empty `dir`, `cand="$dir/claude"`; take the first where `[ -f "$cand" ] && [ -x "$cand" ]` and `is_wrapper "$cand"` is false. An empty entry is skipped, not read as the current directory. None found: print `coldlogic: no Claude Code found on PATH behind this wrapper ($self). Install Claude Code, or add it to PATH.` to stderr and `exit 127`. This comes before any refresh.
   5. `export COLDLOGIC_WRAPPERS_RUN="${seen:+$seen:}$self"` and `export COLDLOGIC_DEVENV_SESSION=1`. From here every `exec` of the real `claude` carries both.
   6. `if [ -n "$nested" ]; then exec "$real" "$@"; fi`.
-  7. The checkout: `top="$("$git_bin" rev-parse --show-toplevel 2>/dev/null)" || top=""`. `checkout="$top"` when `top` is non-empty and `$top/devenv.nix` or `$top/devenv.yaml` is a file; else `checkout="$DEVENV_ROOT"` when that is set and a directory; else empty.
-  8. Empty: print `coldlogic: no devenv project found from $PWD, so the generated files weren't refreshed.` to stderr and `exec "$real" "$@"`.
-  9. The refresh: `code=0`, then `(cd "$checkout" && unset CLAUDECODE COLDLOGIC_DEVENV_SESSION && exec devenv --quiet tasks run devenv:files) </dev/null >/dev/null || code=$?`.
+  7. The checkout: `top="$("$git_bin" rev-parse --show-toplevel 2>/dev/null)" || top=""`. `checkout="$top"` when `top` is non-empty and `$top/devenv.nix` or `$top/devenv.yaml` is a file; else empty. Never `DEVENV_ROOT` (review fix R2).
+  8. Empty: `exec "$real" "$@"`, with no message (review fix R2).
+  9. The refresh: `code=0`, then, in a subshell, `cd "$checkout"`, `unset CLAUDECODE COLDLOGIC_DEVENV_SESSION` and every `DEVENV_` variable (`"${!DEVENV_@}"`, review fix R1), and `exec devenv --quiet tasks run devenv:files`, with `</dev/null >/dev/null`; `|| code=$?`.
   10. `settings="$checkout/.claude/settings.json"`. When `code` is 0, print nothing and don't look at `$settings`. When it isn't:
       - `[ -e "$settings" ]`: print `coldlogic: couldn't refresh the generated files in $checkout (devenv tasks run devenv:files exited $code). Starting claude with the settings already there, which may be out of date. To see why, run there: devenv shell` to stderr.
       - else, `COLDLOGIC_START_WITHOUT_SETTINGS` non-empty: print `coldlogic: couldn't refresh the generated files in $checkout (devenv tasks run devenv:files exited $code), and $settings is missing. Starting claude anyway, as COLDLOGIC_START_WITHOUT_SETTINGS is set: this session has none of the module's guard hook, sandbox settings or permissions.` to stderr.
@@ -54,9 +54,9 @@ Run every tool through `devenv shell --quiet -- <cmd>`, one command per call, wi
   - (e) `CLAUDECODE=1` alone, the IDE terminal: `log/devenv` has `CLAUDECODE=unset` and `session=unset`, and `log/claude` has `CLAUDECODE=1` and `session=1`.
   - (f) Run from `proj/src/deep`: devenv's `cwd` is `proj`, claude's is `proj/src/deep`.
   - (g) `proj` has only `devenv.yaml`: devenv's `cwd` is `proj`.
-  - (h) `STUB_GIT_TOP` is a directory with neither file, `DEVENV_ROOT=$case_dir/other`: devenv's `cwd` is `other`.
-  - (i) `STUB_GIT_TOP` unset (git exits 128), `DEVENV_ROOT=$case_dir/other`: devenv's `cwd` is `other`.
-  - (j) git exits 128 and no `DEVENV_ROOT`: no `log/devenv`, claude ran with `session=1`, stderr has `no devenv project found`.
+  - (h) `STUB_GIT_TOP` is a directory with neither file, `DEVENV_ROOT` the case's project, `STUB_DEVENV_EXIT=3`: no `log/devenv`, claude ran in that directory with `session=1`, stderr empty (review fix R2).
+  - (i) `STUB_GIT_TOP` unset (git exits 128), the same `DEVENV_ROOT`: the same (review fix R2).
+  - (j) git exits 128 and no `DEVENV_ROOT`: no `log/devenv`, claude ran with `session=1`, stderr empty (review fix R2).
   - (k) `STUB_DEVENV_EXIT=3`, `proj/.claude/settings.json` a link to an existing file: claude ran; stderr has `couldn't refresh`, `exited 3` and `may be out of date`.
   - (l) `STUB_DEVENV_EXIT=3`, no settings: `$code` is 1, no `log/claude`, stderr has `not starting claude`, the settings path and `COLDLOGIC_START_WITHOUT_SETTINGS=1 claude`.
   - (m) As (l), with the settings a link to a path that doesn't exist: the same refusal.
@@ -177,6 +177,11 @@ Archived with 6.1 to 6.8 open by design: they are Derek's manual terminal checks
 ## 7. Gate
 
 - [x] 7.1 Run `devenv shell --quiet -- scripts/check.sh` and verify it ends with `check: all passed`.
+
+## 8. Review fixes (after archive)
+
+- [x] R1 The refresh unsets every `DEVENV_` variable of the shell it runs in, so devenv works out the project from its directory. Test (g3): the stand-in devenv records `DEVENV_ROOT`, `DEVENV_DOTFILE`, `DEVENV_STATE`, `DEVENV_PROFILE` and `DEVENV_RUNTIME`, and all are unset; claude keeps them.
+- [x] R2 No fallback to `DEVENV_ROOT`: outside a devenv project (a git checkout without `devenv.nix` or `devenv.yaml`, or no checkout) the wrapper starts `claude` at once, with no refresh, no settings check and no message. Tests (h), (i), (j).
 
 ## Workflow follow-up
 

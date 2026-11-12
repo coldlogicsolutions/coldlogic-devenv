@@ -95,22 +95,16 @@ if [ -n "$nested" ]; then
   exec "$real" "$@"
 fi
 
-# The checkout: the top of the git checkout here when it is a devenv
-# project, else the shell's own. Not DEVENV_ROOT first: a shell entered in
-# the main checkout and moved into a worktree still names the main checkout,
-# and `claude` reads the worktree's settings.
+# The checkout: the top of the git checkout here, only when it is a devenv
+# project. Never DEVENV_ROOT: a shell entered in one checkout and moved
+# elsewhere still names the first, and `claude` reads the settings of the
+# one it starts in. Anywhere else there are no generated settings of ours
+# to refresh or to be without, so `claude` starts at once, with no message.
 top="$("$git_bin" rev-parse --show-toplevel 2>/dev/null)" || top=""
-checkout=""
-if [ -n "$top" ] && { [ -f "$top/devenv.nix" ] || [ -f "$top/devenv.yaml" ]; }; then
-  checkout="$top"
-elif [ -n "${DEVENV_ROOT:-}" ] && [ -d "$DEVENV_ROOT" ]; then
-  checkout="$DEVENV_ROOT"
-fi
-
-if [ -z "$checkout" ]; then
-  echo "coldlogic: no devenv project found from $PWD, so the generated files weren't refreshed." >&2
+if [ -z "$top" ] || { [ ! -f "$top/devenv.nix" ] && [ ! -f "$top/devenv.yaml" ]; }; then
   exec "$real" "$@"
 fi
+checkout="$top"
 
 # The refresh, in a subshell, so this directory and environment never
 # change. The two session variables are cleared so the shell's session test

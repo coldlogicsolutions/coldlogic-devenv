@@ -78,6 +78,7 @@ Start `claude` from the devenv shell (`devenv shell` or direnv), in the checkout
 - Every `claude` command outside a session waits for that refresh, `claude --version` included. It prints nothing unless the refresh fails.
 - It only works where the shell's `PATH` is used. The IDE extension's own launch and the desktop app don't go through it: for those, enter the shell from a terminal once, as before.
 - Start it in the checkout whose settings it should read. In a subdirectory the checkout's files are refreshed, but Claude Code looks for `.claude/settings.json` where it starts.
+- Only a git checkout with a `devenv.nix` or `devenv.yaml` at its top is refreshed. Anywhere else the wrapper starts `claude` at once, with no refresh and no check, even when the shell was entered in a project.
 - The refresh uses the profile `devenv.yaml` selects, whatever `--profile` the shell was entered with.
 - `COLDLOGIC_DEVENV_SESSION` marks a session. If a terminal has it (`printenv COLDLOGIC_DEVENV_SESSION`), it was opened from inside a session, and neither `claude` nor `devenv shell` refreshes there: open a fresh terminal.
 - A `claude` run inside a session that the wrapper didn't start is recognised through `CLAUDE_CODE_CHILD_SESSION`, which needs Claude Code 2.1.172 or later.
