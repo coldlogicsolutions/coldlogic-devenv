@@ -459,6 +459,25 @@ BASH = [
     ("gh() { gh-app \"$@\"; }; gh pr merge 1; echo 'unclosed", ASK),
     ("gh() { :; }; command gh pr merge 1", DENY),
     ("gh() { :; }; find . -exec gh pr merge 1 \\;", DENY),
+    # A forced worktree remove and a branch reset by worktree add ask in any
+    # spelling git accepts (#87); the plain forms stay allowed.
+    ("git worktree remove wt", ALLOW),
+    ("git worktree remove -f wt", ASK),
+    ("git worktree remove -ff wt", ASK),
+    ("git worktree remove wt -f", ASK),
+    ("git worktree remove --force wt", ASK),
+    ("git worktree remove --forc wt", ASK),
+    ("git worktree remove wt --forc", ASK),
+    ("git worktree remove --fo wt", ASK),
+    ("git worktree remove --f wt", ASK),
+    ("devenv shell --quiet -- git worktree remove --fo wt", ASK),
+    ("git status && git worktree remove -f wt", ASK),
+    ("git worktree add -b feat/x wt origin/main", ALLOW),
+    ("git worktree add --detach wt", ALLOW),
+    ("git worktree add -B feat/x wt origin/main", ASK),
+    ("git worktree add -qB feat/x wt origin/main", ASK),
+    ("git worktree add --no-track -B feat/x wt origin/main", ASK),
+    ("git worktree add -b B wt", ALLOW),
     # Sequences and pipelines.
     ("git status && git log -1", ALLOW),
     ("git worktree list; git branch -vv", ALLOW),
@@ -1350,6 +1369,299 @@ with tempfile.TemporaryDirectory() as top:
                     print(f"FAIL {command!r} in {cwd}: expected {expected}, got {got}")
         finally:
             guard.scratch = real_scratch
+    finally:
+        guard.WORKING.update(cwd=None, root=None)
+
+# The main checkout stays on main (#88): branch work goes in a worktree.
+with tempfile.TemporaryDirectory() as top:
+    top = os.path.realpath(top)
+
+    def linked(root, wt, name):
+        gitdir = os.path.join(root, ".git", "worktrees", name)
+        os.makedirs(gitdir, exist_ok=True)
+        os.makedirs(wt, exist_ok=True)
+        with open(os.path.join(wt, ".git"), "w") as f:
+            f.write(f"gitdir: {gitdir}\n")
+        with open(os.path.join(gitdir, "gitdir"), "w") as f:
+            f.write(os.path.join(wt, ".git") + "\n")
+        with open(os.path.join(gitdir, "commondir"), "w") as f:
+            f.write("../..\n")
+
+    root = os.path.join(top, "proj")
+    os.makedirs(os.path.join(root, ".git", "worktrees"))
+    os.makedirs(os.path.join(root, "sub"))
+    os.makedirs(os.path.join(root, "vendor", "lib", ".git"))
+    open(os.path.join(root, "README.md"), "w").close()
+    sib = os.path.join(top, "proj.worktrees", "x")
+    linked(root, sib, "x")
+    open(os.path.join(sib, "README.md"), "w").close()
+    nested = os.path.join(root, ".claude", "worktrees", "n")
+    linked(root, nested, "n")
+    os.makedirs(os.path.join(sib, "packages", "foo"))
+    # Paths that are also refs: git checks out the ref.
+    for name in ("docs", "notes", "site", "rel", "wip"):
+        os.makedirs(os.path.join(root, name))
+    os.makedirs(os.path.join(root, ".git", "refs", "heads"))
+    open(os.path.join(root, ".git", "refs", "heads", "docs"), "w").close()
+    os.makedirs(os.path.join(root, ".git", "refs", "remotes", "origin"))
+    open(os.path.join(root, ".git", "refs", "remotes", "origin", "site"), "w").close()
+    with open(os.path.join(root, ".git", "packed-refs"), "w") as f:
+        f.write("# pack-refs with: peeled fully-peeled sorted\n"
+                "1111111111111111111111111111111111111111 refs/heads/notes\n"
+                "2222222222222222222222222222222222222222 refs/remotes/origin/wip\n"
+                "3333333333333333333333333333333333333333 refs/tags/rel\n"
+                "^4444444444444444444444444444444444444444\n")
+    # Repositories with no origin/HEAD: master, loose or packed, or neither.
+    legacy = os.path.join(top, "legacy")
+    os.makedirs(os.path.join(legacy, ".git", "refs", "heads"))
+    open(os.path.join(legacy, ".git", "refs", "heads", "master"), "w").close()
+    packed = os.path.join(top, "packed")
+    os.makedirs(os.path.join(packed, ".git"))
+    with open(os.path.join(packed, ".git", "packed-refs"), "w") as f:
+        f.write("1111111111111111111111111111111111111111 refs/heads/master\n")
+    bare = os.path.join(top, "fresh")
+    os.makedirs(os.path.join(bare, ".git"))
+    # A repository whose default branch, by origin/HEAD, is trunk.
+    trunk = os.path.join(top, "trunk")
+    os.makedirs(os.path.join(trunk, ".git", "refs", "remotes", "origin"))
+    with open(os.path.join(trunk, ".git", "refs", "remotes", "origin", "HEAD"), "w") as f:
+        f.write("ref: refs/remotes/origin/trunk\n")
+    policy = {**POLICY, "allow": POLICY["allow"] + ["git switch *"],
+              "ask": POLICY["ask"] + ["git switch -f *"]}
+    try:
+        for cwd, command, expected in [
+            # Creating a branch in the main checkout, in every spelling.
+            (root, "git switch -c feat/x", "deny"),
+            (root, "git switch --no-track -c feat/x origin/main", "deny"),
+            (root, "git switch -C feat/x", "deny"),
+            (root, "git switch --create feat/x", "deny"),
+            (root, "git switch --cr feat/x", "deny"),
+            (root, "git switch --force-create feat/x", "deny"),
+            (root, "git switch --fo feat/x", "deny"),
+            (root, "git switch -qc feat/x", "deny"),
+            (root, "git switch -cfeat/x", "deny"),
+            (root, "git switch --orphan feat/x", "deny"),
+            (root, "git checkout -b feat/x", "deny"),
+            (root, "git checkout -B feat/x origin/main", "deny"),
+            (root, "git checkout -qb feat/x", "deny"),
+            (root, "git checkout --orphan feat/x", "deny"),
+            (root, "git checkout --track origin/feat/x", "deny"),
+            # Switching to anything but main, detaching, a commit or a tag.
+            (root, "git switch feat/x", "deny"),
+            (root, "git switch -", "deny"),
+            (root, "git switch -- feat/x", "deny"),
+            (root, "git switch --detach origin/main", "deny"),
+            (root, "git switch -d HEAD~1", "deny"),
+            (root, "git switch --det v1.0", "deny"),
+            (root, "git checkout feat/x", "deny"),
+            (root, "git checkout v1.0", "deny"),
+            (root, "git checkout abc1234", "deny"),
+            (root, "git checkout --detach", "deny"),
+            (root, "git checkout feat/x --", "deny"),
+            (root, "git checkout missing.txt", "deny"),
+            # In any part of a call, behind a wrapper, or with -C naming it.
+            (root, "git status && git switch -c feat/x", "deny"),
+            (root, "git fetch origin; git switch feat/x", "deny"),
+            (root, "git log -1 | head -1\ngit checkout -b feat/x", "deny"),
+            (root, "devenv shell --quiet -- git switch -c feat/x", "deny"),
+            (root, "bash -c 'git switch -c feat/x'", "deny"),
+            (root, "git -C . switch -c feat/x", "deny"),
+            (root, f"git -C {root} switch -c feat/x", "deny"),
+            (root, "git --no-pager switch feat/x", "deny"),
+            (sib, f"git -C {root} switch -c feat/x", "deny"),
+            (sib, "git -C ../../proj checkout -b feat/x", "deny"),
+            (os.path.join(root, "sub"), "git switch -c feat/x", "deny"),
+            (root, "git switch -c feat/x && cd sub", "deny"),
+            # Back to main, file restores, and everything that only reads.
+            (root, "git switch main", "allow"),
+            (root, "git switch --no-guess main", "allow"),
+            (root, "git switch -f main", "ask"),
+            (root, "git checkout main", None),
+            (root, "git checkout -- README.md", None),
+            (root, "git checkout README.md", None),
+            (root, "git checkout .", None),
+            (root, "git checkout '*.md'", None),
+            (root, "git checkout HEAD -- README.md", None),
+            (root, "git checkout feat/x -- README.md", None),
+            (root, "git checkout origin/main README.md", None),
+            (root, "git checkout -p", None),
+            (root, "git checkout -p feat/x", None),
+            (root, "git status", "allow"),
+            (root, "git fetch origin", "allow"),
+            (root, "git log --oneline -3", "allow"),
+            (root, "git branch -vv", "allow"),
+            (root, "git switch", "allow"),
+            # A nested repository inside the main checkout isn't it.
+            (os.path.join(root, "vendor", "lib"), "git switch -c feat/x", None),
+            # A cd to a literal directory is followed.
+            (sib, f"cd {root} && git switch -c feat/x", "deny"),
+            (sib, f"cd {root}/sub && git switch -c feat/x", "deny"),
+            (root, "cd sub && git switch -c feat/x", "deny"),
+            (root, "cd sub && cd .. && git checkout -b feat/x", "deny"),
+            (root, "pushd sub && git switch -c feat/x", "deny"),
+            (root, f"cd {sib} && git switch -c feat/x", None),
+            (root, "cd sub && git switch main", None),
+            (root, "(cd sub) && git switch -c feat/x", "deny"),
+            (sib, "cd packages/foo && git switch --no-track -c feat/x origin/main", None),
+            (nested, "cd ../../.. && git switch -c feat/x", "deny"),
+            # Where a cd leads can't always be told: then it asks.
+            (root, "cd nowhere; git switch -c feat/x", "ask"),
+            (root, "cd - && git switch -c feat/x", "ask"),
+            (root, "cd \"$D\" && git switch -c feat/x", "ask"),
+            (root, "popd && git switch -c feat/x", "ask"),
+            (root, "pushd +1 && git switch -c feat/x", "ask"),
+            (root, f"cd {sib} && (git switch -c feat/x)", None),
+            (root, f"(cd {sib}); git switch -c feat/x", "deny"),
+            (root, f"(cd {sib} && git switch -c feat/x)", None),
+            (root, f"x=$(cd {sib}); git switch -c feat/x", "deny"),
+            (root, f"cd {sib} && echo $(git switch -c feat/x)", "ask"),
+            (root, f"cd {sib} | git switch -c feat/x", "ask"),
+            (root, f"cd {sib} & git switch -c feat/x", "ask"),
+            (root, "{ cd sub; } && git switch -c feat/x", "deny"),
+            (root, f"{{ cd {sib}; }} && git switch -c feat/x", None),
+            (root, f"(cd sub; cd {sib}) && git switch -c feat/x", "deny"),
+            (sib, f"env -C {root} git switch -c feat/x", "ask"),
+            # ... and through a wrapper that changed directory, in what it runs.
+            (sib, f"env -C {root} bash -c 'git switch -c feat/x'", "ask"),
+            (sib, f"env -C {root} sh -c 'git checkout -b feat/x'", "ask"),
+            (sib, f"sudo -D {root} bash -c 'git switch -c feat/x'", "ask"),
+            (sib, f"env -C {root} -S 'git switch -c feat/x'", "ask"),
+            (sib, f"env -C {root} find . -maxdepth 0 -exec git switch -c feat/x ;", "ask"),
+            (sib, f"env -C {root} npx -c 'git switch -c feat/x'", "ask"),
+            # A deny elsewhere in the call still wins over that ask.
+            (root, "cd \"$D\"; git switch -c feat/x; cargo publish", "deny"),
+            (sib, f"env -C {root} git switch -c feat/x && cargo publish", "deny"),
+            (root, "cd \"$D\" && git switch -c feat/x && scripts/check.sh | tail -5", "deny"),
+            (root, "cd \"$D\" && git switch -c feat/x; git push --force", "deny"),
+            # An absolute -C says where, cd or not, even one naming the cwd.
+            (root, f"cd sub && git -C {sib} switch -c feat/x", None),
+            (sib, f"cd sub && git -C {root} switch -c feat/x", "deny"),
+            (root, f"cd {top} && git -C {root} switch -c feat/x", "deny"),
+            (root, f"cd \"$D\" && git -C {root} switch -c feat/x", "deny"),
+            (root, f"cd {top} && git -C . switch -c feat/x", None),
+            # A path that is also a ref checks the ref out.
+            (root, "git checkout docs", "deny"),
+            (root, "git checkout notes", "deny"),
+            (root, "git checkout site", "deny"),
+            (root, "git checkout rel", "deny"),
+            (root, "git checkout wip", "deny"),
+            (root, "git checkout -- docs", None),
+            (root, "git checkout HEAD -- docs", None),
+            (root, "git checkout sub", None),
+            # HEAD and @ stay where they are.
+            (root, "git checkout HEAD", None),
+            (root, "git checkout @", None),
+            (root, "git checkout HEAD~1", "deny"),
+            (root, "git checkout @^", "deny"),
+            # Linked worktrees, in both places, are unchanged.
+            (sib, "git switch --no-track -c feat/x origin/main", "allow"),
+            (sib, "git switch -c feat/y", "allow"),
+            (sib, "git switch feat/x", "allow"),
+            (sib, "git switch --detach origin/main", "allow"),
+            (sib, "git checkout -b feat/x", None),
+            (sib, "git checkout v1.0", None),
+            (root, f"git -C {sib} switch -c feat/x", None),
+            (nested, "git switch --no-track -c feat/x origin/main", "allow"),
+            (nested, "git switch -d origin/main", "allow"),
+        ]:
+            guard.WORKING.update(cwd=cwd, root=root)
+            got = guard.decide("Bash", {"command": command}, policy)
+            checks += 1
+            got_kind = got[0] if got else None
+            if got_kind != expected:
+                failures += 1
+                print(f"FAIL {command!r} in {cwd}: expected {expected}, got {got}")
+        # The deny names the way out.
+        guard.WORKING.update(cwd=root, root=root)
+        got = guard.decide("Bash", {"command": "git switch -c feat/x"}, policy)
+        checks += 1
+        if not got or not got[1].startswith(guard.MAIN_CHECKOUT) or "EnterWorktree" not in got[1]:
+            failures += 1
+            print(f"FAIL the main-checkout deny's message: got {got}")
+        # A session that starts in a linked worktree (#65) still knows the
+        # main checkout from the worktree's `.git` file.
+        for cwd, command, expected in [
+            (sib, "git switch -c feat/y", "allow"),
+            (root, "git switch -c feat/x", "deny"),
+            # Not denied; asked as before, since the main checkout isn't
+            # this session's root.
+            (root, "git switch main", "ask"),
+        ]:
+            guard.WORKING.update(cwd=cwd, root=sib)
+            got = guard.decide("Bash", {"command": command}, policy)
+            checks += 1
+            got_kind = got[0] if got else None
+            if got_kind != expected:
+                failures += 1
+                print(f"FAIL {command!r} in {cwd}, session in {sib}: expected {expected}, got {got}")
+        # #44: in a linked worktree, creating a branch with no tracking gets
+        # the allow, under the module's own git switch rules (devenv.nix,
+        # copied here: the build sees only packages/). --track and -C are
+        # allowed as before; the forced forms ask.
+        module = {**POLICY,
+                  "allow": POLICY["allow"] + ["git switch *"],
+                  "ask": POLICY["ask"] + [
+                      "git switch -f *", "git switch --force *",
+                      "git switch --discard-changes *", "git switch * -f",
+                      "git switch * --discard-changes", "git switch -fc *"]}
+        for session in (root, sib):
+            for cwd in (sib, nested):
+                if session == sib and cwd == nested:
+                    continue
+                for command, expected in [
+                    ("git switch --no-track -c feat/x origin/main", "allow"),
+                    ("git switch --no-track -c fix/guard-y origin/main", "allow"),
+                    ("git switch -c feat/x", "allow"),
+                    ("git switch -c feat/x origin/main", "allow"),
+                    ("git switch --create feat/x origin/main", "allow"),
+                    ("git switch --no-track --create feat/x origin/main", "allow"),
+                    ("git switch -c feat/x --no-track origin/main", "allow"),
+                    ("devenv shell --quiet -- git switch --no-track -c feat/x origin/main", "allow"),
+                    ("git fetch origin main && git switch --no-track -c feat/x origin/main", "allow"),
+                    ("git switch feat/x", "allow"),
+                    ("git switch -", "allow"),
+                    ("git switch --track -c feat/x origin/main", "allow"),
+                    ("git switch -C feat/x origin/main", "allow"),
+                    ("git switch -f feat/x", "ask"),
+                    ("git switch -fc feat/x", "ask"),
+                    ("git switch --discard-changes feat/x", "ask"),
+                    ("git switch feat/x -f", "ask"),
+                ]:
+                    guard.WORKING.update(cwd=cwd, root=session)
+                    got = guard.decide("Bash", {"command": command}, module)
+                    checks += 1
+                    got_kind = got[0] if got else None
+                    if got_kind != expected:
+                        failures += 1
+                        print(f"FAIL #44 {command!r} in {cwd}, session in {session}: expected {expected}, got {got}")
+        # The default branch is what origin/HEAD names.
+        for command, expected in [
+            ("git switch trunk", "allow"),
+            ("git switch main", "deny"),
+        ]:
+            guard.WORKING.update(cwd=trunk, root=trunk)
+            got = guard.decide("Bash", {"command": command}, policy)
+            checks += 1
+            got_kind = got[0] if got else None
+            if got_kind != expected:
+                failures += 1
+                print(f"FAIL {command!r} with origin/HEAD at trunk: expected {expected}, got {got}")
+        # With no origin/HEAD: master if it exists, loose or packed, else main.
+        for repo, command, expected in [
+            (legacy, "git switch master", "allow"),
+            (legacy, "git switch main", "deny"),
+            (packed, "git switch master", "allow"),
+            (packed, "git switch main", "deny"),
+            (bare, "git switch main", "allow"),
+            (bare, "git switch master", "deny"),
+        ]:
+            guard.WORKING.update(cwd=repo, root=repo)
+            got = guard.decide("Bash", {"command": command}, policy)
+            checks += 1
+            got_kind = got[0] if got else None
+            if got_kind != expected:
+                failures += 1
+                print(f"FAIL {command!r} in {repo}: expected {expected}, got {got}")
     finally:
         guard.WORKING.update(cwd=None, root=None)
 

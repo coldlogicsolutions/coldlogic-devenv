@@ -11,6 +11,11 @@ lexes each command as bash would, unwraps it, then:
   `perl -i`, `tee`, a `>` redirect, a script that opens a file for
   writing), pointing to the Edit and Write tools, which the project's rules
   allow without a prompt;
+- denies a `git switch` or `git checkout` that would take the project's
+  main checkout off its default branch (creating a branch, detaching,
+  checking out anything else; file restores are fine), pointing to a
+  worktree, following a literal cd; asks, after every other deny, when
+  it can't tell which checkout one runs in (see main_checkout_switch);
 - asks when a command inside matches an ask rule, or when the call defines
   a shell function (a call to it can't be followed). Every rule is matched
   against each command of the call as written, wrapper included, and
@@ -687,6 +692,13 @@ class Unwrapped:
         self.gate_hidden = False
         # The text runs scripts/check.sh somewhere.
         self.gate = False
+        # A cd, pushd or popd runs: False when none does, its literal target
+        # (cd_target), or True when where it goes can't be read. And, for
+        # the commands among self.commands that don't run in the call's cwd
+        # (after a cd, or through `env -C`, `sudo -D`), their ids mapped to
+        # the directory they start in, None when that is unknown.
+        self.moves = False
+        self.moved = {}
 
     def add(self, other, direct=True):
         """Merge other in. direct=False: other's commands are run by a
@@ -702,6 +714,10 @@ class Unwrapped:
         self.gate |= other.gate
         self.written.extend(other.written)
         self.scanned.extend(other.scanned)
+        if other.moves:
+            # A cd inside something else: where it leads isn't followed.
+            self.moves = True
+        self.moved.update(other.moved)
         if direct:
             self.direct |= other.direct
 
@@ -738,8 +754,12 @@ def analyse(text):
     result.functions |= functions
     if functions:
         result.opaque = True
+    # The commands of subshells and substitutions, which this doesn't place
+    # in order among the rest.
+    inner_ids = []
     for script in inner:
         sub = analyse(script)
+        inner_ids.extend(id(w) for w in sub.commands)
         if isinstance(script, Substitution) and sub.gate:
             # A substitution's status is never the call's: `x=$(gate); ...`,
             # `echo "$(gate)"`.
@@ -757,7 +777,16 @@ def analyse(text):
     # or `&` leads to, the operator after a subshell's `)` included, or
     # running it in a substitution (gate_hidden). Only `&& ...` may follow it.
     pipefail, followed = False, True
+    # Whether a cd ran earlier in the text, and the directory the commands
+    # after it run in, None when that can't be read (see cd_target and
+    # main_checkout_switch).
+    moved, here = False, WORKING["cwd"]
+    # A subshell's cd ends with it: where each `(` depth was entered.
+    depth, entered = 0, {}
     for k, cmd in enumerate(commands):
+        for d in range(depth + 1, cmd.depth + 1):
+            entered[d] = (moved, here)
+        depth = max(depth, cmd.depth)
         if cmd.expands or cmd.unread or not all(safe_redirect(op, t) for op, t in cmd.redirect_ops):
             result.opaque = True
         result.writes.extend(cmd.writes)
@@ -773,6 +802,18 @@ def analyse(text):
                     result.written.append((words, unwrapped.commands, unwrapped.opaque or cmd.expands
                                            or cmd.unread
                                            or not all(safe_redirect(op, t) for op, t in cmd.redirect_ops)))
+                if moved:
+                    for w in unwrapped.commands:
+                        # One already placed (`env -C`, a cd inside `bash
+                        # -c`) was placed from the call's cwd: unknown here.
+                        result.moved[id(w)] = None if id(w) in unwrapped.moved else here
+                if unwrapped.moves:
+                    # A pipeline's stages and a backgrounded command run in
+                    # subshells: whether the cd stays isn't followed.
+                    piped = leads_on(cmd)[0] in ("|", "|&", "&") or (
+                        k > 0 and leads_on(commands[k - 1])[0] in ("|", "|&"))
+                    here = None if piped else moved_to(here, unwrapped.moves)
+                    moved = True
                 result.add(unwrapped)
                 if any(is_gate(w) for w in unwrapped.commands + [words]):
                     result.gate = True
@@ -781,7 +822,51 @@ def analyse(text):
                     if hides_status(commands, k):
                         result.gate_hidden = True
         pipefail, followed = pipefail_after(cmd, pipefail, followed)
+        # Leaving a subshell (`(cd x)`, `(cd x; a)`) restores where its
+        # `(` was entered.
+        out = max(leads_on(cmd)[1] or 0, 0)
+        if out < depth:
+            moved, here = entered.get(out + 1, (moved, here))
+            depth = out
+    if moved:
+        for i in inner_ids:
+            result.moved[i] = None
     return result
+
+
+def cd_target(words):
+    """Where a cd, pushd or popd goes, as written: its one operand (`~` for a
+    bare cd), or True when that can't be read from the words (popd, `cd -`,
+    `pushd +1`, a bare pushd, more than one operand)."""
+    head = os.path.basename(words[0])
+    if head == "popd":
+        return True
+    args = words[1:]
+    while args and args[0] in ("-L", "-P", "-e", "-@", "-n"):
+        args = args[1:]
+    if args and args[0] == "--":
+        args = args[1:]
+    if not args:
+        return "~" if head == "cd" else True
+    if len(args) != 1 or args[0] == "-" or (head == "pushd" and re.fullmatch(r"[+-]\d+", args[0])):
+        return True
+    return args[0]
+
+
+def moved_to(here, target):
+    """The directory a cd to target (cd_target) from here leads to, or None
+    when it can't be told: an expansion or glob in it, a relative target
+    from an unknown directory or one CDPATH may resolve, or a directory that
+    doesn't exist (the cd fails, and after `;` the next command runs where
+    it was)."""
+    if target is True or "$" in target or PLACEHOLDER in target or re.search(r"[*?\[]", target):
+        return None
+    target = os.path.expanduser(target)
+    if not os.path.isabs(target):
+        if here is None or (os.environ.get("CDPATH") and not target.startswith(".")):
+            return None
+        target = os.path.join(here, target)
+    return target if os.path.isdir(target) else None
 
 
 def hides_status(commands, k):
@@ -958,6 +1043,8 @@ def unwrap(words):
     # Whether the command left is run by its own name, as a function of that
     # name would be: only reserved words and assignments came before it.
     direct, seen_wrapper = True, False
+    # A wrapper changed directory first (`env -C`, `sudo -D`).
+    chdir = False
     while words:
         head = os.path.basename(words[0])
         if head in RESERVED:
@@ -981,6 +1068,8 @@ def unwrap(words):
             i = 1
             while i < len(words):
                 w = words[i]
+                if w in ("-C", "--chdir") or w.startswith(("--chdir=", "-C")):
+                    chdir = True
                 if w in ("-u", "--unset", "-C", "--chdir", "-P"):
                     i += 2
                 elif w in ("-S", "--split-string") or w.startswith("--split-string=") or (
@@ -989,7 +1078,8 @@ def unwrap(words):
                               else w[2:] if w.startswith("-S") and len(w) > 2 else "")
                     rest = words[i + 1:]
                     result.wrapped = result.opaque = True
-                    result.add(analyse(" ".join(([script] if script else []) + rest)), direct=False)
+                    result.add(moved_by(chdir, analyse(" ".join(([script] if script else []) + rest))),
+                               direct=False)
                     return result
                 elif w.startswith("-") or re.match(r"^[A-Za-z_][A-Za-z0-9_]*=", w):
                     i += 1
@@ -1004,6 +1094,8 @@ def unwrap(words):
         elif head == "sudo":
             i = 1
             while i < len(words) and words[i].startswith("-"):
+                if words[i].startswith(("-D", "--chdir")):
+                    chdir = True
                 i += 2 if words[i] in ("-u", "-g", "-C", "-D", "-h", "-p", "-r", "-t", "-U") else 1
             words, result.wrapped, result.opaque = words[i:], True, True
         elif head == "busybox":
@@ -1014,7 +1106,7 @@ def unwrap(words):
                 if w in ("-exec", "-execdir", "-ok", "-okdir"):
                     end = next((e for e in range(k + 1, len(words)) if words[e] in (";", "+", "\\;")), len(words))
                     if end > k + 1:
-                        result.add(unwrap(words[k + 1:end]), direct=False)
+                        result.add(moved_by(chdir, unwrap(words[k + 1:end])), direct=False)
             break
         elif head == "exec":
             i = 1
@@ -1042,7 +1134,7 @@ def unwrap(words):
                 break
             result.wrapped = True
             # eval runs in this shell, where its functions are defined.
-            result.add(analyse(script), direct=head == "eval")
+            result.add(moved_by(chdir, analyse(script)), direct=head == "eval")
             return result
         elif head == "devenv":
             inner = devenv_command(words)
@@ -1072,12 +1164,14 @@ def unwrap(words):
                     scripts.append(inline if eq else (words[k + 1] if k + 1 < len(words) else ""))
             for value in scripts:
                 result.opaque = True
-                result.add(analyse(value), direct=False)
+                result.add(moved_by(chdir, analyse(value)), direct=False)
             words, result.wrapped = words[i:], True
         elif head == "cd" or head == "pushd" or head == "popd":
             # Later commands run somewhere else, so their rules and paths
             # no longer mean what they say.
             result.opaque = True
+            # Through a wrapper that changed directory, it starts elsewhere.
+            result.moves = True if result.moves or chdir else cd_target(words)
             return result
         else:
             break
@@ -1086,7 +1180,19 @@ def unwrap(words):
         result.commands.append(normalize_git(words))
         if direct:
             result.direct.add(id(result.commands[-1]))
+        if chdir:
+            result.moved[id(result.commands[-1])] = None
     return result
+
+
+def moved_by(chdir, sub):
+    """sub, with each of its commands marked as starting in an unknown
+    directory when a wrapper (`env -C`, `sudo -D`) changed directory
+    before running it."""
+    if chdir:
+        for w in sub.commands:
+            sub.moved[id(w)] = None
+    return sub
 
 
 def shell_script(words):
@@ -1129,12 +1235,20 @@ def devenv_command(words):
     return None
 
 
+class GitWords(list):
+    """git's words with its global options removed, remembering a `-C`
+    dropped for naming the cwd (dropped_dir): after a cd it names a
+    directory of its own (see git_place)."""
+    dropped_dir = None
+
+
 def normalize_git(words):
     """git with its global options removed."""
     if os.path.basename(words[0]) != "git":
         return words
     i = 1
     seen_dir = False
+    dropped = None
     while i < len(words) and words[i].startswith("-"):
         w = words[i]
         name, _, inline = w.partition("=")
@@ -1152,7 +1266,7 @@ def normalize_git(words):
                 # directory the guard does. A second `-C` is relative to the
                 # first: none is dropped then.
                 return words
-            seen_dir = True
+            seen_dir, dropped = True, value
             i += 1 if inline else 2
         elif w in GIT_FLAGS:
             i += 1
@@ -1160,7 +1274,9 @@ def normalize_git(words):
             # An unknown global option: keep it, so nothing below mistakes
             # it for a subcommand.
             return words
-    return ["git"] + words[i:]
+    out = GitWords(["git"] + words[i:])
+    out.dropped_dir = dropped
+    return out
 
 
 def same_checkout(value):
@@ -1490,22 +1606,267 @@ def own_worktree(here, base):
     if os.path.dirname(here) not in (os.path.realpath(os.path.join(base, ".claude", "worktrees")),
                                      os.path.realpath(os.path.realpath(base) + ".worktrees")):
         return False
+    dirs = linked_git_dirs(here)
+    if dirs is None:
+        return False
+    gitdir, common = dirs
+    if os.path.dirname(gitdir) != os.path.realpath(os.path.join(base, ".git", "worktrees")):
+        return False
     try:
-        with open(os.path.join(here, ".git")) as f:
-            m = re.match(r"gitdir: (.+)", f.read().strip())
-        if not m:
-            return False
-        gitdir = os.path.realpath(os.path.join(here, m.group(1)))
-        if os.path.dirname(gitdir) != os.path.realpath(os.path.join(base, ".git", "worktrees")):
-            return False
         with open(os.path.join(gitdir, "gitdir")) as f:
             if os.path.realpath(os.path.dirname(os.path.join(gitdir, f.read().strip()))) != here:
                 return False
-        with open(os.path.join(gitdir, "commondir")) as f:
-            common = os.path.realpath(os.path.join(gitdir, f.read().strip()))
-        return common == os.path.realpath(os.path.join(base, ".git"))
     except OSError:
         return False
+    return common == os.path.realpath(os.path.join(base, ".git"))
+
+
+def linked_git_dirs(top):
+    """(gitdir, common dir), by their real paths, that the `.git` file at
+    the top of a linked worktree names: its `gitdir:` line, read against the
+    worktree, and that gitdir's `commondir`, read against the gitdir. None
+    when top's `.git` is no such file."""
+    try:
+        with open(os.path.join(top, ".git")) as f:
+            m = re.match(r"gitdir: (.+)", f.read().strip())
+        if not m:
+            return None
+        gitdir = os.path.realpath(os.path.join(top, m.group(1)))
+        with open(os.path.join(gitdir, "commondir")) as f:
+            return gitdir, os.path.realpath(os.path.join(gitdir, f.read().strip()))
+    except OSError:
+        return None
+
+
+# What a branch switch in the project's main checkout is told (#88).
+MAIN_CHECKOUT = "Branch work goes in a worktree: EnterWorktree, or isolation: \"worktree\" on a subagent (git.md)."
+
+
+def repo_top(path):
+    """The first directory at or above path, by its real path, that has a
+    `.git` entry: the top of the working tree git would use there. None
+    when there is none."""
+    real = os.path.realpath(path)
+    while True:
+        if os.path.lexists(os.path.join(real, ".git")):
+            return real
+        parent = os.path.dirname(real)
+        if parent == real:
+            return None
+        real = parent
+
+
+def main_checkout():
+    """The project's main checkout: the working tree whose `.git` is the
+    repository's own directory, not a linked worktree's `.git` file. Found
+    from the project root, which is itself a linked worktree when a session
+    starts in one (#65): its `.git` file names a gitdir whose commondir is
+    `<main>/.git`. Paths in those files may be relative, read as git reads
+    them (see own_worktree). None when there is no repository, or its
+    common directory isn't a checkout's `.git` (a bare repository)."""
+    top = repo_top(WORKING["root"] or WORKING["cwd"])
+    if top is None:
+        return None
+    if os.path.isdir(os.path.join(top, ".git")):
+        return top
+    dirs = linked_git_dirs(top)
+    if dirs is None:
+        return None
+    common = dirs[1]
+    if os.path.basename(common) != ".git" or not os.path.isdir(common):
+        return None
+    return os.path.dirname(common)
+
+
+def packed_refs(gitdir):
+    """The ref names in a repository's packed-refs file."""
+    try:
+        with open(os.path.join(gitdir, "packed-refs")) as f:
+            return {parts[1] for parts in (line.split() for line in f)
+                    if len(parts) == 2 and not parts[0].startswith(("#", "^"))}
+    except OSError:
+        return set()
+
+
+def has_ref(gitdir, ref, packed):
+    """Whether ref (`refs/heads/main`) exists, loose or packed."""
+    return os.path.isfile(os.path.join(gitdir, ref)) or ref in packed
+
+
+def default_branch(main):
+    """The repository's default branch: the one `origin/HEAD` names, else
+    whichever of main and master exists, else main."""
+    gitdir = os.path.join(main, ".git")
+    try:
+        with open(os.path.join(gitdir, "refs", "remotes", "origin", "HEAD")) as f:
+            m = re.fullmatch(r"ref: refs/remotes/origin/(\S+)", f.read().strip())
+        if m:
+            return m.group(1)
+    except OSError:
+        pass
+    packed = packed_refs(gitdir)
+    for name in ("main", "master"):
+        if has_ref(gitdir, f"refs/heads/{name}", packed):
+            return name
+    return "main"
+
+
+def names_ref(gitdir, name):
+    """Whether git would read name as a ref in this repository: a branch, a
+    tag, a remote's branch (`origin/x`, or `x` that checkout would make a
+    branch from), or a pseudo-ref such as ORIG_HEAD, loose or packed."""
+    if not name or ".." in name or re.search(r"[\s~^:?*\[\\]", name):
+        return False
+    packed = packed_refs(gitdir)
+    candidates = [f"refs/{name}", f"refs/tags/{name}", f"refs/heads/{name}",
+                  f"refs/remotes/{name}", f"refs/remotes/{name}/HEAD"]
+    if re.fullmatch(r"[A-Z_]+", name):
+        candidates.append(name)
+    if any(has_ref(gitdir, ref, packed) for ref in candidates):
+        return True
+    try:
+        remotes = os.listdir(os.path.join(gitdir, "refs", "remotes"))
+    except OSError:
+        remotes = []
+    if any(os.path.isfile(os.path.join(gitdir, "refs", "remotes", r, name)) for r in remotes):
+        return True
+    return any(ref.startswith("refs/remotes/") and ref.split("/", 3)[3:] == [name] for ref in packed)
+
+
+def git_place(words, start):
+    """(the directory a git command runs in, its subcommand, the words after
+    it), or None for another program or no subcommand. The directory is
+    start (the call's cwd, or where a cd led) with each `-C` applied in
+    turn, as git applies them, the one normalize_git dropped first; None
+    when that can't be known: a `-C` holding an expansion, a relative one
+    from an unknown start, or a global option this doesn't know."""
+    if os.path.basename(words[0]) != "git":
+        return None
+    here = start
+    dirs = [d for d in [getattr(words, "dropped_dir", None)] if d is not None]
+    i = 1
+    while i < len(words) and words[i].startswith("-"):
+        w = words[i]
+        if w in GIT_VALUE_FLAGS:
+            dirs.append(words[i + 1] if i + 1 < len(words) else "")
+            i += 2
+        elif w in GIT_FLAGS:
+            i += 1
+        else:
+            # normalize_git keeps an option it doesn't know, whose value
+            # may be the next word.
+            here = None
+            i += 1
+    for value in dirs:
+        value = os.path.expanduser(value)
+        if "$" in value or PLACEHOLDER in value or not value:
+            here = None
+        elif os.path.isabs(value):
+            here = value
+        elif here is not None:
+            here = os.path.join(here, value)
+    if i >= len(words):
+        return None
+    return here, words[i], words[i + 1:]
+
+
+def leaves_branch(sub, args, default, here, gitdir):
+    """How a `git switch` or `git checkout` with these arguments would take
+    the checkout off its default branch, or None when it doesn't: it names
+    no branch, names the default branch, HEAD or `@`, or only restores files
+    (checkout with `--` and paths after it, a tree-ish and paths, `-p`, a
+    pathspec file, or a single operand that is a glob or names a path in
+    here and no ref in gitdir, since git prefers the ref). git takes any
+    unique prefix of a long option, so every prefix counts, and short
+    options may come in a cluster, where a value takes the rest of the
+    word. here is None when where it runs is unknown: then only a glob
+    counts as a path."""
+    creates = "cC" if sub == "switch" else "bB"
+    long_creates = ("--create", "--force-create", "--orphan") if sub == "switch" else ("--orphan",)
+    long_valued = long_creates + ("--conflict",) + (("--pathspec-from-file",) if sub == "checkout" else ())
+    operands, paths, restores = [], None, False
+    k = 0
+    while k < len(args):
+        w = args[k]
+        k += 1
+        if paths is not None:
+            paths.append(w)
+        elif w == "--":
+            # switch takes no paths: what follows is still its branch.
+            if sub == "checkout":
+                paths = []
+        elif w.startswith("--"):
+            if any(git_option(w, o) for o in long_creates):
+                return "creates a branch"
+            if git_option(w, "--detach"):
+                return "detaches HEAD"
+            if sub == "checkout" and (git_option(w, "--patch") or git_option(w, "--pathspec-from-file")):
+                restores = True
+            if "=" not in w and any(git_option(w, o) for o in long_valued):
+                k += 1
+        elif w.startswith("-") and w != "-":
+            for c in w[1:]:
+                if c in creates:
+                    return "creates a branch"
+                if c == "d":
+                    return "detaches HEAD"
+                if c == "p" and sub == "checkout":
+                    restores = True
+                if not c.isalnum():
+                    break
+        else:
+            operands.append(w)
+    if restores or paths:
+        return None
+    if not operands or operands[0] in (default, "HEAD", "@"):
+        return None
+    if sub == "checkout" and paths is None:
+        if len(operands) > 1:
+            # A tree-ish and the paths to take from it.
+            return None
+        target = operands[0]
+        if re.search(r"[*?\[]", target) or (here is not None and os.path.lexists(os.path.join(here, target))
+                                            and not names_ref(gitdir, target)):
+            return None
+    return f"checks out {operands[0]}"
+
+
+def main_checkout_switch(result):
+    """("deny", reason) when a `git switch` or `git checkout` in the call
+    would take the project's main checkout off its default branch (#88):
+    the directory it runs in, after any `-C`, is in the main checkout, not
+    in a linked worktree or a nested repository. ("ask", reason) when such
+    command runs where the guard can't tell (after a cd it can't follow, or
+    through `env -C`), when no command of the call is denied. None
+    otherwise, and when the cwd is unknown."""
+    if not WORKING["cwd"]:
+        return None
+    main, unsure = None, None
+    for words in result.commands:
+        if not words or (id(words) in result.direct and words[0] in result.functions):
+            continue
+        start = result.moved.get(id(words), WORKING["cwd"])
+        place = git_place(words, start)
+        if place is None or place[1] not in ("switch", "checkout"):
+            continue
+        here, sub, args = place
+        if main is None:
+            main = main_checkout()
+            if main is None:
+                return None
+            default = default_branch(main)
+        change = leaves_branch(sub, args, default, here, os.path.join(main, ".git"))
+        if change is None:
+            continue
+        if here is None:
+            unsure = unsure or ("ask", (f"coldlogic guard: can't tell which checkout this git {sub} runs in. "
+                                        f"Run it as its own call, from the directory it's for. {MAIN_CHECKOUT}"))
+        elif repo_top(here) == main:
+            hint = (" To restore a file, use `git checkout -- <path>` or `git restore`."
+                    if change.startswith("checks out") and sub == "checkout" else "")
+            return "deny", (f"{MAIN_CHECKOUT} The main checkout stays on {default}, and "
+                            f"`git {sub}` here {change}.{hint}")
+    return unsure
 
 
 def plain_args(words):
@@ -1631,7 +1992,9 @@ def git_waits_or_drops(words):
     `--fixup=reword:` or `amend:`; an annotated or signed tag without -m or
     -F), or a fetch can drop local work or refs
     (a forced or `+` refspec, a `:` refspec updating a local branch,
-    `--update-head-ok`, `--prune`, `--prune-tags`, `--refmap`)."""
+    `--update-head-ok`, `--prune`, `--prune-tags`, `--refmap`), or `git
+    worktree add -B` resets a branch, or `git worktree remove` is forced in
+    any spelling git accepts."""
     args = normalize_git_loosely(words)[1:]
     if not args:
         return False
@@ -1683,6 +2046,15 @@ def git_waits_or_drops(words):
         # The first operand is the remote; a refspec after it with a `:`
         # updates a local ref, and a `+` forces it.
         return any(o.startswith("+") for o in operands) or any(":" in o for o in operands[1:])
+    if sub == "worktree" and rest[:1] == ["add"]:
+        # -B resets a branch that may already hold work, as `git branch -f`
+        # does, alone or in a cluster (`-qB`).
+        return any(git_short(w, "B", "b") for w in rest[1:])
+    if sub == "worktree" and rest[:1] == ["remove"]:
+        # A forced remove throws away the worktree's changes. The ask rules
+        # name only the full spellings, and git takes `-f` in a cluster and
+        # any prefix of `--force` (`--fo`).
+        return any(git_short(w, "f", "") or git_option(w, "--force") for w in rest[1:])
     return False
 
 
@@ -2331,6 +2703,11 @@ def decide(tool, tool_input, policy):
                 named = secret_named(words)
                 if named:
                     return "deny", f"{named.lstrip('>')} is a secrets file."
+        # The main checkout stays on its default branch, in any part of the
+        # call. Its ask waits for every deny below.
+        stray = main_checkout_switch(result)
+        if stray and stray[0] == "deny":
+            return stray
     except Unparsable as e:
         # A command this can't follow gets no automatic allow, and a user
         # decides it, unless a rough reading finds something to deny.
@@ -2376,6 +2753,9 @@ def decide(tool, tool_input, policy):
                         "or `&`), backgrounding it with `&`, or running it inside `$(...)`, hides its "
                         "exit status. Run the gate "
                         "on its own, or follow it only with `&& ...`.")
+    if stray:
+        # A switch the guard can't place, now that nothing is denied.
+        return stray
     if result.functions:
         return "ask", "coldlogic guard: this call defines a shell function, which the guard can't follow."
     if any(r.match(checked) for r in ask):
