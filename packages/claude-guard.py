@@ -16,6 +16,11 @@ lexes each command as bash would, unwraps it, then:
   checking out anything else; file restores are fine), pointing to a
   worktree, following a literal cd; asks, after every other deny, when
   it can't tell which checkout one runs in (see main_checkout_switch);
+- denies a `git switch` or `git checkout` in the project's repository that
+  would set up tracking (`--track`, `-t`, or a new branch from a
+  remote-tracking start point without `--no-track`), which writes the
+  shared `.git/config` the sandbox protects, pointing to `--no-track` (see
+  tracking_create);
 - asks when a command inside matches an ask rule, or when the call defines
   a shell function (a call to it can't be followed). Every rule is matched
   against each command of the call as written, wrapper included, and
@@ -1733,6 +1738,24 @@ def names_ref(gitdir, name):
     return any(ref.startswith("refs/remotes/") and ref.split("/", 3)[3:] == [name] for ref in packed)
 
 
+def remote_branch(gitdir, name):
+    """Whether name is a remote-tracking branch in this repository, loose or
+    packed, in the spellings git takes (`origin/main`, `remotes/origin/main`,
+    `refs/remotes/origin/main`, or a remote alone, which is its HEAD). A
+    local branch of the same name isn't looked for, so such a name is
+    over-reported."""
+    if (not name or name.endswith("/") or ".." in name or "@{" in name
+            or re.search(r"[\s~^:?*\[\\]", name)):
+        return False
+    packed = packed_refs(gitdir)
+    prefix = "refs/remotes/"
+    for ref in (prefix + name, "refs/" + name, name):
+        if ref.startswith(prefix) and len(ref) > len(prefix) and (
+                has_ref(gitdir, ref, packed) or has_ref(gitdir, ref + "/HEAD", packed)):
+            return True
+    return False
+
+
 def git_place(words, start):
     """(the directory a git command runs in, its subcommand, the words after
     it), or None for another program or no subcommand. The directory is
@@ -1831,6 +1854,72 @@ def leaves_branch(sub, args, default, here, gitdir):
     return f"checks out {operands[0]}"
 
 
+def sets_upstream(sub, args, gitdir):
+    """(the new branch or None, the start point or None) when a `git switch`
+    or `git checkout` with these arguments would write tracking
+    configuration, else None. It would when the last tracking option is
+    `--track` (any prefix git takes) or `-t`; or, with no tracking option,
+    when it creates a branch (`-c`, `-C`, `--create`, `--force-create`; `-b`,
+    `-B` for checkout) from a start point that is a remote-tracking branch
+    in gitdir. `--no-track` last, `--detach` and `--orphan` write none."""
+    creates = "cC" if sub == "switch" else "bB"
+    valued = ("--orphan", "--conflict") + (("--pathspec-from-file",) if sub == "checkout" else ())
+    track, none_made, new, operands = None, False, None, []
+    k = 0
+    while k < len(args):
+        w = args[k]
+        k += 1
+        if w == "--":
+            # checkout's paths follow; switch takes none, so its branch does.
+            if sub == "checkout":
+                break
+            continue
+        if w.startswith("--"):
+            name, eq, value = w.partition("=")
+            if long_option(name, "--no-track", 6):
+                track = False
+            elif git_option(name, "--track"):
+                track = True
+            if git_option(name, "--detach") or git_option(name, "--orphan"):
+                none_made = True
+            if sub == "switch" and (git_option(name, "--create") or git_option(name, "--force-create")):
+                if eq:
+                    new = value
+                elif k < len(args):
+                    new = args[k]
+                    k += 1
+                continue
+            if not eq and any(git_option(name, o) for o in valued):
+                k += 1
+        elif w.startswith("-") and w != "-":
+            for i, c in enumerate(w[1:], 1):
+                if c in creates:
+                    # The new branch's name is the rest of the word, or the
+                    # next word.
+                    if w[i + 1:]:
+                        new = w[i + 1:]
+                    elif k < len(args):
+                        new = args[k]
+                        k += 1
+                    break
+                if c == "t":
+                    track = True
+                elif c == "d":
+                    none_made = True
+                elif not c.isalnum():
+                    break
+        else:
+            operands.append(w)
+    if none_made or track is False:
+        return None
+    start = operands[0] if operands else None
+    if track:
+        return new, start
+    if new is not None and start is not None and remote_branch(gitdir, start):
+        return new, start
+    return None
+
+
 def main_checkout_switch(result):
     """("deny", reason) when a `git switch` or `git checkout` in the call
     would take the project's main checkout off its default branch (#88):
@@ -1867,6 +1956,50 @@ def main_checkout_switch(result):
             return "deny", (f"{MAIN_CHECKOUT} The main checkout stays on {default}, and "
                             f"`git {sub}` here {change}.{hint}")
     return unsure
+
+
+def tracking_create(result):
+    """("deny", reason) when a `git switch` or `git checkout` in the call
+    would set up tracking (sets_upstream) in the project's repository: in
+    the main checkout, or in a linked worktree whose common directory is
+    the main checkout's `.git`. Tracking is written to the shared
+    `.git/config`, which the sandbox protects, so the command would fail
+    after creating the branch and before checking it out (#45). Nested and
+    foreign repositories, and commands whose directory is unknown, are left
+    alone. A deny-side check: it may over-report (a shadowing local branch,
+    `branch.autoSetupMerge=false`), and only ever returns a deny or None."""
+    if not WORKING["cwd"]:
+        return None
+    main = None
+    for words in result.commands:
+        if not words or (id(words) in result.direct and words[0] in result.functions):
+            continue
+        place = git_place(words, result.moved.get(id(words), WORKING["cwd"]))
+        if place is None or place[1] not in ("switch", "checkout"):
+            continue
+        here, sub, args = place
+        if here is None:
+            continue
+        if main is None:
+            main = main_checkout()
+            if main is None:
+                return None
+        top = repo_top(here)
+        if top is None:
+            continue
+        if top != main:
+            dirs = linked_git_dirs(top)
+            if dirs is None or dirs[1] != os.path.realpath(os.path.join(main, ".git")):
+                continue
+        made = sets_upstream(sub, args, os.path.join(main, ".git"))
+        if made is not None:
+            new, start = made
+            of = f" of {start}" if start else ""
+            fix = f": `git switch --no-track -c {new} {start}`" if new and start else ""
+            return "deny", (f"coldlogic guard: this `git {sub}` would set up tracking{of}, which writes "
+                            f".git/config. The sandbox protects that file, so the command would fail "
+                            f"partway. Add --no-track{fix}.")
+    return None
 
 
 def plain_args(words):
@@ -2708,6 +2841,11 @@ def decide(tool, tool_input, policy):
         stray = main_checkout_switch(result)
         if stray and stray[0] == "deny":
             return stray
+        # Tracking config goes to the shared .git/config, which the sandbox
+        # protects (#45).
+        tracked = tracking_create(result)
+        if tracked:
+            return tracked
     except Unparsable as e:
         # A command this can't follow gets no automatic allow, and a user
         # decides it, unless a rough reading finds something to deny.
