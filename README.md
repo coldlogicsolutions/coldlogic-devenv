@@ -73,7 +73,9 @@ Copy `templates/update-coldlogic-devenv.yaml` to `.github/workflows/` and regist
 
 ## Starting Claude Code
 
-Start `claude` from the devenv shell (`devenv shell` or direnv), in the checkout. The shell's `claude` is a wrapper that refreshes the generated files first, so after a module update there is no need to enter a shell from a terminal and restart every session: restart `claude`.
+Start `claude` from the devenv shell (`devenv shell` or direnv), in the checkout. The shell's `claude` is a wrapper that refreshes the generated files first, so after a module update that changes only the generated files there is no need to enter a shell from a terminal and restart every session: restart `claude`.
+
+- It refreshes the generated files only (`devenv:files`). The plugin install and the OpenSpec skills and commands still come from entering `devenv shell` from a terminal, so do that after an update that enables a plugin or changes the OpenSpec version.
 
 - Every `claude` command outside a session that can start one waits for that refresh. Those that start none, by first argument (`--version`, `-v`, `--help`, `-h`, `update`, `upgrade`, `doctor`, `mcp`, `config`, `auth`, `setup-token`, `install`, `migrate-installer`, `plugin`, `plugins`), start at once; when in doubt, a command refreshes. It prints nothing unless the refresh fails, devenv's own output included; when it fails, devenv's output comes first, on stderr.
 - It only works where the shell's `PATH` is used. The IDE extension's own launch and the desktop app don't go through it: for those, enter the shell from a terminal once, as before.
