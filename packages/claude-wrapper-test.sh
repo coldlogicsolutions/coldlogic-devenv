@@ -89,6 +89,10 @@ exit "${STUB_CLAUDE_EXIT:-0}"'
 copy_stdin "$STUB_LOG/devenv-stdin"
 echo devenv-stdout
 echo devenv-stderr >&2
+# A signal to the wrapper, devenv'"'"'s parent, as Ctrl-C sends both.
+if [ -n "${STUB_DEVENV_KILL:-}" ]; then
+  kill -"$STUB_DEVENV_KILL" "$PPID"
+fi
 exit "${STUB_DEVENV_EXIT:-0}"'
   write_exe "$case_dir/stubs/git" '
 if [ "$1 $2" = "rev-parse --show-toplevel" ] && [ -n "${STUB_GIT_TOP:-}" ]; then
@@ -440,29 +444,41 @@ check "(q2) ... devenv's stderr went through" has stderr devenv-stderr
 check "(q2) ... and its stdout, to stderr" has stderr devenv-stdout
 check "(q2) ... stdout is only claude's" [ "$out" = claude-stdout ]
 
-# (q3) a refresh stopped by a signal (130: Ctrl-C) starts nothing, though
-# the settings are there, and passes the code on with one line.
+# (q3) Ctrl-C during the refresh, which devenv catches and exits 1 on:
+# nothing starts, though the settings are there; one line, exit 130.
 fresh
 mkdir -p "$case_dir/proj/.claude"
 echo '{}' >"$case_dir/proj/.claude/settings.json"
-extra=(STUB_DEVENV_EXIT=130)
+extra=(STUB_DEVENV_KILL=INT STUB_DEVENV_EXIT=1)
 run
-check "(q3) interrupted refresh: exit 130" exits 130
+check "(q3) SIGINT, devenv exits 1: exit 130" exits 130
 check "(q3) ... claude not started" absent claude
 check "(q3) ... one line on stderr" lines_are stderr 1
 check "(q3) ... saying it was interrupted" contains stderr "was interrupted"
-check "(q3) ... with the code" contains stderr "exited 130"
+check "(q3) ... with devenv's code" contains stderr "exited 1"
 check "(q3) ... and nothing on stdout" [ -z "$out" ]
 check "(q3) ... and its file removed" tmp_clean
 
-# (q4) 128, the lowest such code, the same; 127 (p) is a failure.
+# (q3b) SIGTERM the same.
 fresh
 mkdir -p "$case_dir/proj/.claude"
 echo '{}' >"$case_dir/proj/.claude/settings.json"
-extra=(STUB_DEVENV_EXIT=128)
+extra=(STUB_DEVENV_KILL=TERM STUB_DEVENV_EXIT=1)
 run
-check "(q4) exit 128 stops too" exits 128
-check "(q4) ... claude not started" absent claude
+check "(q3b) SIGTERM: exit 130" exits 130
+check "(q3b) ... claude not started" absent claude
+
+# (q4) a high exit code with no signal is an ordinary failure: with the
+# settings there, claude starts with the warning.
+for c in 255 130; do
+  fresh
+  mkdir -p "$case_dir/proj/.claude"
+  echo '{}' >"$case_dir/proj/.claude/settings.json"
+  extra=("STUB_DEVENV_EXIT=$c")
+  run
+  check "(q4) exit $c, no signal: claude ran" runs claude 1
+  check "(q4) ... with the warning" contains stderr "exited $c). Starting claude"
+done
 
 # (y) commands that start no session: no refresh and no settings check,
 # though the refresh would fail and the settings are missing.

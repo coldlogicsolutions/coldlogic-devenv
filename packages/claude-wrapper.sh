@@ -22,8 +22,8 @@
 #   COLDLOGIC_WRAPPERS_RUN, with its own path added
 #
 # Exit codes: Claude Code's own; 1 when it refuses to start a session with
-# no settings; 127 when there is no Claude Code behind it on PATH; the
-# refresh's own, 128 or more, when a signal stopped it.
+# no settings; 127 when there is no Claude Code behind it on PATH; 130
+# when SIGINT or SIGTERM interrupted the refresh.
 #
 # It uses only bash builtins, `git` (`$git_bin`, a store path in the built
 # application), `mktemp` and `rm` (`$mktemp_bin` and `$rm_bin`, likewise)
@@ -148,19 +148,27 @@ if errlog="$("$mktemp_bin" "${TMPDIR:-/tmp}/coldlogic-claude.XXXXXX" 2>/dev/null
 else
   errlog=""
 fi
+# An interruption is told by the signal reaching the wrapper, not by
+# devenv's exit code: devenv may catch SIGINT and exit 1, and an ordinary
+# failure may exit 255. Ctrl-C reaches the whole foreground process group,
+# the wrapper with devenv. The subshell resets these traps, so devenv gets
+# the signals as it would from a terminal.
 code=0
+interrupted=""
+trap 'interrupted=1' INT TERM
 if [ -n "$errlog" ]; then
   (refresh) </dev/null >"$errlog" 2>&1 || code=$?
 else
   (refresh) </dev/null >&2 || code=$?
 fi
+trap - INT TERM
 
-# 128 and up: devenv was stopped by a signal (Ctrl-C, SIGTERM, an OOM
-# kill). The developer meant to stop, or the machine did: start nothing,
-# and pass the code on. Its output isn't shown; it is only the interruption.
-if [ "$code" -ge 128 ]; then
+# Interrupted: the developer meant to stop, or the machine did. Start
+# nothing, whatever the refresh's exit code and the settings. Its output
+# isn't shown; it is only the interruption.
+if [ -n "$interrupted" ]; then
   echo "coldlogic: not starting claude: the refresh of the generated files in $checkout was interrupted (devenv tasks run devenv:files exited $code)." >&2
-  exit "$code"
+  exit 130
 fi
 
 # A refresh that succeeds is trusted: nothing printed, the link not looked

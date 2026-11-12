@@ -321,13 +321,17 @@ Tested by: `packages/claude-wrapper-test.sh` at build.
 - **THEN** Claude Code starts, and the wrapper prints nothing
 
 ### Requirement: An interrupted refresh starts nothing
-When the refresh exits with 128 or more, as when a signal stops devenv (Ctrl-C, SIGTERM, an OOM kill), the wrapper SHALL NOT start Claude Code, whatever the settings, and SHALL print one `coldlogic:` line on stderr, with the checkout and the exit code, and exit with that code. A lower exit code is a failed refresh, as above.
+When the wrapper receives SIGINT or SIGTERM while the refresh runs, it SHALL NOT start Claude Code, whatever devenv's exit code and the settings, and SHALL print one `coldlogic:` line on stderr, with the checkout and devenv's exit code, and exit 130. The exit code alone SHALL NOT count as an interruption: any non-zero exit without the signal is a failed refresh, as above.
 
 Tested by: `packages/claude-wrapper-test.sh` at build.
 
 #### Scenario: Ctrl-C during the refresh
-- **WHEN** devenv exits 130 and `.claude/settings.json` is there
-- **THEN** Claude Code isn't started, stderr has only one `coldlogic:` line saying the refresh was interrupted, with exit 130, the exit code is 130, and no file of the wrapper's is left in `TMPDIR`
+- **WHEN** the wrapper gets SIGINT while devenv runs, devenv exits 1, and `.claude/settings.json` is there
+- **THEN** Claude Code isn't started, stderr has only one `coldlogic:` line saying the refresh was interrupted, the exit code is 130, and no file of the wrapper's is left in `TMPDIR`
+
+#### Scenario: A high exit code without a signal
+- **WHEN** devenv exits 255, or 130, with no signal to the wrapper, and `.claude/settings.json` is there
+- **THEN** it is a failed refresh: the warning is printed and Claude Code starts
 
 ### Requirement: The wrapper passes the launch through unchanged
 The wrapper SHALL start Claude Code with the same arguments, each as given, in the same working directory, with the same standard input and output, and SHALL be replaced by it, so the exit code and signals are Claude Code's. The refresh SHALL NOT read standard input or write to standard output. The wrapper SHALL add nothing to `PATH`, and SHALL set only the session marker and its record of wrappers already run.
