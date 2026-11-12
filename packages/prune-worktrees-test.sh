@@ -718,6 +718,7 @@ rm -rf "$w"
 prune
 check "(r) half-deleted: unregistered" not listed "$w"
 check "(r) ... logged" logged "unregistered worktree $w"
+check "(r) ... its intent written before it" logged "unregistering worktree $w"
 
 fresh
 wt side x
@@ -1428,14 +1429,36 @@ merge_ff "$w"
 backdate "$w"
 pr x "$(head_of "$w")"
 logf="$main/.git/coldlogic-prune.log"
-echo "2000-01-01T00:00:00Z removed worktree /old (old) at 1234; to restore: git worktree add /old 1234" >"$logf"
-for i in $(seq 1 1500); do echo "2000-01-01T00:00:00Z kept filler $i"; done >>"$logf"
+{
+  echo "2000-01-01T00:00:00Z removed worktree /old (old) at 1234; to restore: git worktree add /old 1234"
+  echo "2000-01-01T00:00:00Z removing worktree /stuck (stuck) at 5678; to restore: git worktree add /stuck 5678"
+  echo "2000-01-01T00:00:00Z removing worktree /lost (lost) at 9abc; to restore: git worktree add /lost 9abc"
+  for i in $(seq 1 1500); do echo "2000-01-01T00:00:00Z kept filler $i"; done
+  echo "2000-01-01T00:00:00Z removing worktree /stuck (stuck) at 5678; to restore: git worktree add /stuck 5678"
+} >"$logf"
 prune
 check "(I) the log is cut: removals stay" logged "removed worktree /old (old)"
+check "(I) ... an intent with no removal line after it stays" logged "removing worktree /lost (lost)"
+check "(I) ... a repeated intent only once" [ "$(grep -c "removing worktree /stuck" "$logf")" = 1 ]
 check "(I) ... with this run's" logged "removed worktree $w (x)"
+check "(I) ... whose intent line its removal's line replaces" not logged "removing worktree $w (x)"
 check "(I) ... and the last 1000 other lines" [ "$(grep -c "kept filler" "$logf")" = 1000 ]
 check "(I) ... the newest of them" logged "kept filler 1500"
 check "(I) ... in order" [ "$(head -n 1 "$logf")" = "2000-01-01T00:00:00Z removed worktree /old (old) at 1234; to restore: git worktree add /old 1234" ]
+
+# Under 1000 other lines, over 100 repeats of a failing removal's intent:
+# the repeats go, the other lines stay.
+fresh
+logf="$main/.git/coldlogic-prune.log"
+{
+  echo "2000-01-01T00:00:00Z kept filler 1"
+  for i in $(seq 1 102); do
+    echo "2000-01-01T00:00:00Z removing worktree /stuck (stuck) at 5678; to restore: git worktree add /stuck 5678"
+  done
+} >"$logf"
+prune
+check "(I2) 102 repeated intents, few other lines: one left" [ "$(grep -c "removing worktree /stuck" "$logf")" = 1 ]
+check "(I2) ... the other line kept" logged "kept filler 1"
 
 # --- Never writes through a link (#82)
 

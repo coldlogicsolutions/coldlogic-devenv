@@ -74,10 +74,12 @@
 # pid), or that names none and is over an hour old, is taken over, by one
 # run at a time, under coldlogic-prune.lock.takeover/; a live owner's never
 # is, and a run skipped for one over an hour old logs it once; a run that
-# can't write its owner removes the lock again and logs that once),coldlogic-prune.stamp (the
-# last background start or completed run), coldlogic-prune.log (each removal
-# with its commit and how to restore it, kept for good, and each reason for
-# keeping a candidate when it changes, cut to the last 1000 such lines) and
+# can't write its owner removes the lock again and logs that once),
+# coldlogic-prune.stamp (the last background start or completed run),
+# coldlogic-prune.log (each removal with its commit and how to restore it,
+# and the intent line written before it, kept for good unless a later line
+# repeats it, and each reason for keeping a candidate when it changes, cut
+# to the last 1000 such lines) and
 # coldlogic-prune.kept (the last run's reasons, to tell what changed). It
 # prints nothing else, except one line on stderr when the log can't be used
 # (below), and exits 0 except on bad usage (2).
@@ -89,8 +91,8 @@
 # record), printing one line on stderr; a dry run is unaffected. Each
 # removal's "removing ...; to restore: ..." line is written before the
 # removal, and one that can't be written is skipped, kept for the next run.
-# Such a
-# kept file or lock owner is neither read nor followed. The log is made
+# A kept file or lock owner that isn't such a file is neither read nor
+# followed. The log is made
 # with noclobber (O_EXCL, which a link fails), and opened again if a trim
 # by another run has replaced it; the stamp, kept file and trimmed log are
 # written to a mktemp file renamed into place. Paths and names in log lines
@@ -369,10 +371,13 @@ keep() {
   if [ "${kept[$k]-}" = "$m" ]; then
     return 0
   fi
-  kept["$k"]="$m"
-  if [ -n "$dry_run" ] || [ "${prev_kept[$k]-}" != "$m" ]; then
-    say "$m"
+  if [ -n "$dry_run" ]; then
+    echo "$m" >&2
+  elif [ "${prev_kept[$k]-}" != "$m" ] && ! log_line "$m"; then
+    # Not logged: left out of kept, so the next run logs it.
+    return 0
   fi
+  kept["$k"]="$m"
 }
 # Writes this run's reasons to kept_file.
 save_kept() {
@@ -1284,12 +1289,24 @@ if [ ${#gone[@]} -gt 0 ] || [ -n "$present" ]; then
     for p in ${gone[@]+"${gone[@]}"}; do
       echo "unregister $p"
     done
-  elif git worktree prune 2>/dev/null; then
-    for p in ${gone[@]+"${gone[@]}"}; do
-      say "unregistered worktree $(q "$p"): its directory was gone"
-    done
   else
-    keep prune "git worktree prune failed"
+    # The intents first, as for a removal: with no record, no prune.
+    intended=1
+    for p in ${gone[@]+"${gone[@]}"}; do
+      intend "unregistering worktree $(q "$p"): its directory was gone" || {
+        intended=""
+        break
+      }
+    done
+    if [ -z "$intended" ]; then
+      keep prune "skipped git worktree prune: the log couldn't be written"
+    elif git worktree prune 2>/dev/null; then
+      for p in ${gone[@]+"${gone[@]}"}; do
+        say "unregistered worktree $(q "$p"): its directory was gone"
+      done
+    else
+      keep prune "git worktree prune failed"
+    fi
   fi
 fi
 
@@ -1349,30 +1366,65 @@ fi
 # Whether log line $1 records a removal, which trimming keeps.
 is_removal() {
   case "${1#* }" in
-    "removed worktree "* | "deleted branch "* | "unregistered worktree "* | "removing worktree "* | "deleting branch "*) return 0 ;;
+    "removed worktree "* | "deleted branch "* | "unregistered worktree "*) return 0 ;;
+  esac
+  return 1
+}
+# Whether log line $1 records an intent to remove, written before it.
+is_intent() {
+  case "${1#* }" in
+    "removing worktree "* | "deleting branch "* | "unregistering worktree "*) return 0 ;;
   esac
   return 1
 }
 
-# Keeps every removal and the last 1000 other lines.
+# Keeps every removal and the last 1000 other lines. An intent line is kept
+# like a removal, the record when its "removed ..." line couldn't be
+# written, unless a later line says the same: its removal's line, or the
+# same intent again (a removal that keeps failing writes one every run).
+# Those are dropped once there are over 100 of them, or with a trim.
 trim_log() {
-  local -a lines
-  local l n=0 i=0
+  local -a lines mark
+  local -A seen=()
+  local l s n=0 i o=0 dropped=0
   # Only the log this run wrote to, and not through a link since: the
   # rewrite would copy the link's target where the sandbox can read it.
   { [ -n "$log_ok" ] && own_file "$log"; } || return 0
   mapfile -t lines <"$log" 2>/dev/null || return 0
-  for l in ${lines[@]+"${lines[@]}"}; do
-    is_removal "$l" || n=$((n + 1))
-  done
-  [ "$n" -gt 1000 ] || return 0
-  for l in ${lines[@]+"${lines[@]}"}; do
-    if is_removal "$l"; then
-      printf '%s\n' "$l"
+  # Newest first, so a line's later copies are seen before it.
+  for ((i = ${#lines[@]} - 1; i >= 0; i--)); do
+    l="${lines[i]}"
+    s="${l#* }"
+    if is_intent "$l"; then
+      case "$s" in
+        "removing "*) s="removed ${s#removing }" ;;
+        "deleting "*) s="deleted ${s#deleting }" ;;
+        "unregistering "*) s="unregistered ${s#unregistering }" ;;
+      esac
+      if [ -n "${seen[$s]-}" ]; then
+        mark[i]=drop
+        dropped=$((dropped + 1))
+      else
+        seen["$s"]=1
+        mark[i]=keep
+      fi
+    elif is_removal "$l"; then
+      seen["$s"]=1
+      mark[i]=keep
     else
-      i=$((i + 1))
-      [ "$i" -le $((n - 1000)) ] || printf '%s\n' "$l"
+      mark[i]=other
+      n=$((n + 1))
     fi
+  done
+  [ "$n" -gt 1000 ] || [ "$dropped" -gt 100 ] || return 0
+  for ((i = 0; i < ${#lines[@]}; i++)); do
+    case "${mark[i]}" in
+      keep) printf '%s\n' "${lines[i]}" ;;
+      other)
+        o=$((o + 1))
+        [ "$o" -le $((n - 1000)) ] || printf '%s\n' "${lines[i]}"
+        ;;
+    esac
   done | replace_file "$log" || true
 }
 

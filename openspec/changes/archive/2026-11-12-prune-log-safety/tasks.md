@@ -43,6 +43,14 @@
 - [x] 6.4 The unusable-log stderr line names the log path and says to remove or fix it.
 - [x] 6.5 Docs: proposal.md (`clean` for free text, `%q` for names, the intent line), task 1.1, README.md's prune-worktrees row.
 
+## 7. Third review fixes
+
+- [x] 7.1 Trimming keeps an intent line unless a later line repeats it (its removal's line, or the same intent), and drops those redundant ones with a trim or once over 100, so a removal that keeps failing can't grow the log for good and a made removal whose "removed" line failed keeps its record (design.md, decision 1). Test (I): a lone intent stays, a repeated one appears once, this run's intents give way to their removal lines.
+- [x] 7.5 Test (I2): over 100 repeated intents with few other lines trigger the trim; spec scenario "Repeated intent lines"; three accepted edge cases in design.md's Risks.
+- [x] 7.4 `git worktree prune` writes an "unregistering worktree ..." intent per gone worktree first, and is skipped when it can't. Test (r) checks the intent.
+- [x] 7.2 `keep` records a reason in the kept file only once it is logged (or unchanged from the last run), so one the log couldn't take is logged by the next run.
+- [x] 7.3 Header comment: the split sentences about the files' names and the kept file and lock owner.
+
 ## Workflow follow-up
 
 - Archive the change on the feature branch as the last commit before the PR merges.

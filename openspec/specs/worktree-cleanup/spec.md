@@ -426,6 +426,10 @@ Tested by: `packages/prune-worktrees-test.sh`.
 - **WHEN** the log becomes unusable after a run's checks, before it removes a worktree
 - **THEN** the "removing ... to restore" line can't be written, the worktree and its branch stay for the next run, and exit is 0; a removal that then fails still gets its failure line after the logged intent
 
+#### Scenario: Repeated intent lines
+- **WHEN** the log holds the same "removing ..." intent many times, or one its "removed ..." line follows
+- **THEN** a trim, or a run with over 100 such repeats, keeps only the newest of each and no intent whose removal line follows, and keeps an intent nothing repeats
+
 #### Scenario: The log replaced during a run
 - **WHEN** another run's trim replaces the log with a new file while a run is working
 - **THEN** the run's removal line is in the log at its path
