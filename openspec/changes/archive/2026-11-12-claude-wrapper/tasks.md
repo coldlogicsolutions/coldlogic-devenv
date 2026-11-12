@@ -11,7 +11,7 @@ Run every tool through `devenv shell --quiet -- <cmd>`, one command per call, wi
   3. A function `is_wrapper <file>`: returns 0 when `[ "$1" -ef "$self" ]`, or when `$1` is `-ef` any non-empty element of `$seen` split on `:` (`IFS=: read -ra ws <<<"$seen"`); else 1. Write the tests as `if` statements, so `set -e` can't end the script on a false one.
   4. Find the real one: split `${PATH:-}` on `:` the same way; for each non-empty `dir`, `cand="$dir/claude"`; take the first where `[ -f "$cand" ] && [ -x "$cand" ]` and `is_wrapper "$cand"` is false. An empty entry is skipped, not read as the current directory. None found: print `coldlogic: no Claude Code found on PATH behind this wrapper ($self). Install Claude Code, or add it to PATH.` to stderr and `exit 127`. This comes before any refresh.
   5. `export COLDLOGIC_WRAPPERS_RUN="${seen:+$seen:}$self"` and `export COLDLOGIC_DEVENV_SESSION=1`. From here every `exec` of the real `claude` carries both.
-  6. `if [ -n "$nested" ]; then exec "$real" "$@"; fi`.
+  6. `if [ -n "$nested" ]; then exec "$real" "$@"; fi`. Then, when `${1-}` is exactly `--version`, `-v`, `--help`, `-h`, `update`, `doctor`, `mcp`, `config`, `auth`, `install` or `migrate-installer`, `exec "$real" "$@"` too (review fix R7).
   7. The checkout: `top="$("$git_bin" rev-parse --show-toplevel 2>/dev/null)" || top=""`. `checkout="$top"` when `top` is non-empty and `$top/devenv.nix` or `$top/devenv.yaml` is a file; else empty. Never `DEVENV_ROOT` (review fix R2).
   8. Empty: `exec "$real" "$@"`, with no message (review fix R2).
   9. The refresh: `code=0`, then, in a subshell, `cd "$checkout"`, `unset CLAUDECODE COLDLOGIC_DEVENV_SESSION` and every `DEVENV_` variable (`"${!DEVENV_@}"`, review fix R1), and `exec devenv --quiet tasks run devenv:files`, with `</dev/null` and standard output and stderr together to a `mktemp` file under `TMPDIR` (both to stderr when `mktemp` fails, review fix R5), removed before `claude` starts or by an EXIT trap (review fix R4); `|| code=$?`. When `code` is 128 or more, print one `coldlogic:` line saying the refresh in `$checkout` was interrupted, with the code, and `exit "$code"` (review fix R6). Otherwise, when `code` isn't 0, print that file to stderr first.
@@ -149,7 +149,7 @@ No test runs the tasks, so these are done by hand in this worktree's own shell. 
   Verify by reading the rendered table: one new row, no other row changed.
 - [x] 5.3 In `README.md`, add a section `## Starting Claude Code` after "Using it", saying, in short sentences:
   - Start `claude` from the devenv shell (`devenv shell` or direnv), in the checkout. The wrapper refreshes the generated files first, so there is no need to enter a shell and restart sessions after a module update: restart `claude`.
-  - Every `claude` command outside a session waits for that refresh, `claude --version` included. It prints nothing unless the refresh fails.
+  - Every `claude` command outside a session that can start one waits for that refresh; `--version`, `--help`, `mcp` and the other commands that start none don't (review fix R7). It prints nothing unless the refresh fails.
   - It only works where the shell's `PATH` is used. The IDE extension's own launch and the desktop app don't go through it: for those, enter the shell from a terminal once, as before.
   - Start it in the checkout whose settings it should read. In a subdirectory the checkout's files are refreshed, but Claude Code looks for `.claude/settings.json` where it starts.
   - The refresh uses the profile `devenv.yaml` selects, whatever `--profile` the shell was entered with.
@@ -168,13 +168,15 @@ The session can't make these: they need a shell outside any session. Each record
 
 Archived with 6.1 to 6.8 open by design: they are Derek's manual terminal checks, recorded in the PR rather than ticked here.
 
-- [ ] 6.1 Cost. In the main checkout's devenv shell, run `time claude --version` three times, then once more after `touch devenv.nix`. Record the warm and the after-change times. Verify the warm time is acceptable; if it is over two seconds, stop and raise design.md's open question 1.
+`claude --version` skips the refresh since review fix R7, so these checks start a short session with `claude -p ok` instead, and 6.1 times the refresh itself.
+
+- [ ] 6.1 Cost. In the main checkout's devenv shell, run `time devenv --quiet tasks run devenv:files`, the wait the wrapper adds, three times, then once more after `touch devenv.nix`. Record the warm and the after-change times. Verify the warm time is acceptable; if it is over two seconds, stop and raise design.md's open question 1.
 - [ ] 6.2 `PATH` under direnv. In a fresh terminal, `cd` into the checkout (direnv loads) and run `type -a claude`. Verify the first entry is the `coldlogic-claude` store path and the real one follows.
-- [ ] 6.3 The refresh is real, and stays in its checkout. In a worktree with no `.claude/settings.json`, reached by `cd` from the main checkout's `devenv shell` (so `DEVENV_ROOT` is the main checkout), note `readlink` of the main checkout's `.claude/settings.json` and the time of its `.devenv` state's `files.json`, then run `claude --version`. Verify the worktree's `.claude/settings.json` now links into the store, and the main checkout's link and `files.json` are unchanged.
-- [ ] 6.4 A stale link. Point the checkout's `.claude/settings.json` at another store file (`ln -sfn`), run `claude --version`, and verify the link is back on the current path.
+- [ ] 6.3 The refresh is real, and stays in its checkout. In a worktree with no `.claude/settings.json`, reached by `cd` from the main checkout's `devenv shell` (so `DEVENV_ROOT` is the main checkout), note `readlink` of the main checkout's `.claude/settings.json` and the time of its `.devenv` state's `files.json`, then run `claude -p ok`. Verify the worktree's `.claude/settings.json` now links into the store, and the main checkout's link and `files.json` are unchanged.
+- [ ] 6.4 A stale link. Point the checkout's `.claude/settings.json` at another store file (`ln -sfn`), run `claude -p ok`, and verify the link is back on the current path.
 - [ ] 6.5 The marker. Start `claude` from the shell and have it run `printenv COLDLOGIC_DEVENV_SESSION CLAUDECODE CLAUDE_CODE_CHILD_SESSION` (expect all three) and `devenv shell --quiet -- true` (expect both file tasks `(cached)`). If agent teams are in use, check a teammate has the marker too.
 - [ ] 6.6 An IDE terminal. In an IDE extension's terminal, run `printenv CLAUDECODE COLDLOGIC_DEVENV_SESSION CLAUDE_CODE_CHILD_SESSION` (expect only the first), repeat 6.4 there, and verify the link is refreshed.
-- [ ] 6.7 Failure. Add a syntax error to `devenv.nix` and run `claude --version`: verify the warning and that it starts. Move `.claude/settings.json` aside and run it again: verify the refusal, exit code 1, and that `COLDLOGIC_START_WITHOUT_SETTINGS=1 claude --version` starts. Restore both.
+- [ ] 6.7 Failure. Add a syntax error to `devenv.nix` and run `claude -p ok`: verify the warning, devenv's error above it, and that it starts. Move `.claude/settings.json` aside and run it again: verify the refusal, exit code 1, and that `COLDLOGIC_START_WITHOUT_SETTINGS=1 claude -p ok` starts. Then verify `claude --version` prints the version at once, with no warning. Restore both.
 - [ ] 6.8 The terminal prune still runs. Enter `devenv shell` from a terminal in a project with a merged, idle worktree, and verify it is removed shortly after, as `worktree-cleanup` says.
 
 ## 7. Gate
@@ -189,6 +191,7 @@ Archived with 6.1 to 6.8 open by design: they are Derek's manual terminal checks
 - [x] R4 devenv's stderr goes to a `mktemp` file under `TMPDIR` and is shown only when the refresh fails, so a refresh that works prints nothing; the file is removed before `claude` starts and on the refusal. `mktemp` and `rm` are store paths in the built wrapper. Tests (a), (k), (l), (q), (q2).
 - [x] R5 The file holds devenv's stdout as well as its stderr, since `devenv tasks run` prints a failed task's output on stdout; it is still shown, on stderr, only on failure. Tests (k) and (l) find the stand-in's `devenv-stdout` on stderr and nothing of devenv's on stdout; (q) and (q2) as above.
 - [x] R6 A refresh that exits 128 or more, stopped by a signal, starts nothing whatever the settings: one `coldlogic:` line, and the wrapper exits with that code. Tests (q3) with 130 and (q4) with 128.
+- [x] R7 A first argument of `--version`, `-v`, `--help`, `-h`, `update`, `doctor`, `mcp`, `config`, `auth`, `install` or `migrate-installer` starts `claude` at once, with the marker and no refresh or settings check (Derek's decision). Only the first argument, exactly. Tests (y), each name with a failing refresh and no settings; (y2) `-p --version`, `--model x mcp` and `-p mcp` refresh; (y3) `--versions` refreshes. Section 6's checks now use `claude -p ok`.
 
 ## Workflow follow-up
 

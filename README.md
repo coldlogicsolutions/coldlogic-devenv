@@ -75,7 +75,7 @@ Copy `templates/update-coldlogic-devenv.yaml` to `.github/workflows/` and regist
 
 Start `claude` from the devenv shell (`devenv shell` or direnv), in the checkout. The shell's `claude` is a wrapper that refreshes the generated files first, so after a module update there is no need to enter a shell from a terminal and restart every session: restart `claude`.
 
-- Every `claude` command outside a session waits for that refresh, `claude --version` included. It prints nothing unless the refresh fails, devenv's own output included; when it fails, devenv's output comes first, on stderr.
+- Every `claude` command outside a session that can start one waits for that refresh. Those that start none, by first argument (`--version`, `-v`, `--help`, `-h`, `update`, `doctor`, `mcp`, `config`, `auth`, `install`, `migrate-installer`), start at once. It prints nothing unless the refresh fails, devenv's own output included; when it fails, devenv's output comes first, on stderr.
 - It only works where the shell's `PATH` is used. The IDE extension's own launch and the desktop app don't go through it: for those, enter the shell from a terminal once, as before.
 - Start it in the checkout whose settings it should read. In a subdirectory the checkout's files are refreshed, but Claude Code looks for `.claude/settings.json` where it starts.
 - Only a git checkout with a `devenv.nix` or `devenv.yaml` at its top is refreshed. Anywhere else the wrapper starts `claude` at once, with no refresh and no check, even when the shell was entered in a project.

@@ -199,7 +199,7 @@ Tested by: none. `devenv.nix` defines the test once; the change's tasks search f
 - **THEN** it is outside a session
 
 ### Requirement: The claude wrapper refreshes the generated files before a session starts
-The developer shell SHALL put a `claude` command on `PATH` ahead of Claude Code. Outside a session, every invocation, whatever its arguments, SHALL first run devenv's file tasks at the top of the devenv project the current directory is in, as a terminal shell runs them, and only then start Claude Code. A `CLAUDECODE` set by an IDE terminal SHALL NOT stop it.
+The developer shell SHALL put a `claude` command on `PATH` ahead of Claude Code. Outside a session, every invocation that can start a session SHALL first run devenv's file tasks at the top of the devenv project the current directory is in, as a terminal shell runs them, and only then start Claude Code. A `CLAUDECODE` set by an IDE terminal SHALL NOT stop it.
 
 Tested by: `packages/claude-wrapper-test.sh` at build, with a stand-in `devenv`; the change's terminal runs.
 
@@ -207,8 +207,8 @@ Tested by: `packages/claude-wrapper-test.sh` at build, with a stand-in `devenv`;
 - **WHEN** a developer runs `claude` in a checkout whose `.claude/settings.json` points at an old store path
 - **THEN** the link points at the current store path when Claude Code starts
 
-#### Scenario: Any arguments
-- **WHEN** a developer runs `claude --version`, `claude -p hello` or `claude mcp list`
+#### Scenario: Session commands
+- **WHEN** a developer runs `claude`, `claude -p hello`, `claude -p --version` or `claude --model opus`
 - **THEN** the refresh runs first each time
 
 #### Scenario: A subdirectory
@@ -222,6 +222,19 @@ Tested by: `packages/claude-wrapper-test.sh` at build, with a stand-in `devenv`;
 #### Scenario: An IDE terminal
 - **WHEN** a developer runs `claude` in an IDE extension's terminal, where `CLAUDECODE` is set and neither `COLDLOGIC_DEVENV_SESSION` nor `CLAUDE_CODE_CHILD_SESSION` is
 - **THEN** devenv's file tasks run, and Claude Code starts with `CLAUDECODE` as the terminal set it
+
+### Requirement: The wrapper skips commands that start no session
+When the first argument is `--version`, `-v`, `--help`, `-h`, `update`, `doctor`, `mcp`, `config`, `auth`, `install` or `migrate-installer`, the wrapper SHALL start Claude Code at once, with the session marker but no refresh, no settings check and no message. Only the first argument SHALL count, and only as an exact match; anything else refreshes.
+
+Tested by: `packages/claude-wrapper-test.sh` at build.
+
+#### Scenario: A command that starts no session
+- **WHEN** a developer runs `claude --version` or `claude mcp list` in a checkout where the refresh would fail and the settings are missing
+- **THEN** devenv isn't run, nothing is printed, and Claude Code starts with those arguments
+
+#### Scenario: Not the first argument
+- **WHEN** a developer runs `claude -p mcp` or `claude --model x mcp`
+- **THEN** the refresh runs first
 
 ### Requirement: The wrapper leaves other directories alone
 Where the git checkout the current directory is in has no `devenv.nix` or `devenv.yaml` at its top, or the directory is in no git checkout, the wrapper SHALL start Claude Code at once, with no refresh, no settings check and no message. It SHALL NOT fall back to the shell's own checkout.

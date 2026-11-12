@@ -464,6 +464,37 @@ run
 check "(q4) exit 128 stops too" exits 128
 check "(q4) ... claude not started" absent claude
 
+# (y) commands that start no session: no refresh and no settings check,
+# though the refresh would fail and the settings are missing.
+for cmd in --version -v --help -h update doctor mcp config auth install migrate-installer; do
+  fresh
+  extra=(STUB_DEVENV_EXIT=3)
+  run "$cmd" extra-arg
+  check "(y) $cmd: no devenv" absent devenv
+  check "(y) $cmd: claude ran with its arguments" args_are "arg=<$cmd>
+arg=<extra-arg>"
+  check "(y) $cmd: ... and the marker" has claude "session=1"
+  check "(y) $cmd: ... and nothing on stderr" empty_file stderr
+done
+
+# (y2) only the first argument counts: a prompt, or an option before the
+# command, refreshes.
+fresh
+run -p --version
+check "(y2) -p --version: devenv ran" runs devenv 1
+check "(y2) ... claude ran" runs claude 1
+fresh
+run --model x mcp
+check "(y2) --model x mcp: devenv ran" runs devenv 1
+fresh
+run -p 'mcp'
+check "(y2) -p mcp: devenv ran" runs devenv 1
+
+# (y3) a near miss refreshes: only exact names count.
+fresh
+run --versions
+check "(y3) --versions: devenv ran" runs devenv 1
+
 # (r) the wrapper's directory twice on PATH.
 fresh
 path="$case_dir/wrap/bin:$case_dir/wrap/bin:$case_dir/stubs:$case_dir/real/bin:$outer_path"

@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # `claude`, as the developer shell puts it on PATH, ahead of the real Claude
-# Code (packages/claude-wrapper.nix). Outside a session it first refreshes
-# the generated files of the checkout the current directory is in:
+# Code (packages/claude-wrapper.nix). Outside a session, unless the command
+# starts none (`--version`, `mcp` and the like), it first refreshes the
+# generated files of the checkout the current directory is in:
 #
 #   devenv --quiet tasks run devenv:files
 #
@@ -102,6 +103,15 @@ export COLDLOGIC_DEVENV_SESSION=1
 if [ -n "$nested" ]; then
   exec "$real" "$@"
 fi
+
+# Commands that start no session read no project settings, so they don't
+# wait for a refresh or a settings check. Only the first argument counts:
+# `claude -p --version` is a prompt. Anything not listed refreshes.
+case "${1-}" in
+  --version | -v | --help | -h | update | doctor | mcp | config | auth | install | migrate-installer)
+    exec "$real" "$@"
+    ;;
+esac
 
 # The checkout: the top of the git checkout here, only when it is a devenv
 # project. Never DEVENV_ROOT: a shell entered in one checkout and moved
