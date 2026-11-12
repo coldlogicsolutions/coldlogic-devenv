@@ -80,6 +80,16 @@ No test runs the tasks, so these checks are done by hand, in this worktree's own
 
 - [x] 4.1 Run `devenv shell --quiet -- scripts/check.sh` and verify it ends with `check: all passed`.
 
+## Review fixes
+
+From `/code-review high` on `ce047ec`.
+
+- [x] R.1 A real file or directory where a link belongs was skipped silently. `packages/session-relink.sh` now records it as `conflict <path>` (never touched, exit 0); tests (f), (p), (p2) and (v) expect it, and the new (f2) covers a directory. The notice lists it as `not links, move them aside first:`. The spec scenario "A real file in place of a link" and design decision 5 say so.
+- [x] R.2 The notice dropped lines of an unknown kind and joined paths with bare spaces. Each path is now shell-quoted with `printf %q`, and an unknown line is listed under `other:`, so the notice still prints. Checked by feeding the generated script's parsing lines a path with a space and an unknown kind, and by running the generated script against a root with a real `.mcp.json`.
+- [x] R.3 The scenario "The recorded state names a current file differently" described the removed `--state` check. It is now "An orphan in the recorded state", in both spec copies and the REMOVED Migration note; the main spec's Purpose covers every generated link and #94.
+- [x] R.4 The two statuses, `coldlogic:session-files` and the notice are guarded with `lib.mkIf` on there being files, so a module with no files gets no partial task. This doesn't decide whether a task runs in a session: that is still only the `CLAUDECODE` test (2.2). Not exercised, since this module always generates the settings file.
+- [x] R.5 Copy-mode and seed-mode files: none exist in the module, the profiles or the fixtures. Noted in design.md's Risks; no code change.
+
 ## 5. Verification (manual, Derek, after merge)
 
 - [ ] 5.1 In the main checkout, on the new module: run `devenv shell` from a terminal, then restart every Claude Code session open there, as the notice says. With at least two sessions open again, watch `ls -la .claude/settings.json` for two minutes while the sessions run `devenv shell --quiet -- true`. If the link survives, #94 is fixed. If it still vanishes, no shell of ours did it, since a session no longer runs devenv's link step or writes the settings link: Claude Code removes it. Record that on #94 and #68 with the times, and whether a session that was not restarted was open.

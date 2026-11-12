@@ -1,7 +1,7 @@
 # generated-files Specification
 
 ## Purpose
-How `devenv shell` treats the generated `.claude/settings.json` and `.mcp.json` inside a Claude Code session, whose sandbox can't rewrite them. A stale link mustn't break the shell or leave the session with no settings (#37).
+How `devenv shell` treats the generated links (`.claude/settings.json`, `.mcp.json`, `.pre-commit-config.yaml` and the rest) inside a Claude Code session, whose sandbox can't safely rewrite them. A session never runs devenv's file tasks or writes the settings link; it relinks the rest atomically and reports what it can't fix. A stale link mustn't break the shell or leave the session with no settings (#37, #94).
 
 ## Requirements
 
@@ -37,7 +37,7 @@ Tested by: `packages/session-relink-test.sh` at build; the `devenv.nix` task is 
 
 #### Scenario: A real file in place of a link
 - **WHEN** `.mcp.json` is a regular file rather than a link
-- **THEN** the session leaves it as it is, and it doesn't appear in the notice
+- **THEN** the session leaves it as it is, and the notice lists it as not a link
 
 ### Requirement: A session relink never leaves a protected path missing
 The session's relink SHALL replace a generated link atomically, so the path is never missing, even when the sandbox allows removing the link but denies creating one. It SHALL leave no temporary link of its own behind. It SHALL remove a leftover temporary link only when its process has exited and it is over a minute old, whether or not the generated link is stale. None of this SHALL apply to the settings link, which a session never writes.
@@ -57,9 +57,9 @@ Tested by: `packages/session-relink-test.sh` at build.
 - **THEN** the session's `devenv shell` removes the leftover
 
 ### Requirement: Stale generated files are reported once
-In a session, when a generated link (settings included) is missing or stale after the session links, the shell SHALL print one notice, listing missing apart from out-of-date files. It SHALL say to enter the shell once from a terminal, then restart every session in the checkout, this one included, with `devenv shell --refresh-eval-cache` as the fallback. It SHALL never fail and SHALL be silent outside a session or with current links.
+In a session, when a generated link (settings included) is missing, stale or not a link after linking, the shell SHALL print one notice listing quoted paths by kind, unknown too. It SHALL say to enter the shell once from a terminal, then restart every session in the checkout, this one included, with `devenv shell --refresh-eval-cache` as the fallback. It SHALL never fail and SHALL be silent outside a session or with current links.
 
-Tested by: `packages/session-relink-test.sh` (comparison).
+Tested by: `packages/session-relink-test.sh`; the notice isn't.
 
 #### Scenario: Stale settings notice
 - **WHEN** a session's shell finds `.claude/settings.json` pointing at an old store path
@@ -72,6 +72,14 @@ Tested by: `packages/session-relink-test.sh` (comparison).
 #### Scenario: Restarting sessions
 - **WHEN** the notice is printed
 - **THEN** it says to restart every Claude Code session open in the checkout, this one included, after the terminal refresh, since a running session can undo it
+
+#### Scenario: Something that isn't a link
+- **WHEN** a session's shell finds a regular file or directory at `.mcp.json`
+- **THEN** the notice lists `.mcp.json` as not a link, to be moved aside, apart from missing and out-of-date files
+
+#### Scenario: A path with a space, or an unknown kind
+- **WHEN** a reported path contains a space, or the relink prints a line of a kind the notice doesn't know
+- **THEN** the path is shell-quoted so it reads as one path, and the unknown line is still listed, so the notice is printed
 
 #### Scenario: Current links
 - **WHEN** every generated link is current
@@ -94,9 +102,9 @@ Tested by: none. Each status in `devenv.nix` is a single test of `CLAUDECODE`.
 - **WHEN** a session runs `devenv shell` and `.claude/settings.json` points at a store path other than the one the session's evaluation expects
 - **THEN** `devenv:files` and `devenv:files:cleanup` are skipped and `.claude/settings.json` still exists
 
-#### Scenario: The recorded state names a current file differently
-- **WHEN** a session runs `devenv shell` and the recorded state lists a generated file under a spelling other than its current one, or can't be read
-- **THEN** `devenv:files:cleanup` is skipped and the file's link still exists
+#### Scenario: An orphan in the recorded state
+- **WHEN** a session runs `devenv shell` and devenv's recorded state lists a link this evaluation no longer generates
+- **THEN** `devenv:files:cleanup` is skipped, the link is left, and the next terminal shell's cleanup removes it
 
 #### Scenario: Outside a session
 - **WHEN** a developer runs `devenv shell` from a terminal

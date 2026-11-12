@@ -8,8 +8,9 @@
 #                            <path> <target> [<path> <target> ...]
 #
 # A <path> is stale when it is missing or a link to anything but <target>. A
-# <path> that exists and isn't a link is never stale: it is left to a
-# terminal shell's devenv:files to report. By default, for each stale <path>,
+# <path> that exists and isn't a link (a real file or directory) is a
+# conflict: it is never touched, only reported, as devenv:files would report
+# it from a terminal shell. By default, for each stale <path>,
 # it tries the relink itself, so the sandbox decides whether the session may
 # write it. The relink is atomic: a new link at a temporary name beside
 # <path>, renamed over it. `ln -sf` would unlink the old link first, and the
@@ -25,10 +26,12 @@
 # process is gone and which are more than a minute old.
 #
 # --check-only: no relink and no sweep; only compares.
-# --print: print each stale <path>, one per line, as `missing <path>` when
-#   nothing is there or `stale <path>` when a link to something else is.
+# --print: print each <path> that isn't current, one per line, as
+#   `missing <path>` when nothing is there, `stale <path>` when a link to
+#   something else is, or `conflict <path>` when something that isn't a link is.
 #
-# Exits 1 when nothing is stale, and 0 when something is. Anything else is an
+# Exits 1 when every <path> is current, and 0 when any is missing, stale or a
+# conflict. Anything else is an
 # error: 2 on bad usage, 3 when a command fails. Needs GNU coreutils and
 # findutils.
 set -eEuo pipefail
@@ -98,7 +101,10 @@ for ((i = 0; i < ${#pairs[@]}; i += 2)); do
   if [ "$(readlink -- "$f" 2>/dev/null || true)" = "$want" ]; then
     continue
   fi
+  # Something that isn't a link: never touched, only reported.
   if [ ! -L "$f" ] && [ -e "$f" ]; then
+    stale+=("$f")
+    kinds+=(conflict)
     continue
   fi
   # Taken before any relink attempt; a failed attempt leaves $f as it was.

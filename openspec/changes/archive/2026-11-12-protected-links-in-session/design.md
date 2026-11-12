@@ -88,9 +88,9 @@ The task is ordered `after` `devenv:files:cleanup` and `before` `devenv:files`. 
 
 The session task handles `symlink` mode only. devenv's copy script removes a store link before copying over it, which is the same unlink-then-create shape as `ln -sf`, so it can't be run as it is, and writing our own would mean owning that logic. Nothing in this module uses those modes. A project that does keeps the copy it has until the next terminal shell.
 
-### 5. `--print` says missing or stale
+### 5. `--print` says missing, stale or conflict
 
-`--print` prints one line per file that isn't current: `missing <path>` when nothing is at the path, `stale <path>` otherwise (a link to something else, a dangling link included). The kind is taken before any relink attempt, and a failed attempt leaves the path as it was, so it is still true when printed.
+`--print` prints one line per file that isn't current: `missing <path>` when nothing is at the path, `conflict <path>` when something that isn't a link is (a real file or directory, which is never touched), and `stale <path>` otherwise (a link to something else, a dangling link included). The kind is taken before any relink attempt, and a failed attempt leaves the path as it was, so it is still true when printed. A conflict counts as not current, so the script exits 0 for it.
 
 The notice needs the split because the two cases differ for the reader. A stale link means the session runs on older settings. A missing one means it has none. The split lives in the script so the build-time test covers it; the notice only formats it.
 
@@ -102,7 +102,7 @@ One `echo`, built in one place. Its text:
 
 > coldlogic: this Claude Code session can't refresh these generated files (missing: A B; out of date: C). Enter the shell once from a terminal, outside a Claude Code session, with: devenv shell. Then restart every Claude Code session open in this checkout, this one included, since a running session can undo the refresh. If a terminal shell doesn't fix them, its evaluation may be stale: run devenv shell --refresh-eval-cache there.
 
-A group with no files is left out. The notice compares every symlink-mode file (`generatedLinks`), the settings link included, though the session doesn't write that one. Restarting this session too is Derek's decision: #68 found that a session which had seen the link vanish needed a restart before a new link survived.
+A group with no files is left out. Conflicts get a third group, `not links, move them aside first: ...`, and any line of a kind the notice doesn't know a fourth, `other: ...`, listed as printed, so a new kind can't silence the notice. Each path is shell-quoted (`printf %q`), so a path with a space stays one path. The notice compares every symlink-mode file (`generatedLinks`), the settings link included, though the session doesn't write that one. Restarting this session too is Derek's decision: #68 found that a session which had seen the link vanish needed a restart before a new link survived.
 
 ## Risks / Trade-offs
 
@@ -112,7 +112,8 @@ A group with no files is left out. The notice compares every symlink-mode file (
 - **[The new task fails and takes the shell with it]** → Its script ends in `exit 0`, guards `cd`, and ignores the relink's exit code and output. Task 3.2 checks the generated script by running it with the binary stubbed to fail.
 - **[The state file goes stale in a session]** A link a session creates isn't recorded until a terminal shell runs `devenv:files`. If the file is dropped from the configuration before that, nothing removes the link. → It is a dangling link into the store, harmless, and it needs a file to be added and removed with no terminal shell in between.
 - **[Orphans linger through a session]** Cleanup doesn't run, so a link whose file was removed from the configuration stays until a terminal shell. → Same as today whenever a link is stale.
-- **[A real file in place of a link goes unreported in a session]** `devenv:files` printed "Conflicting file" for it, though the task's output isn't shown. → The file is left alone, and a terminal shell still runs `devenv:files`.
+- **[A real file in place of a link]** `devenv:files` printed "Conflicting file" for it, though the task's output isn't shown. → The session leaves it alone and the notice lists it as not a link (review fix), and a terminal shell still runs `devenv:files`.
+- **[Copy-mode and seed-mode files are neither written nor reported in a session]** → No file in the module, the profiles or the fixtures uses those modes (`git grep copyMode`), so today this affects nothing; a project that adds one gets it at its next terminal shell (decision 4).
 - **[A stale link to a directory is never updated in a session]** The script won't rename over a path that resolves to a directory, so a `source` file that is a directory stays stale and is reported. → Unchanged from today, and the module generates none.
 - **[A project on an older devenv has no `copyMode`]** → The filter reads it with a default: `file.copyMode or "symlink"`.
 - **[No test runs the tasks]** The statuses and the task wrapper are checked by reading and running the generated scripts by hand (tasks 3.1-3.3), not by the gate. → They are a few lines each, with no branches beyond the session test.

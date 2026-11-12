@@ -124,10 +124,22 @@ done_case
 
 fresh
 echo '{}' >.mcp.json
-relink .mcp.json "$new"
-check "(f) regular file: exit 1" exits 1
+relink --print .mcp.json "$new"
+check "(f) regular file: exit 0" exits 0
+check "(f) ... prints it as a conflict" printed "conflict .mcp.json"
 check "(f) ... is still a regular file" [ ! -L .mcp.json ]
 check "(f) ... with its contents" [ "$(cat .mcp.json)" = '{}' ]
+done_case
+
+fresh
+mkdir -p .claude/settings.json
+touch .claude/settings.json/keep
+relink --print .claude/settings.json "$new"
+check "(f2) real directory: exit 0" exits 0
+check "(f2) ... prints it as a conflict" printed "conflict .claude/settings.json"
+check "(f2) ... is still a directory" [ -d .claude/settings.json ]
+check "(f2) ... not a link" [ ! -L .claude/settings.json ]
+check "(f2) ... with its contents, and nothing linked into it" [ "$(ls -A .claude/settings.json)" = keep ]
 done_case
 
 fresh
@@ -202,16 +214,18 @@ echo '{}' >.mcp.json
 rmdir .claude
 relink --check-only --print .claude/settings.json "$new" .mcp.json "$new"
 check "(p) --check-only, missing link and real file: exit 0" exits 0
-check "(p) ... prints only the missing link, as missing" printed "missing .claude/settings.json"
+check "(p) ... prints the missing link, then the conflict" printed "missing .claude/settings.json
+conflict .mcp.json"
 check "(p) ... creates nothing" [ ! -e .claude ]
+check "(p) ... and leaves the real file" [ "$(cat .mcp.json)" = '{}' ]
 done_case
 
 fresh
 echo '{}' >.mcp.json
 ln -s "$new" .claude/settings.json
 relink --check-only --print .claude/settings.json "$new" .mcp.json "$new"
-check "(p2) --check-only, real file otherwise current: exit 1" exits 1
-check "(p2) ... prints nothing" printed ""
+check "(p2) --check-only, real file otherwise current: exit 0" exits 0
+check "(p2) ... prints only the conflict" printed "conflict .mcp.json"
 done_case
 
 fresh
@@ -254,8 +268,9 @@ ln -s "$new" c.json
 echo '{}' >d.json
 relink --check-only --print a.json "$new" b.json "$new" c.json "$new" d.json "$new"
 check "(v) --check-only over missing, stale, current, real file: exit 0" exits 0
-check "(v) ... prints the missing one, then the stale one" printed "missing a.json
-stale b.json"
+check "(v) ... prints them in order, the real file as a conflict" printed "missing a.json
+stale b.json
+conflict d.json"
 done_case
 
 if [ "$(id -u)" = 0 ]; then

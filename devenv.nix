@@ -509,15 +509,19 @@ in
       # running session is what makes Claude Code remove it (#94). devenv's
       # state file is left as the last terminal shell wrote it, and the next
       # terminal shell's cleanup removes any orphans.
-      tasks."devenv:files:cleanup".status = skipInSession;
-      tasks."devenv:files".status = skipInSession;
+      #
+      # devenv defines both tasks only when there are files, so each of these
+      # four is guarded the same way: a module with no files gets no partial
+      # task holding only a status, and no task ordered against a missing one.
+      tasks."devenv:files:cleanup".status = lib.mkIf (config.files != { }) skipInSession;
+      tasks."devenv:files".status = lib.mkIf (config.files != { }) skipInSession;
 
       # The session's own linking: every symlink-mode generated file but the
       # settings, through the atomic relink, which never unlinks a path it is
       # given. It is the only relink-mode call here. devenv:files depends on
       # it, so it never fails: a failure would skip every later task as a
       # failed dependency (#37).
-      tasks."coldlogic:session-files" = {
+      tasks."coldlogic:session-files" = lib.mkIf (config.files != { }) {
         exec = ''
           [ -n "''${CLAUDECODE:-}" ] || exit 0
           cd "$DEVENV_ROOT" || exit 0
@@ -532,7 +536,10 @@ in
       # outside a session and whenever the links are current. Never fails.
       # It compares every generated link, the settings included, and only
       # compares (--check-only), so it writes nothing, not even beside them.
-      tasks."coldlogic:generated-files-stale" = {
+      # Each path is shell-quoted (%q), so one with a space stays one path,
+      # and a line of a kind it doesn't know is still listed, as printed, so
+      # a new kind can't make the notice go quiet.
+      tasks."coldlogic:generated-files-stale" = lib.mkIf (generatedLinks != { }) {
         exec = ''
           [ -n "''${CLAUDECODE:-}" ] || exit 0
           cd "$DEVENV_ROOT" || exit 0
@@ -542,20 +549,30 @@ in
               "--print"
             ] generatedLinks
           })" && [ -n "$out" ]; then
+            # add <list> <item>: <list> with <item> shell-quoted on the end.
+            add() {
+              local q
+              printf -v q '%q' "$2"
+              printf '%s' "''${1:+$1 }$q"
+            }
             missing=""
             stale=""
+            conflict=""
+            other=""
             while IFS= read -r line; do
               case "$line" in
-                "missing "*) missing="''${missing:+$missing }''${line#missing }" ;;
-                "stale "*) stale="''${stale:+$stale }''${line#stale }" ;;
+                "missing "*) missing="$(add "$missing" "''${line#missing }")" ;;
+                "stale "*) stale="$(add "$stale" "''${line#stale }")" ;;
+                "conflict "*) conflict="$(add "$conflict" "''${line#conflict }")" ;;
+                *) other="$(add "$other" "$line")" ;;
               esac
             done <<<"$out"
             what=""
             [ -z "$missing" ] || what="missing: $missing"
             [ -z "$stale" ] || what="''${what:+$what; }out of date: $stale"
-            if [ -n "$what" ]; then
-              echo "coldlogic: this Claude Code session can't refresh these generated files ($what). Enter the shell once from a terminal, outside a Claude Code session, with: devenv shell. Then restart every Claude Code session open in this checkout, this one included, since a running session can undo the refresh. If a terminal shell doesn't fix them, its evaluation may be stale: run devenv shell --refresh-eval-cache there." >&2
-            fi
+            [ -z "$conflict" ] || what="''${what:+$what; }not links, move them aside first: $conflict"
+            [ -z "$other" ] || what="''${what:+$what; }other: $other"
+            echo "coldlogic: this Claude Code session can't refresh these generated files ($what). Enter the shell once from a terminal, outside a Claude Code session, with: devenv shell. Then restart every Claude Code session open in this checkout, this one included, since a running session can undo the refresh. If a terminal shell doesn't fix them, its evaluation may be stale: run devenv shell --refresh-eval-cache there." >&2
           fi
           exit 0
         '';
