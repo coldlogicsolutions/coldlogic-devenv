@@ -79,7 +79,23 @@
 # with its commit and how to restore it, kept for good, and each reason for
 # keeping a candidate when it changes, cut to the last 1000 such lines) and
 # coldlogic-prune.kept (the last run's reasons, to tell what changed). It
-# prints nothing else, and exits 0 except on bad usage (2).
+# prints nothing else, except one line on stderr when the log can't be used
+# (below), and exits 0 except on bad usage (2).
+#
+# A sandboxed session can write the common dir too, and this runs outside
+# the sandbox (#82), so it never writes through a link or into a file that
+# isn't a regular one of the user's with a single name: such a log is left
+# alone, and the run removes nothing (no removal without its restore
+# record), printing one line on stderr; a dry run is unaffected. Each
+# removal's "removing ...; to restore: ..." line is written before the
+# removal, and one that can't be written is skipped, kept for the next run.
+# Such a
+# kept file or lock owner is neither read nor followed. The log is made
+# with noclobber (O_EXCL, which a link fails), and opened again if a trim
+# by another run has replaced it; the stamp, kept file and trimmed log are
+# written to a mktemp file renamed into place. Paths and names in log lines
+# are shell-quoted (%q); a git error or lock owner is cleaned instead
+# (control characters to spaces, $( and backquotes defused).
 set -euo pipefail
 
 usage() {
@@ -123,12 +139,19 @@ PATH="$PATH:/usr/sbin"
 unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_COMMON_DIR GIT_OBJECT_DIRECTORY
 
 # A file's mtime in epoch seconds, as a base-10 number arithmetic can use
-# (anything else fails).
+# (anything else fails). GNU stat only: the package's runtimeInputs hold
+# coreutils, and the script needs its `mv -fT` and `realpath -m` anyway.
 mtime() {
   local t
   t="$(stat -c %Y -- "$1" 2>/dev/null)" || return 1
   case "$t" in '' | *[!0-9]*) return 1 ;; esac
   echo "$((10#$t))"
+}
+# Whether $1 is a regular file of the user's, not a link, with one name (a
+# hard link would let a write reach another file). GNU stat, as mtime's.
+own_file() {
+  [ -f "$1" ] && [ ! -L "$1" ] && [ -O "$1" ] &&
+    [ "$(stat -c %h -- "$1" 2>/dev/null)" = 1 ]
 }
 printf -v now '%(%s)T' -1
 
@@ -179,7 +202,7 @@ if [ -n "$background" ] && [ -z "$dry_run" ]; then
       fast_dir="$fast_proj"
     fi
   fi
-  if [ -n "$fast_dir" ] && fast_common "$fast_dir" &&
+  if [ -n "$fast_dir" ] && fast_common "$fast_dir" && own_file "$fc/coldlogic-prune.stamp" &&
     t="$(mtime "$fc/coldlogic-prune.stamp")" && [ $((now - t)) -ge 0 ] && [ $((now - t)) -lt 600 ]; then
     exit 0
   fi
@@ -203,26 +226,128 @@ stamp="$common/coldlogic-prune.stamp"
 lock="$common/coldlogic-prune.lock"
 kept_file="$common/coldlogic-prune.kept"
 
+# $1 shell-quoted, for a path or name in a log line: no line then carries a
+# live $( ) or backquote, whatever a branch or directory is called.
+q() { printf '%q' "$1"; }
+
+# $1 as free text for a log line: control characters, newlines too, become
+# spaces, and a backquote or $( is defused, so the line stays readable (%q
+# would escape every space) and carries no live substitution.
+clean() {
+  local s="${1//[[:cntrl:]]/ }"
+  # shellcheck disable=SC2016 # literal text, never expanded
+  local bq='`' sq="'" dc='$(' dd='$ ('
+  s="${s//"$bq"/"$sq"}"
+  printf '%s' "${s//"$dc"/"$dd"}"
+}
+
+# Makes file $1 if nothing, not even a dangling link, is there: noclobber
+# opens it with O_EXCL, which fails on a link. Mode 600.
+make_new() {
+  (
+    umask 077
+    set -o noclobber
+    : >"$1"
+  ) 2>/dev/null
+}
+
+# Writes file $1 from stdin, atomically: into a new mktemp file beside it,
+# then renamed over it, which replaces a link rather than following it (-T:
+# nor moves into a directory there). Reads all of stdin whatever fails, so
+# the writer feeding it never dies of SIGPIPE, which under pipefail and set
+# -e would end the run non-zero.
+replace_file() {
+  local tmp
+  # Mode 600 whatever the umask, so this run can write it.
+  if ! tmp="$(
+    umask 077
+    mktemp "$1.XXXXXX" 2>/dev/null
+  )"; then
+    cat >/dev/null 2>&1 || true
+    return 0
+  fi
+  if cat 2>/dev/null >"$tmp"; then
+    mv -fT -- "$tmp" "$1" 2>/dev/null || rm -f -- "$tmp" 2>/dev/null || true
+  else
+    cat >/dev/null 2>&1 || true
+    rm -f -- "$tmp" 2>/dev/null || true
+  fi
+}
+
+# Opens the log, for appending, on log_fd, and sets log_ok: made when
+# absent, used only when own_file. Fails, with no log_fd, for anything else:
+# a run that can't record its removals makes none (log_unusable).
+log_ok=""
+open_log() {
+  [ -z "${log_fd-}" ] || { exec {log_fd}>&-; } 2>/dev/null || true
+  log_fd=""
+  log_ok=""
+  if [ ! -e "$log" ] && [ ! -L "$log" ]; then
+    make_new "$log" || true
+  fi
+  if own_file "$log" && { exec {log_fd}>>"$log"; } 2>/dev/null; then
+    log_ok=1
+  else
+    log_fd=""
+    return 1
+  fi
+}
+log_unusable() {
+  echo "coldlogic-prune-worktrees: removed nothing: the log $(q "$log") isn't a regular file of yours with one name (a link, a hard link or another user's file, from a sudo run, say), so removals couldn't be logged; remove or fix that file" >&2
+  exit 0
+}
+
+# Stamps a run: a new empty file renamed over the stamp, so a link there,
+# soft or hard, is replaced rather than touched through.
+touch_stamp() {
+  local tmp
+  tmp="$(mktemp "$stamp.XXXXXX" 2>/dev/null)" || return 0
+  mv -fT -- "$tmp" "$stamp" 2>/dev/null || rm -f -- "$tmp" 2>/dev/null || true
+}
+
 if [ -n "$background" ] && [ -z "$dry_run" ]; then
-  if t="$(mtime "$stamp")" && [ $((now - t)) -ge 0 ] && [ $((now - t)) -lt 600 ]; then
+  # A stamp that is a link, or another user's, counts as none: it's replaced.
+  if own_file "$stamp" && t="$(mtime "$stamp")" && [ $((now - t)) -ge 0 ] && [ $((now - t)) -lt 600 ]; then
     exit 0
   fi
   # Stamped now, so the hooks and shells that start while this run works
   # don't each start one.
-  touch -- "$stamp" 2>/dev/null || true
+  touch_stamp
+  open_log || log_unusable
   {
     nohup "$BASH" "$0" --session-dir "$session_dir" --idle-minutes "$idle_minutes" \
-      </dev/null >>"$log" 2>&1 &
+      </dev/null >&"$log_fd" 2>&1 &
   } 2>/dev/null || true
   exit 0
 fi
 
+[ -n "$dry_run" ] || open_log || log_unusable
+
+# Appends line $1 to the log; fails when it wasn't recorded (the log can't
+# be used now, or the write failed).
+log_line() {
+  # Another run's trim renames a new file over the log, leaving this
+  # descriptor on the old one: open the path again (checked as at the
+  # start) when it no longer names the file open here.
+  if ! [ "$log" -ef "/dev/fd/$log_fd" ] 2>/dev/null; then
+    open_log || {
+      exec {log_fd}>/dev/null
+      return 1
+    }
+  fi
+  printf '%s %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$1" 1>&"$log_fd" 2>/dev/null
+}
 say() {
   if [ -n "$dry_run" ]; then
     echo "$*" >&2
   else
-    printf '%s %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$*" >>"$log" 2>/dev/null || true
+    log_line "$*" || true
   fi
+}
+# Records an intended removal before it is made: fails, and the caller skips
+# the removal, when the line can't be written.
+intend() {
+  [ -n "$dry_run" ] || log_line "$*"
 }
 
 # Why each candidate was kept: the last run's (prev_kept, from kept_file)
@@ -230,7 +355,9 @@ say() {
 # when it differs from the last run's, so an hourly run doesn't log the same
 # reasons again. A dry run prints every one.
 declare -A prev_kept=() kept=()
-if [ -z "$dry_run" ] && [ -f "$kept_file" ]; then
+# Not through a link: a run that skips writes the reasons back, so a link to
+# a file the sandbox can't read would copy it where the sandbox can.
+if [ -z "$dry_run" ] && own_file "$kept_file"; then
   while IFS=$'\t' read -r k v; do
     [ -z "$k" ] || prev_kept["$k"]="$v"
   done <"$kept_file" 2>/dev/null || true
@@ -247,20 +374,16 @@ keep() {
     say "$m"
   fi
 }
-# Writes this run's reasons to kept_file, atomically.
+# Writes this run's reasons to kept_file.
 save_kept() {
   local k
-  if {
+  {
     # Each array expansion is guarded: bash before 4.4 calls an empty one
     # unbound under set -u.
     for k in ${kept[@]+"${!kept[@]}"}; do
       printf '%s\t%s\n' "$k" "${kept[$k]}"
     done
-  } >"$kept_file.tmp.$$" 2>/dev/null; then
-    mv -f -- "$kept_file.tmp.$$" "$kept_file" 2>/dev/null || rm -f -- "$kept_file.tmp.$$"
-  else
-    rm -f -- "$kept_file.tmp.$$"
-  fi
+  } | replace_file "$kept_file" || true
 }
 
 # The worktrees, from `git worktree list --porcelain`, into wt_paths,
@@ -304,6 +427,7 @@ session_real="$(realpath -m -- "$session_dir" 2>/dev/null || true)"
 pwd_real="$(realpath -m -- "$start_pwd" 2>/dev/null || true)"
 cd "$main_real" || exit 0
 roots=("$(realpath -m -- "$main_real.worktrees")" "$(realpath -m -- "$main_real/.claude/worktrees")")
+roots_desc="$(q "$main_real.worktrees") and $(q "$main_real/.claude/worktrees")"
 
 # One run at a time. A lock whose owner is gone ("No such process": the
 # sandbox, or another user, can refuse a signal to a live one), or that
@@ -339,9 +463,13 @@ proc_start() {
 takeover="$lock.takeover"
 token="$$-$(date +%s%N)"
 my_start="$(proc_start $$ || true)"
-# The lock's owner token and start time, into owner and owner_start.
+# The lock's owner token and start time, into owner and owner_start. Read
+# only from a file of the user's with one name: the owner reaches the log,
+# so a pid planted as a link would copy its target's first line there. Any
+# other pid counts as no owner recorded.
 read_owner() {
   owner="" owner_start=""
+  own_file "$lock/pid" || return 0
   { IFS= read -r owner && IFS= read -r owner_start; } 2>/dev/null <"$lock/pid" || true
 }
 lock_stale() {
@@ -372,7 +500,12 @@ lock_stale() {
 # again, and lock_unwritable set.
 lock_unwritable=""
 write_owner() {
-  if printf '%s\n%s\n' "$token" "$my_start" >"$lock/pid" 2>/dev/null; then
+  # noclobber: the lock is new, so a pid file already there is a link put
+  # there since, never to be written through.
+  if (
+    set -o noclobber
+    printf '%s\n%s\n' "$token" "$my_start" >"$lock/pid"
+  ) 2>/dev/null; then
     return 0
   fi
   rm -rf -- "$lock" 2>/dev/null || true
@@ -418,11 +551,13 @@ if [ -z "$dry_run" ]; then
       kept["$k"]="${prev_kept[$k]}"
     done
     if [ -n "$lock_unwritable" ]; then
-      keep lock-write "skipped: couldn't write the lock's owner in $lock"
+      keep lock-write "skipped: couldn't write the lock's owner in $(q "$lock")"
       save_kept
     elif t="$(mtime "$lock")" && [ $((now - t)) -ge 3600 ]; then
       read_owner
-      keep lock "skipped: run ${owner:-with no owner recorded} has held the lock for over an hour"
+      by="with no owner recorded"
+      [ -z "$owner" ] || by="$(clean "$owner")"
+      keep lock "skipped: run $by has held the lock for over an hour"
       save_kept
     fi
     exit 0
@@ -527,8 +662,8 @@ in_main() {
   merged_pr "$1" "$2" || rc=$?
   case "$rc" in
     0) return 0 ;;
-    2) why="not in $base, and the merged PRs aren't known" ;;
-    *) why="not in $base, and no PR merged into $default_branch has it" ;;
+    2) why="not in $(q "$base"), and the merged PRs aren't known" ;;
+    *) why="not in $(q "$base"), and no PR merged into $(q "$default_branch") has it" ;;
   esac
   return 1
 }
@@ -632,7 +767,7 @@ is_clean() {
       '') ;;
       '!! '*)
         if ! regenerable "$wt" "${line#!! }"; then
-          why="ignored files that would be lost (${lost#"$wt"/})"
+          why="ignored files that would be lost ($(q "${lost#"$wt"/}"))"
           return 1
         fi
         ;;
@@ -708,7 +843,7 @@ cwd_in() {
   fi
   for d in ${cwds[@]+"${cwds[@]}"}; do
     if contains "$1" "$d"; then
-      why="a process works in it ($d)"
+      why="a process works in it ($(q "$d"))"
       return 0
     fi
   done
@@ -745,12 +880,17 @@ in_use() {
 # Deletes branch $1 if it still points at $2, with its config section.
 delete_branch() {
   local err
+  # The intent first: with no record the branch stays for the next run.
+  if ! intend "deleting branch $(q "$1") (was $2); to restore: $(printf 'git branch %q %q' "$1" "$2")"; then
+    keep "branch $1" "kept branch $(q "$1"): the log couldn't be written"
+    return 0
+  fi
   if err="$(git update-ref -d "refs/heads/$1" "$2" 2>&1)"; then
     git config --remove-section "branch.$1" 2>/dev/null || true
     # %q: the restore command pastes safely, whatever the name holds.
-    say "deleted branch $1 (was $2); to restore: $(printf 'git branch %q %q' "$1" "$2")"
+    say "deleted branch $(q "$1") (was $2); to restore: $(printf 'git branch %q %q' "$1" "$2")"
   else
-    keep "branch $1" "kept branch $1: it moved or couldn't be deleted: ${err//$'\n'/ }"
+    keep "branch $1" "kept branch $(q "$1"): it moved or couldn't be deleted: $(clean "$err")"
   fi
 }
 
@@ -874,7 +1014,7 @@ branch_goes() {
   if [ "$rc" = 2 ]; then
     why="the merged PRs aren't known"
   else
-    why="no PR merged into $default_branch has it as its head"
+    why="no PR merged into $(q "$default_branch") has it as its head"
   fi
   return 1
 }
@@ -965,20 +1105,20 @@ admin_loses() {
     fi
   done
   if [ -z "$admin" ]; then
-    why="its admin dir in $common/worktrees couldn't be found"
+    why="its admin dir in $(q "$common/worktrees") couldn't be found"
     return 0
   fi
   if ! h="$(git --git-dir="$admin" rev-parse -q --verify HEAD 2>/dev/null)"; then
-    why="its HEAD in $admin couldn't be read"
+    why="its HEAD in $(q "$admin") couldn't be read"
     return 0
   fi
   if ! git --git-dir="$admin" diff-index --cached --quiet "$h" -- 2>/dev/null; then
-    why="its index in $admin has staged changes (or couldn't be read)"
+    why="its index in $(q "$admin") has staged changes (or couldn't be read)"
     return 0
   fi
   # Not --all: that counts every worktree's HEAD, this one's too.
   if [ -n "$(git --git-dir="$admin" rev-list -n 1 "$h" --not --branches --tags --remotes 2>/dev/null || echo x)" ]; then
-    why="its HEAD in $admin is a commit no branch holds"
+    why="its HEAD in $(q "$admin") is a commit no branch holds"
     return 0
   fi
   reflog_unheld --git-dir="$admin"
@@ -994,12 +1134,14 @@ for ((i = 1; i < ${#wt_paths[@]}; i++)); do
   branch="${wt_branches[i]}"
   flags="${wt_flags[i]}"
   label="${branch:-detached}"
+  # The log's name for it.
+  desc="$(q "$path") ($(q "$label"))"
   key="worktree $path"
   why=""
   # Before prunable: git worktree prune leaves a locked one alone.
   case "$flags" in
     *locked*)
-      keep "$key" "kept worktree $path ($label): locked"
+      keep "$key" "kept worktree $desc: locked"
       continue
       ;;
     *prunable*)
@@ -1014,35 +1156,35 @@ for ((i = 1; i < ${#wt_paths[@]}; i++)); do
       ;;
   esac
   if ! real="$(realpath -e -- "$path" 2>/dev/null)"; then
-    keep "$key" "kept worktree $path ($label): its directory can't be resolved"
+    keep "$key" "kept worktree $desc: its directory can't be resolved"
     continue
   fi
   if ! under_roots "$real" || [ "$real" = "$main_real" ]; then
-    keep "$key" "kept worktree $path ($label): outside $main_real.worktrees and $main_real/.claude/worktrees"
+    keep "$key" "kept worktree $desc: outside $roots_desc"
     continue
   fi
   if [ -z "$head" ]; then
-    keep "$key" "kept worktree $path ($label): no HEAD"
+    keep "$key" "kept worktree $desc: no HEAD"
     continue
   fi
   # The in-main check first: it is cheap (the one gh-app call is made at
   # most once), and an unmerged worktree then skips the status scans.
   if ! in_main "$head" "$branch"; then
-    keep "$key" "kept worktree $path ($label): $why"
+    keep "$key" "kept worktree $desc: $why"
     continue
   fi
   # On a branch too: a commit made detached and left by switching back is
   # in no branch's reflog.
   if reflog_unheld -C "$real"; then
-    keep "$key" "kept worktree $path ($label): $why"
+    keep "$key" "kept worktree $desc: $why"
     continue
   fi
   if ! is_clean "$real"; then
-    keep "$key" "kept worktree $path ($label): $why"
+    keep "$key" "kept worktree $desc: $why"
     continue
   fi
   if in_use "$real"; then
-    keep "$key" "kept worktree $path ($label): $why"
+    keep "$key" "kept worktree $desc: $why"
     continue
   fi
   if [ -n "$dry_run" ]; then
@@ -1055,42 +1197,47 @@ for ((i = 1; i < ${#wt_paths[@]}; i++)); do
   # Just before the removal: no process has moved in, HEAD and the branch
   # are still what was checked, and the tree is still clean.
   if cwd_in "$real" fresh; then
-    keep "$key" "kept worktree $path ($label): $why"
+    keep "$key" "kept worktree $desc: $why"
     continue
   fi
   now_head="$(git -C "$real" rev-parse -q --verify HEAD 2>/dev/null || true)"
   now_tip="$head"
   [ -z "$branch" ] || now_tip="$(git rev-parse -q --verify "refs/heads/$branch" 2>/dev/null || true)"
   if [ "$now_head" != "$head" ] || [ "$now_tip" != "$head" ]; then
-    keep "$key" "kept worktree $path ($label): HEAD or its branch moved since the check"
+    keep "$key" "kept worktree $desc: HEAD or its branch moved since the check"
     continue
   fi
   if ! is_clean "$real"; then
-    keep "$key" "kept worktree $path ($label): $why, found just before the removal"
+    keep "$key" "kept worktree $desc: $why, found just before the removal"
     continue
   fi
   if reflog_unheld -C "$real"; then
-    keep "$key" "kept worktree $path ($label): $why, found just before the removal"
+    keep "$key" "kept worktree $desc: $why, found just before the removal"
+    continue
+  fi
+  # The intent first: with no record the worktree stays for the next run.
+  if ! intend "removing worktree $desc at $now_head; to restore: $(printf 'git worktree add %q %q' "$path" "$now_head")"; then
+    keep "$key" "kept worktree $desc: the log couldn't be written"
     continue
   fi
   if err="$(git worktree remove "$path" 2>&1)"; then
-    say "removed worktree $path ($label) at $now_head; to restore: $(printf 'git worktree add %q %q' "$path" "$now_head")"
+    say "removed worktree $desc at $now_head; to restore: $(printf 'git worktree add %q %q' "$path" "$now_head")"
     if [ -n "$branch" ]; then
       # Who holds the branch now, not at the start of the run.
       read_held || true
       if branch_follows "$branch" "$now_head" "$path"; then
         delete_branch "$branch" "$now_head"
       else
-        keep "branch $branch" "kept branch $branch: $why"
+        keep "branch $branch" "kept branch $(q "$branch"): $why"
       fi
     fi
   else
-    keep "$key" "kept worktree $path ($label): git worktree remove failed: ${err//$'\n'/ }"
+    keep "$key" "kept worktree $desc: git worktree remove failed: $(clean "$err")"
   fi
 done
 
-# The device number of path $1 (GNU stat, else BSD).
-device() { stat -c %d -- "$1" 2>/dev/null || stat -f %d -- "$1" 2>/dev/null; }
+# The device number of path $1 (GNU stat, as mtime's).
+device() { stat -c %d -- "$1" 2>/dev/null; }
 
 # Worktrees whose directory is gone. `git worktree prune` unregisters every
 # one, so it runs only when all of them lie under the roots, and each one's
@@ -1124,22 +1271,22 @@ if [ ${#gone[@]} -gt 0 ] || [ -n "$present" ]; then
     done
   done
   if [ -n "$present" ]; then
-    keep prune "skipped git worktree prune: git calls $present prunable, but it's still there (its .git file is missing)"
+    keep prune "skipped git worktree prune: git calls $(q "$present") prunable, but it's still there (its .git file is missing)"
   elif [ -n "$loses" ]; then
-    keep prune "skipped git worktree prune: $loses is gone, but $loses_why (moved by hand? git worktree repair <new path> re-registers it)"
+    keep prune "skipped git worktree prune: $(q "$loses") is gone, but $loses_why (moved by hand? git worktree repair <new path> re-registers it)"
   elif [ -n "$outside" ]; then
-    keep prune "skipped git worktree prune: $outside, outside $main_real.worktrees and $main_real/.claude/worktrees, is gone too"
+    keep prune "skipped git worktree prune: $(q "$outside"), outside $roots_desc, is gone too"
   elif [ -n "$missing" ]; then
-    keep prune "skipped git worktree prune: the directory holding $missing is gone too (an unmounted volume?)"
+    keep prune "skipped git worktree prune: the directory holding $(q "$missing") is gone too (an unmounted volume?)"
   elif [ -n "$elsewhere" ]; then
-    keep prune "skipped git worktree prune: $elsewhere is gone, and its root isn't on the main checkout's device (another volume?)"
+    keep prune "skipped git worktree prune: $(q "$elsewhere") is gone, and its root isn't on the main checkout's device (another volume?)"
   elif [ -n "$dry_run" ]; then
     for p in ${gone[@]+"${gone[@]}"}; do
       echo "unregister $p"
     done
   elif git worktree prune 2>/dev/null; then
     for p in ${gone[@]+"${gone[@]}"}; do
-      say "unregistered worktree $p: its directory was gone"
+      say "unregistered worktree $(q "$p"): its directory was gone"
     done
   else
     keep prune "git worktree prune failed"
@@ -1156,8 +1303,9 @@ if read_held; then
     # One a worktree has checked out is that worktree's business: no line.
     # Every other kept branch, the default one included, is logged.
     [ -z "${held[$name]-}" ] || continue
+    qname="$(q "$name")"
     if name_kept "$name"; then
-      keep "branch $name" "kept branch $name: $why"
+      keep "branch $name" "kept branch $qname: $why"
       continue
     fi
     if [ -e "$common/logs/$ref" ]; then
@@ -1168,7 +1316,7 @@ if read_held; then
       t="$(newest "$common/packed-refs")"
     fi
     if [ "$t" -gt "$cutoff" ]; then
-      keep "branch $name" "kept branch $name: moved within the last $idle_minutes minutes"
+      keep "branch $name" "kept branch $qname: moved within the last $idle_minutes minutes"
       continue
     fi
     rc=0
@@ -1176,11 +1324,11 @@ if read_held; then
     case "$rc" in
       0) ;;
       2)
-        keep "branch $name" "kept branch $name: the merged PRs aren't known"
+        keep "branch $name" "kept branch $qname: the merged PRs aren't known"
         continue
         ;;
       *)
-        keep "branch $name" "kept branch $name: no PR merged into $default_branch has it as its head"
+        keep "branch $name" "kept branch $qname: no PR merged into $(q "$default_branch") has it as its head"
         continue
         ;;
     esac
@@ -1191,7 +1339,7 @@ if read_held; then
     # A worktree made on it since the first read holds it now.
     read_held || true
     if held_elsewhere "$name"; then
-      keep "branch $name" "kept branch $name: $why"
+      keep "branch $name" "kept branch $qname: $why"
       continue
     fi
     delete_branch "$name" "$sha"
@@ -1201,7 +1349,7 @@ fi
 # Whether log line $1 records a removal, which trimming keeps.
 is_removal() {
   case "${1#* }" in
-    "removed worktree "* | "deleted branch "* | "unregistered worktree "*) return 0 ;;
+    "removed worktree "* | "deleted branch "* | "unregistered worktree "* | "removing worktree "* | "deleting branch "*) return 0 ;;
   esac
   return 1
 }
@@ -1210,30 +1358,26 @@ is_removal() {
 trim_log() {
   local -a lines
   local l n=0 i=0
-  [ -f "$log" ] || return 0
+  # Only the log this run wrote to, and not through a link since: the
+  # rewrite would copy the link's target where the sandbox can read it.
+  { [ -n "$log_ok" ] && own_file "$log"; } || return 0
   mapfile -t lines <"$log" 2>/dev/null || return 0
   for l in ${lines[@]+"${lines[@]}"}; do
     is_removal "$l" || n=$((n + 1))
   done
   [ "$n" -gt 1000 ] || return 0
-  if {
-    for l in ${lines[@]+"${lines[@]}"}; do
-      if is_removal "$l"; then
-        printf '%s\n' "$l"
-      else
-        i=$((i + 1))
-        [ "$i" -le $((n - 1000)) ] || printf '%s\n' "$l"
-      fi
-    done
-  } >"$log.tmp.$$" 2>/dev/null; then
-    mv -f -- "$log.tmp.$$" "$log" 2>/dev/null || rm -f -- "$log.tmp.$$"
-  else
-    rm -f -- "$log.tmp.$$"
-  fi
+  for l in ${lines[@]+"${lines[@]}"}; do
+    if is_removal "$l"; then
+      printf '%s\n' "$l"
+    else
+      i=$((i + 1))
+      [ "$i" -le $((n - 1000)) ] || printf '%s\n' "$l"
+    fi
+  done | replace_file "$log" || true
 }
 
 if [ -z "$dry_run" ]; then
-  touch -- "$stamp" 2>/dev/null || true
+  touch_stamp
   save_kept
   trim_log
 fi

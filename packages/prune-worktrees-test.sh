@@ -26,9 +26,19 @@ if ! realpath -ms / >/dev/null 2>&1; then
   exit 1
 fi
 root="$(realpath -e "$(mktemp -d)")"
+# $live: a `sleep` standing for a live lock owner. stop_live ends it; the
+# exit trap does too, so a case that fails or aborts leaks neither it nor
+# (with $root) its lock.
 live=""
+stop_live() {
+  if [ -n "$live" ]; then
+    kill "$live" 2>/dev/null || true
+    wait "$live" 2>/dev/null || true
+  fi
+  live=""
+}
 cleanup() {
-  [ -z "$live" ] || kill "$live" 2>/dev/null || true
+  stop_live
   rm -rf "$root"
 }
 trap cleanup EXIT
@@ -232,6 +242,19 @@ has_branch() { has_ref "refs/heads/$1"; }
 has_config() { [ -n "$(git -C "$main" config --get-regexp "^branch\.$1\." 2>/dev/null || true)" ]; }
 logged() { grep -qF -- "$1" "$main/.git/coldlogic-prune.log" 2>/dev/null; }
 exits() { [ "$code" = "$1" ]; }
+# wait_until <what> <command...>: polls for up to 30 seconds; on a timeout,
+# fails with a line saying what it waited for.
+wait_until() {
+  local what="$1"
+  shift
+  for _ in $(seq 1 60); do
+    ! "$@" || return 0
+    sleep 0.5
+  done
+  failed=$((failed + 1))
+  echo "FAIL timed out after 30s waiting until $what"
+}
+unlocked() { [ ! -e "$main/.git/coldlogic-prune.lock" ]; }
 quiet() { [ -z "$out" ] && [ -z "$err" ]; }
 
 # --- Only the project's own linked worktrees are candidates
@@ -446,8 +469,25 @@ merge_ff "$w"
 backdate "$w"
 sha="$(head_of "$w")"
 pr "$b" "$sha"
+# And one kept, unmerged, at a path with $( ) too, and a branch with no
+# worktree: every line naming them quotes the names (#82).
+w_removed="$w"
+# shellcheck disable=SC2016 # names, never expanded
+b2='k$(touch${IFS}pwned2)' d2='c$(touch${IFS}pwned3)'
+wt claude "$d2" "$b2"
+commit_in "$w" two
+w_kept="$w"
+w="$w_removed"
+# shellcheck disable=SC2016 # a branch name, never expanded
+b3='o`touch${IFS}pwned4`'
+git -C "$main" branch -q --no-track "$b3" origin/main
 prune
 check "(h3) a worktree and branch with shell characters: removed" gone "$w"
+check "(h3) ... the kept one's line quotes its path and branch" \
+  logged "kept worktree $(printf '%q (%q)' "$w_kept" "$b2"): not in"
+check "(h3) ... as the branch's with no worktree" logged "kept branch $(printf %q "$b3"): moved"
+check "(h3) ... and the removed one's" logged "removed worktree $(printf '%q (%q)' "$w" "$b") at $sha"
+check "(h3) ... no log line has an unquoted \$( or backquote" not grep -qE '(^|[^\\])(\$\(|`)' "$main/.git/coldlogic-prune.log"
 check "(h3) ... with its branch" not has_branch "$b"
 check "(h3) ... the worktree's restore command quoted" \
   logged "to restore: $(printf 'git worktree add %q %q' "$w" "$sha")"
@@ -1003,7 +1043,7 @@ backdate_branch 'feat]x'
 prune
 check "(u2e) a merged branch with a ']' in its name: kept" has_branch 'feat]x'
 check "(u2e) ... with its config section" has_config 'feat]x'
-check "(u2e) ... and why" logged "kept branch feat]x: its name has a ']', so its config section couldn't be removed"
+check "(u2e) ... and why, the name quoted" logged "kept branch feat\\]x: its name has a ']', so its config section couldn't be removed"
 
 fresh
 wt side x 'fix]y'
@@ -1181,9 +1221,7 @@ check "(A3) /proc: the owner's start time matches: kept" kept "$w"
 printf '%s\n%s\n' "$live" "ticks:17" >"$main/.git/coldlogic-prune.lock/pid"
 COLDLOGIC_PRUNE_PROC="$stub/proc" prune
 check "(A3) ... a reused pid (other start ticks): taken over" gone "$w"
-kill "$live" 2>/dev/null || true
-wait "$live" 2>/dev/null || true
-live=""
+stop_live
 
 if [ "$(id -u)" = 0 ]; then
   echo "skip (A4): root writes a file whatever its mode"
@@ -1340,10 +1378,7 @@ rm "$main/.git/coldlogic-prune.stamp"
 prune --session-dir "$w" --background
 check "(D3) ... a stale stamp: git runs" [ -s "$stub/calls" ]
 extra_path=""
-for _ in $(seq 1 60); do
-  [ -e "$main/.git/coldlogic-prune.lock" ] || break
-  sleep 0.5
-done
+wait_until "(D3)'s detached run releases the lock" unlocked
 
 fresh
 sleep 300 &
@@ -1353,9 +1388,7 @@ echo "$live" >"$main/.git/coldlogic-prune.lock/pid"
 prune --background
 sleep 1
 check "(D2) --background stamps the start, though its run can't finish" [ -e "$main/.git/coldlogic-prune.stamp" ]
-kill "$live" 2>/dev/null || true
-wait "$live" 2>/dev/null || true
-live=""
+stop_live
 
 fresh
 wt side x
@@ -1369,16 +1402,10 @@ check "(E) --background: exit 0" exits 0
 check "(E) ... at once" [ "$took" -le 2 ]
 check "(E) ... nothing printed" quiet
 check "(E) ... stamped at launch" [ -e "$main/.git/coldlogic-prune.stamp" ]
-for _ in $(seq 1 60); do
-  ! logged "removed worktree $w" || break
-  sleep 0.5
-done
+wait_until "(E)'s detached run logs its removal" logged "removed worktree $w"
 check "(E) ... and the detached run prunes" gone "$w"
-for _ in $(seq 1 60); do
-  [ -e "$main/.git/coldlogic-prune.lock" ] || break
-  sleep 0.5
-done
-check "(E) ... and finishes" [ ! -e "$main/.git/coldlogic-prune.lock" ]
+wait_until "(E)'s detached run releases the lock" unlocked
+check "(E) ... and finishes" unlocked
 
 fresh
 wt side x
@@ -1409,6 +1436,245 @@ check "(I) ... with this run's" logged "removed worktree $w (x)"
 check "(I) ... and the last 1000 other lines" [ "$(grep -c "kept filler" "$logf")" = 1000 ]
 check "(I) ... the newest of them" logged "kept filler 1500"
 check "(I) ... in order" [ "$(head -n 1 "$logf")" = "2000-01-01T00:00:00Z removed worktree /old (old) at 1234; to restore: git worktree add /old 1234" ]
+
+# --- Never writes through a link (#82)
+
+# A session in the sandbox can write the common dir; the run, outside it,
+# must not follow what it plants there. $target stands for ~/.zshrc.
+target="$root/target"
+# merged_wt <name>: a merged, clean, idle worktree in m.worktrees/; sets $w.
+merged_wt() {
+  wt side "$1"
+  commit_in "$w" one
+  merge_ff "$w"
+  backdate "$w"
+}
+# The target, with more than 1000 lines, so a trim would rewrite the log.
+plant_target() {
+  {
+    echo precious
+    for i in $(seq 1 1100); do echo "line $i"; done
+  } >"$target"
+  cp "$target" "$case_dir/target.orig"
+}
+untouched() { [ "$(cat "$target")" = "$(cat "$case_dir/target.orig")" ]; }
+no_tmp_left() { [ -z "$(find "$main/.git" -maxdepth 1 -name 'coldlogic-prune.*.??????')" ]; }
+
+# A log that can't be used: no removal (it couldn't be recorded), one line on
+# stderr, exit 0. A dry run writes nothing, so it still lists.
+one_line_err() { [ -z "$out" ] && [ -n "$err" ] && [ "$(wc -l <"$case_dir/stderr")" -eq 1 ]; }
+
+fresh
+merged_wt x
+plant_target
+ln -s "$target" "$main/.git/coldlogic-prune.log"
+prune
+check "(K) the log a link: exit 0, nothing removed" kept "$w"
+check "(K) ... one line on stderr, nothing on stdout" one_line_err
+check "(K) ... the link's target untouched" untouched
+check "(K) ... and the log still the link, not a copy of it" [ -L "$main/.git/coldlogic-prune.log" ]
+prune --dry-run
+check "(K) ... a dry run still lists it" grep -qF "worktree $w" <<<"$out"
+# --background: no detached run at all, so nothing is sent through the link.
+rm -f "$main/.git/coldlogic-prune.stamp"
+prune --background
+check "(K) ... --background: exit 0, one line on stderr" one_line_err
+# Time for a wrongly detached run to have done its work.
+sleep 2
+check "(K) ... no detached run: nothing removed" kept "$w"
+check "(K) ... and no lock taken" unlocked
+check "(K) ... the link's target still untouched" untouched
+check "(K) ... and no temporary file left" no_tmp_left
+
+# Dangling links for the stamp and the kept file: the run prunes and makes
+# nothing at their targets. A dangling log can't be used (K2b).
+fresh
+merged_wt x
+ln -s "$case_dir/new-stamp" "$main/.git/coldlogic-prune.stamp"
+ln -s "$case_dir/new-kept" "$main/.git/coldlogic-prune.kept"
+prune
+check "(K2) dangling links for the stamp and kept file: the run prunes" gone "$w"
+check "(K2) ... makes no file where the stamp's points" [ ! -e "$case_dir/new-stamp" ]
+check "(K2) ... nor the kept file's" [ ! -e "$case_dir/new-kept" ]
+own_kept_file() { [ -f "$main/.git/coldlogic-prune.kept" ] && [ ! -L "$main/.git/coldlogic-prune.kept" ]; }
+check "(K2) ... and replaces the kept file's link with its own file" own_kept_file
+
+fresh
+merged_wt x
+ln -s "$case_dir/new-log" "$main/.git/coldlogic-prune.log"
+prune
+check "(K2b) the log a dangling link: nothing removed" kept "$w"
+check "(K2b) ... one line on stderr" one_line_err
+check "(K2b) ... and no file made where it points" [ ! -e "$case_dir/new-log" ]
+
+fresh
+merged_wt x
+plant_target
+ln "$target" "$main/.git/coldlogic-prune.log"
+prune
+check "(K3) the log a hard link: nothing removed" kept "$w"
+check "(K3) ... one line on stderr" one_line_err
+check "(K3) ... and the other name's file untouched" untouched
+
+for kind in fifo dir; do
+  fresh
+  merged_wt x
+  case "$kind" in
+    fifo) mkfifo "$main/.git/coldlogic-prune.log" ;;
+    dir) mkdir "$main/.git/coldlogic-prune.log" ;;
+  esac
+  code=0
+  # Under a timeout: opening a FIFO to append blocks until a reader comes.
+  (cd "$run_dir" && PATH="$stubs:$PATH" STUB_DIR="$stub" timeout 60 bash "$script" \
+    </dev/null >"$case_dir/out" 2>&1) || code=$?
+  check "(K4) the log a $kind: exit 0" exits 0
+  check "(K4) ... one line printed" [ "$(wc -l <"$case_dir/out")" -eq 1 ]
+  check "(K4) ... and nothing removed" kept "$w"
+done
+
+# Another run's trim renames a new file over the log after this run opened
+# it: the run's lines still reach the log at its path.
+fresh
+merged_wt x
+logf="$main/.git/coldlogic-prune.log"
+on_recheck "cp $logf $logf.new && mv -f $logf.new $logf"
+prune
+check "(K11) the log replaced mid-run: the run removes the worktree" gone "$w"
+check "(K11) ... and its removal is in the log at the path" logged "removed worktree $w"
+check "(K11) ... its intent written before it" logged "removing worktree $w"
+
+# The log becomes unusable (a hard link) after the checks, before the
+# removal: no record can be written, so nothing is removed.
+fresh
+merged_wt x
+plant_target
+logf="$main/.git/coldlogic-prune.log"
+on_recheck "rm -f $logf && ln $target $logf"
+prune
+check "(K13) the log unusable just before a removal: exit 0" exits 0
+check "(K13) ... the worktree kept" kept "$w"
+check "(K13) ... with its branch" has_branch x
+check "(K13) ... and the other name's file untouched" untouched
+
+# A stamp that is a link counts as none: --background runs and replaces it.
+fresh
+merged_wt x
+printf 'x\n' >"$target"
+ln -s "$target" "$main/.git/coldlogic-prune.stamp"
+prune --background
+check "(K14) the stamp a link, fresh target: --background isn't skipped, replaces the link" \
+  not [ -L "$main/.git/coldlogic-prune.stamp" ]
+wait_until "(K14)'s detached run removes $w" not [ -e "$w" ]
+wait_until "(K14)'s detached run releases the lock" unlocked
+
+# The kept file a link to a file the sandbox can't read: a run skipped for
+# an old lock writes the last run's reasons back, which would copy it.
+fresh
+merged_wt x
+printf 'secret-key\tsecret-value\n' >"$target"
+cp "$target" "$case_dir/target.orig"
+ln -s "$target" "$main/.git/coldlogic-prune.kept"
+sleep 300 &
+live=$!
+mkdir "$main/.git/coldlogic-prune.lock"
+echo "$live" >"$main/.git/coldlogic-prune.lock/pid"
+touch -d '2 hours ago' "$main/.git/coldlogic-prune.lock"
+prune
+check "(K5) the kept file a link, a run skipped for an old lock: exit 0" exits 0
+check "(K5) ... the link's target untouched" untouched
+check "(K5) ... and not copied into the kept file" not grep -qF secret "$main/.git/coldlogic-prune.kept"
+check "(K5) ... nor the log" not logged secret
+stop_live
+
+# Free text in a log line (a git error, a lock's owner): readable, with its
+# spaces unescaped, and no live $( ) or backquote.
+fresh
+merged_wt x
+sleep 300 &
+live=$!
+# shellcheck disable=SC2016 # the owner's text, never expanded
+printf '%s-a $(touch pwned) `x`\n' "$live" >"$main/.git/coldlogic-prune.lock.owner"
+mkdir "$main/.git/coldlogic-prune.lock"
+mv "$main/.git/coldlogic-prune.lock.owner" "$main/.git/coldlogic-prune.lock/pid"
+touch -d '2 hours ago' "$main/.git/coldlogic-prune.lock"
+prune
+check "(K12) a lock owner with spaces, a \$( ) and backquotes: logged readably" \
+  logged "skipped: run $live-a \$ (touch pwned) 'x' has held the lock for over an hour"
+check "(K12) ... no unquoted \$( or backquote in the log" not grep -qE '(^|[^\\])(\$\(|`)' "$main/.git/coldlogic-prune.log"
+stop_live
+
+# The lock's pid a link to a file whose first line names a live process:
+# read through, it would keep an old lock and log that line.
+fresh
+merged_wt x
+sleep 300 &
+live=$!
+printf '%s-secret\nsecret-start\n' "$live" >"$target"
+cp "$target" "$case_dir/target.orig"
+mkdir "$main/.git/coldlogic-prune.lock"
+ln -s "$target" "$main/.git/coldlogic-prune.lock/pid"
+touch -h -d '2 hours ago' "$main/.git/coldlogic-prune.lock/pid"
+touch -d '2 hours ago' "$main/.git/coldlogic-prune.lock"
+prune
+check "(K7) the lock's pid a link, the lock 2 hours old: taken over as ownerless" gone "$w"
+check "(K7) ... exit 0, nothing printed" quiet
+check "(K7) ... the link's target untouched" untouched
+check "(K7) ... not logged" not logged secret
+check "(K7) ... and the lock released" unlocked
+stop_live
+fresh
+merged_wt x
+printf 'secret\n' >"$target"
+cp "$target" "$case_dir/target.orig"
+mkdir "$main/.git/coldlogic-prune.lock"
+ln -s "$target" "$main/.git/coldlogic-prune.lock/pid"
+prune
+check "(K7) ... a fresh lock so: kept, exit 0" exits 0
+check "(K7) ... the worktree waits" kept "$w"
+check "(K7) ... the link's target untouched" untouched
+check "(K7) ... and the lock left" [ -L "$main/.git/coldlogic-prune.lock/pid" ]
+
+# mktemp failing, with a log long enough to trim: the rewrite gives up
+# without killing its writer, so the run still exits 0.
+fresh
+merged_wt x
+logf="$main/.git/coldlogic-prune.log"
+pad="$(printf '%0300d' 0)"
+for i in $(seq 1 1500); do echo "2000-01-01T00:00:00Z kept filler $i $pad"; done >"$logf"
+mkdir -p "$case_dir/no-mktemp"
+printf '#!%s\nexit 1\n' "$BASH" >"$case_dir/no-mktemp/mktemp"
+chmod +x "$case_dir/no-mktemp/mktemp"
+extra_path="$case_dir/no-mktemp"
+prune
+extra_path=""
+check "(K8) mktemp fails, the log over 1000 lines: exit 0" exits 0
+check "(K8) ... nothing printed" quiet
+check "(K8) ... the run prunes" gone "$w"
+check "(K8) ... and logs it" logged "removed worktree $w"
+check "(K8) ... the log left untrimmed" [ "$(grep -c "kept filler" "$logf")" = 1500 ]
+check "(K8) ... and no temporary file left" no_tmp_left
+
+# Hard links for the stamp and the kept file: neither is touched or
+# written through, and each is replaced with a file of the run's own.
+fresh
+merged_wt x
+printf 'secret-key\tsecret-value\n' >"$target"
+touch -d '2 days ago' "$target"
+cp -p "$target" "$case_dir/target.orig"
+target_time="$(stat -c %Y "$target")"
+ln "$target" "$main/.git/coldlogic-prune.stamp"
+ln "$target" "$main/.git/coldlogic-prune.kept"
+prune
+one_name() { [ -f "$1" ] && [ ! -L "$1" ] && [ "$(stat -c %h "$1")" = 1 ]; }
+check "(K9) the stamp and kept file hard links: the run prunes" gone "$w"
+check "(K9) ... the other name's file untouched" untouched
+check "(K9) ... nor its time" [ "$(stat -c %Y "$target")" = "$target_time" ]
+check "(K9) ... the stamp now a file of its own" one_name "$main/.git/coldlogic-prune.stamp"
+check "(K9) ... so is the kept file" one_name "$main/.git/coldlogic-prune.kept"
+check "(K9) ... without the other file's lines" not grep -qF secret "$main/.git/coldlogic-prune.kept"
+
+# shellcheck disable=SC2016 # the script's text, never expanded
+check "(K6) no file is written at a predictable temporary name" not grep -qF '.tmp.$$' "$script"
 
 # --- Not a git repository, bad usage
 
