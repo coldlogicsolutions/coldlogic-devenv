@@ -14,7 +14,7 @@
 set -eu
 
 # Also run by hand inside a session, which sets these.
-unset CLAUDECODE CLAUDE_CODE_CHILD_SESSION COLDLOGIC_DEVENV_SESSION COLDLOGIC_WRAPPERS_RUN COLDLOGIC_START_WITHOUT_SETTINGS DEVENV_ROOT git_bin
+unset CLAUDECODE CLAUDE_CODE_CHILD_SESSION COLDLOGIC_DEVENV_SESSION COLDLOGIC_WRAPPERS_RUN COLDLOGIC_START_WITHOUT_SETTINGS DEVENV_ROOT DEVENV_DOTFILE DEVENV_STATE DEVENV_PROFILE DEVENV_RUNTIME git_bin
 
 script="$(cd "$(dirname "${1:?usage: claude-wrapper-test.sh <claude-wrapper.sh>}")" && pwd)/$(basename "$1")"
 root="$(mktemp -d)"
@@ -64,6 +64,7 @@ log="$STUB_LOG/claude"
   echo "CLAUDECODE=${CLAUDECODE-unset}"
   echo "session=${COLDLOGIC_DEVENV_SESSION-unset}"
   echo "wrappers=${COLDLOGIC_WRAPPERS_RUN-unset}"
+  echo "DEVENV_ROOT=${DEVENV_ROOT-unset}"
   echo "path=$PATH"
   for a in "$@"; do echo "arg=<$a>"; done
 } >>"$log"
@@ -77,6 +78,9 @@ exit "${STUB_CLAUDE_EXIT:-0}"'
   echo "args=$*"
   echo "CLAUDECODE=${CLAUDECODE-unset}"
   echo "session=${COLDLOGIC_DEVENV_SESSION-unset}"
+  for v in DEVENV_ROOT DEVENV_DOTFILE DEVENV_STATE DEVENV_PROFILE DEVENV_RUNTIME; do
+    echo "$v=${!v-unset}"
+  done
 } >>"$STUB_LOG/devenv"
 copy_stdin "$STUB_LOG/devenv-stdin"
 echo devenv-stdout
@@ -262,6 +266,19 @@ mkdir -p "$case_dir/other"
 extra=(DEVENV_ROOT="$case_dir/other")
 run
 check "(g2) git's top wins over DEVENV_ROOT" has devenv "cwd=$case_dir/proj"
+
+# (g3) the shell's devenv variables, which name another checkout, don't
+# reach the refresh; claude still gets them.
+fresh
+mkdir -p "$case_dir/other"
+extra=(DEVENV_ROOT="$case_dir/other" DEVENV_DOTFILE="$case_dir/other/.devenv" DEVENV_STATE="$case_dir/other/.devenv/state" DEVENV_PROFILE="$case_dir/other/profile" DEVENV_RUNTIME="$case_dir/other/run")
+run
+check "(g3) the refresh has no DEVENV_ROOT" has devenv "DEVENV_ROOT=unset"
+check "(g3) ... no DEVENV_DOTFILE" has devenv "DEVENV_DOTFILE=unset"
+check "(g3) ... no DEVENV_STATE" has devenv "DEVENV_STATE=unset"
+check "(g3) ... no DEVENV_PROFILE" has devenv "DEVENV_PROFILE=unset"
+check "(g3) ... no DEVENV_RUNTIME" has devenv "DEVENV_RUNTIME=unset"
+check "(g3) ... and claude keeps them" has claude "DEVENV_ROOT=$case_dir/other"
 
 # (h) git's top is no devenv project: the shell's own checkout.
 fresh

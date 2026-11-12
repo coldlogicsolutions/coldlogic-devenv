@@ -113,12 +113,21 @@ if [ -z "$checkout" ]; then
 fi
 
 # The refresh, in a subshell, so this directory and environment never
-# change. The two variables are cleared so the shell's session test lets the
-# file tasks run. It can't read the wrapper's input (a prompt piped to
-# `claude -p`) or write to its output (often captured); its stderr is what
-# the developer needs when it fails.
+# change. The two session variables are cleared so the shell's session test
+# lets the file tasks run. So is every DEVENV_ variable of the shell this
+# runs in: entered in another checkout, its DEVENV_ROOT, DEVENV_STATE and
+# the rest name that checkout, and devenv must work out this one from the
+# directory, as a terminal shell does. It can't read the wrapper's input (a
+# prompt piped to `claude -p`) or write to its output (often captured); its
+# stderr is what the developer needs when it fails.
+refresh() {
+  local -a shell_vars=("${!DEVENV_@}")
+  cd "$checkout" || return
+  unset CLAUDECODE COLDLOGIC_DEVENV_SESSION ${shell_vars[@]+"${shell_vars[@]}"}
+  exec devenv --quiet tasks run devenv:files
+}
 code=0
-(cd "$checkout" && unset CLAUDECODE COLDLOGIC_DEVENV_SESSION && exec devenv --quiet tasks run devenv:files) </dev/null >/dev/null || code=$?
+(refresh) </dev/null >/dev/null || code=$?
 
 # A refresh that succeeds is trusted: nothing printed, the link not looked
 # at. One that fails starts a session only with settings in place.

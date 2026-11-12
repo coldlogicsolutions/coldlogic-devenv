@@ -106,9 +106,10 @@ The spec's "Each status in `devenv.nix` is a single test of `CLAUDECODE`" become
 
 ### 4. The refresh is devenv's own file tasks, at the checkout's top
 
-`devenv --quiet tasks run devenv:files`, in a subshell: `cd` to the checkout, `unset CLAUDECODE COLDLOGIC_DEVENV_SESSION`, standard input from `/dev/null`, standard output to `/dev/null`, stderr left alone. The wrapper's own directory and environment never change.
+`devenv --quiet tasks run devenv:files`, in a subshell: `cd` to the checkout, `unset CLAUDECODE COLDLOGIC_DEVENV_SESSION` and every `DEVENV_` variable, standard input from `/dev/null`, standard output to `/dev/null`, stderr left alone. The wrapper's own directory and environment never change.
 
 - The two variables are cleared so the shared test (decision 2) lets the file tasks run. `CLAUDECODE` is the one an IDE terminal sets. The marker is already exported by then, for the real `claude`.
+- The shell's `DEVENV_` variables (`DEVENV_ROOT`, `DEVENV_DOTFILE`, `DEVENV_STATE`, `DEVENV_PROFILE` and the rest) are cleared too (review finding): a shell entered in the main checkout and moved into a worktree names the main checkout in them, and devenv could work on its state. Without them devenv works out the project from the directory, as a terminal shell does. The real `claude` still gets them.
 - Standard input: the wrapper's may be a prompt piped to `claude -p`. devenv must not be able to read it.
 - Standard output: `claude -p` output is often captured, and devenv printed JSON there (checked).
 - Stderr: with `--quiet` devenv says nothing unless it fails, and then its error is what the developer needs. The wrapper adds nothing on success (Derek's decision).
@@ -200,7 +201,7 @@ Neither change needs the other to land first.
 - **A silent wait.** `--quiet` and no message of our own means a cold refresh shows nothing until it ends. → Accepted (Derek's decision); a "refreshing…" line would land in every `claude -p` caller's stderr.
 - **A hung devenv hangs the launch.** → Ctrl-C ends both. The real binary is still reachable by its path, which the README says how to find.
 - **The profile isn't the shell's.** The refresh evaluates what `devenv.yaml` selects (`profile: developer`, which adopt.sh writes and direnv uses). A shell entered with other `--profile` flags gets a refresh for the yaml's profile. If that has no generated files, devenv has no `devenv:files` task, the refresh fails, and decision 5 applies. → Documented in the README's limits.
-- **The inherited environment misleads devenv.** `DEVENV_ROOT`, `DEVENV_STATE` and `DEVENV_DOTFILE` from another checkout's shell are in the refresh's environment. `devenv shell` ignored them (checked); `tasks run` is assumed to. → Task 6.3 checks the main checkout's links and state are untouched.
+- **The inherited environment misleads devenv.** `DEVENV_ROOT`, `DEVENV_STATE` and `DEVENV_DOTFILE` from another checkout's shell would be in the refresh's environment. → The refresh clears every `DEVENV_` variable (decision 4), and task 6.3 checks the main checkout's links and state are untouched.
 - **Two launches at once.** Two refreshes of one checkout run together. → A failure of either falls under decision 5, with the link normally present.
 - **Something on `PATH` calls `claude` often** (an IDE extension started from the shell, a script). Each call outside a session refreshes. → Output and input are protected (decision 4); the cost is the launch cost above.
 - **The shell's tests have no automated test.** The five uses of `inSession` are checked by reading the generated scripts (section 4), as the statuses are today.

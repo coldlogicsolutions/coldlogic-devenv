@@ -109,7 +109,7 @@ Tested by: `packages/claude-wrapper-test.sh` at build, with a stand-in `devenv`;
 - **THEN** stderr says nothing was refreshed, and Claude Code starts
 
 ### Requirement: The wrapper marks the session it starts
-The wrapper SHALL start Claude Code with `COLDLOGIC_DEVENV_SESSION=1` in its environment, on every path that starts it, so everything that session runs inherits the marker. The devenv run that refreshes the files SHALL NOT have the marker or `CLAUDECODE`.
+The wrapper SHALL start Claude Code with `COLDLOGIC_DEVENV_SESSION=1` in its environment, on every path that starts it, so everything that session runs inherits the marker. The devenv run that refreshes the files SHALL NOT have the marker, `CLAUDECODE`, or any `DEVENV_` variable of the shell the wrapper runs in, so devenv works out the checkout from its directory.
 
 Tested by: `packages/claude-wrapper-test.sh` at build.
 
@@ -120,6 +120,10 @@ Tested by: `packages/claude-wrapper-test.sh` at build.
 #### Scenario: The refresh itself
 - **WHEN** the wrapper runs devenv from an IDE terminal
 - **THEN** devenv's environment has neither `COLDLOGIC_DEVENV_SESSION` nor `CLAUDECODE`
+
+#### Scenario: A shell entered in another checkout
+- **WHEN** a shell entered in the main checkout has changed directory into a worktree, and the developer runs `claude`
+- **THEN** devenv's environment has none of that shell's `DEVENV_ROOT`, `DEVENV_DOTFILE`, `DEVENV_STATE`, `DEVENV_PROFILE` or other `DEVENV_` variables, and Claude Code gets them as the shell set them
 
 ### Requirement: The wrapper refreshes nothing inside a session
 Where `COLDLOGIC_DEVENV_SESSION` is set, or `CLAUDE_CODE_CHILD_SESSION` is, the wrapper SHALL NOT run devenv or write any file, and SHALL start Claude Code at once with the same arguments. Nothing else SHALL decide it. `CLAUDE_CODE_CHILD_SESSION` is the fallback for a session the wrapper didn't start.
