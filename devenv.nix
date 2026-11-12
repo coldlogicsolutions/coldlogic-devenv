@@ -7,6 +7,7 @@ let
   gh-app = import ./packages/gh-app.nix { inherit pkgs; };
   claude-guard = import ./packages/claude-guard.nix { inherit pkgs; };
   session-relink = import ./packages/session-relink.nix { inherit pkgs; };
+  prune-worktrees = import ./packages/prune-worktrees.nix { inherit pkgs gh-app; };
   claude-plugins-install = pkgs.writeShellApplication {
     name = "claude-plugins-install";
     runtimeInputs = with pkgs; [
@@ -177,6 +178,9 @@ in
         git
         openspec
         gh-app
+        # For `coldlogic-prune-worktrees --dry-run`; the hooks and the task
+        # below run it themselves.
+        prune-worktrees
       ];
 
       git-hooks.hooks.nixfmt.enable = true;
@@ -307,6 +311,24 @@ in
             )
           )
         }";
+      };
+
+      # Removes merged, idle worktrees and their branches
+      # (packages/prune-worktrees.sh). A session can't: its sandbox denies
+      # writes to a sibling worktree's `.git` and to `.git/worktrees/*`, so
+      # `git worktree remove` failed partway (#73). Hooks run outside the
+      # Bash sandbox. Each starts the prune detached and returns at once, so a
+      # session never waits on it or sees its output, and the prune outlives
+      # the session. SessionStart catches what merged since the last session,
+      # Stop what merged during a long one; a run within 10 minutes of the
+      # last makes either a no-op.
+      claude.code.hooks.coldlogic-prune-worktrees = {
+        hookType = "SessionStart";
+        command = "${prune-worktrees}/bin/coldlogic-prune-worktrees --hook --background";
+      };
+      claude.code.hooks.coldlogic-prune-worktrees-stop = {
+        hookType = "Stop";
+        command = "${prune-worktrees}/bin/coldlogic-prune-worktrees --hook --background";
       };
 
       # Merges with the definition claude.nix writes under the same key, which
@@ -576,6 +598,20 @@ in
           if [ -n "$latest" ] && [ "$latest" != "$locked" ]; then
             echo "coldlogic-devenv is behind (locked ''${locked:0:7}, latest ''${latest:0:7}); run: devenv update coldlogic-devenv" >&2
           fi
+          exit 0
+        '';
+        before = [ "devenv:enterShell" ];
+      };
+
+      # The same prune from a terminal shell, detached so the shell doesn't
+      # wait on it. Inside a session the sandbox would deny the removals, and
+      # the hooks above cover it; CI has nothing to clean. Never fails the
+      # shell.
+      tasks."coldlogic:prune-worktrees" = {
+        exec = ''
+          [ -z "''${CLAUDECODE:-}" ] || exit 0
+          [ -z "''${CI:-}" ] || exit 0
+          ${prune-worktrees}/bin/coldlogic-prune-worktrees --background --session-dir "$DEVENV_ROOT" || true
           exit 0
         '';
         before = [ "devenv:enterShell" ];

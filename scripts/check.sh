@@ -105,7 +105,7 @@ with_tools "shellcheck" shell_scripts_lint
 with_tools "openspec validate" openspec validate --all --strict
 
 # Builds this repository's shell, which builds every module package and so
-# runs claude-guard's and session-relink's build-time tests.
+# runs claude-guard's, session-relink's and prune-worktrees' build-time tests.
 step "build: shell" devenv build shell
 
 for fixture in tests/fixtures/*/; do
