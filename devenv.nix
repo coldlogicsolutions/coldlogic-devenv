@@ -56,7 +56,12 @@ in
       # or the `claude` wrapper before a session starts.
       sessionLinks = removeAttrs generatedLinks [ config.claude.code.settingsPath ];
       # `claude`, which checks the settings path after a failed refresh, in
-      # whichever checkout it starts: so relative to the checkout.
+      # whichever checkout it starts: so relative to the checkout. The option
+      # is absolute: devenv's src/modules/integrations/claude.nix (rev
+      # 9655d32, as locked) defaults it to
+      # "${config.devenv.root}/.claude/settings.json", and its `files` key is
+      # that path. So the root comes off here; a path a project sets outside
+      # its root stays absolute, which the wrapper checks as it is.
       claude-wrapper = import ./packages/claude-wrapper.nix {
         inherit pkgs;
         settingsPath = lib.removePrefix "${config.devenv.root}/" config.claude.code.settingsPath;

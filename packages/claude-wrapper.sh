@@ -29,7 +29,7 @@
 # application), `mktemp` and `rm` (`$mktemp_bin` and `$rm_bin`, likewise)
 # and `devenv` (the developer's own, from PATH). The built application also
 # sets `$settings_path`, the module's `claude.code.settingsPath` relative to
-# the checkout.
+# the checkout, or absolute when a project sets it outside its root.
 set -euo pipefail
 
 self="${BASH_SOURCE[0]}"

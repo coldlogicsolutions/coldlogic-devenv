@@ -413,6 +413,23 @@ check "(o3) custom settings path missing: exit 1" exits 1
 check "(o3) ... claude not started" absent claude
 check "(o3) ... names the custom file" contains stderr "$case_dir/proj/conf/claude.json is missing"
 
+# (o4) a settings path outside the checkout stays absolute (devenv.nix
+# strips only the checkout's own prefix): that file is checked, not one
+# under the checkout.
+fresh
+mkdir -p "$case_dir/elsewhere"
+echo '{}' >"$case_dir/elsewhere/claude.json"
+extra=(STUB_DEVENV_EXIT=3 "settings_path=$case_dir/elsewhere/claude.json")
+run
+check "(o4) absolute settings path there: claude ran" runs claude 1
+check "(o4) ... and stderr says they may be out of date" contains stderr "may be out of date"
+fresh
+extra=(STUB_DEVENV_EXIT=3 "settings_path=$case_dir/elsewhere/claude.json")
+run
+check "(o4) absolute settings path missing: exit 1" exits 1
+check "(o4) ... claude not started" absent claude
+check "(o4) ... names the absolute file, not one under the checkout" contains stderr "and $case_dir/elsewhere/claude.json is missing"
+
 # (p) no devenv on PATH is a failed refresh. PATH holds only the case's
 # directories, so no outer devenv can answer.
 fresh
