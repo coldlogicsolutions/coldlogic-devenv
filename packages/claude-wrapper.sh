@@ -120,10 +120,11 @@ checkout="$top"
 # the rest name that checkout, and devenv must work out this one from the
 # directory, as a terminal shell does. It can't read the wrapper's input (a
 # prompt piped to `claude -p`) or write to its output (often captured). Its
-# stderr is held in a file and shown only when it fails, when it is what the
-# developer needs; a refresh that works prints nothing, warnings included.
-# The file is removed before claude starts, or on any exit before. Without
-# one (mktemp fails), devenv's stderr goes straight through.
+# output, both streams (`devenv tasks run` prints a task's failure on
+# stdout), is held in a file and shown on stderr only when it fails, when it
+# is what the developer needs; a refresh that works prints nothing, warnings
+# included. The file is removed before claude starts, or on any exit
+# before. Without one (mktemp fails), both streams go straight to stderr.
 refresh() {
   local -a shell_vars=("${!DEVENV_@}")
   cd "$checkout" || return
@@ -138,9 +139,9 @@ else
 fi
 code=0
 if [ -n "$errlog" ]; then
-  (refresh) </dev/null >/dev/null 2>"$errlog" || code=$?
+  (refresh) </dev/null >"$errlog" 2>&1 || code=$?
 else
-  (refresh) </dev/null >/dev/null || code=$?
+  (refresh) </dev/null >&2 || code=$?
 fi
 
 # A refresh that succeeds is trusted: nothing printed, the link not looked

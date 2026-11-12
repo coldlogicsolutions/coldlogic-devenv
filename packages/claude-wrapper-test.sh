@@ -200,7 +200,7 @@ check "(a) devenv runs the file tasks" has devenv "args=--quiet tasks run devenv
 check "(a) ... without the marker" has devenv "session=unset"
 check "(a) claude has the marker" has claude "session=1"
 check "(a) stdout is only claude's" [ "$out" = claude-stdout ]
-check "(a) stderr is empty: devenv's is held back on success" empty_file stderr
+check "(a) stderr is empty: devenv's output is held back on success" empty_file stderr
 check "(a) ... and its file removed" tmp_clean
 check "(a) claude gets PATH unchanged" has claude "path=$path"
 
@@ -336,6 +336,8 @@ check "(k) ... with the exit code" contains stderr "exited 3"
 check "(k) ... and that they may be out of date" contains stderr "may be out of date"
 check "(k) ... and claude has the marker" has claude "session=1"
 check "(k) ... devenv's stderr shown" has stderr devenv-stderr
+check "(k) ... and its stdout, where a task's failure goes, on stderr" has stderr devenv-stdout
+check "(k) ... but not on claude's stdout" [ "$out" = claude-stdout ]
 check "(k) ... and its file removed" tmp_clean
 
 # (l) the refresh fails, no settings: refused.
@@ -348,6 +350,8 @@ check "(l) ... stderr says so" contains stderr "not starting claude"
 check "(l) ... names the settings" contains stderr "$case_dir/proj/.claude/settings.json"
 check "(l) ... and the override" contains stderr "COLDLOGIC_START_WITHOUT_SETTINGS=1 claude"
 check "(l) ... devenv's stderr shown" has stderr devenv-stderr
+check "(l) ... and its stdout" has stderr devenv-stdout
+check "(l) ... and nothing on stdout" [ -z "$out" ]
 check "(l) ... and its file removed on the refusal" tmp_clean
 
 # (m) a dangling settings link counts as missing.
@@ -414,17 +418,20 @@ fresh
 extra=(STUB_DEVENV_EXIT=0)
 run
 check "(q) refresh works, no settings: claude ran" runs claude 1
-check "(q) ... and nothing on stderr, devenv's included" empty_file stderr
+check "(q) ... and nothing on stderr, devenv's stdout and stderr included" empty_file stderr
+check "(q) ... nor on stdout but claude's" [ "$out" = claude-stdout ]
 check "(q) ... and its file removed" tmp_clean
 
-# (q2) without a file to hold it (mktemp fails), devenv's stderr goes
-# straight through, and the refresh still runs.
+# (q2) without a file to hold it (mktemp fails), devenv's output goes
+# straight to stderr, and the refresh still runs.
 fresh
 extra=(mktemp_bin="$case_dir/no-mktemp")
 run
 check "(q2) no mktemp: devenv ran" runs devenv 1
 check "(q2) ... claude ran" runs claude 1
 check "(q2) ... devenv's stderr went through" has stderr devenv-stderr
+check "(q2) ... and its stdout, to stderr" has stderr devenv-stdout
+check "(q2) ... stdout is only claude's" [ "$out" = claude-stdout ]
 
 # (r) the wrapper's directory twice on PATH.
 fresh
