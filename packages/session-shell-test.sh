@@ -116,6 +116,14 @@ check "(h) ... and silent" silent
 run CLAUDECODE=1 COLDLOGIC_SESSION_ROOT="$A" -- own-checkout
 check "(g) no devenv root: exit 0" exits 0
 check "(h) ... and silent" silent
+# The session test is devenv.nix's `inSession`: the wrapper's marker alone
+# counts, an empty one doesn't.
+run COLDLOGIC_DEVENV_SESSION=1 COLDLOGIC_SESSION_ROOT="$A" DEVENV_ROOT="$B" -- own-checkout
+check "(e2) the wrapper's marker alone is a session: exit 10" exits 10
+check "(h) ... and silent" silent
+run COLDLOGIC_DEVENV_SESSION= CLAUDECODE= COLDLOGIC_SESSION_ROOT="$A" DEVENV_ROOT="$B" -- own-checkout
+check "(a2) both variables empty: not a session, exit 0" exits 0
+check "(h) ... and silent" silent
 
 # --- notice and clear -----------------------------------------------------
 
@@ -156,6 +164,13 @@ run "${s1[@]}" -- notice k hello
 check "(m) ... then with s1: prints" printed hello
 run "${s1[@]}" -- notice k hello
 check "(m) ... then silent" quiet
+
+# A session the wrapper started, with its marker and no CLAUDECODE, is a
+# session here too: once per session.
+run COLDLOGIC_DEVENV_SESSION=1 CLAUDE_CODE_SESSION_ID=s1 DEVENV_STATE="$S" -- notice w hello
+check "(m2) the wrapper's marker alone: prints" printed hello
+run COLDLOGIC_DEVENV_SESSION=1 CLAUDE_CODE_SESSION_ID=s1 DEVENV_STATE="$S" -- notice w hello
+check "(m2) ... then silent" quiet
 
 run "${s1[@]}" -- clear k
 check "(n) clear: exit 0, no output" quiet

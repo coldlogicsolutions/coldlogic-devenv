@@ -30,11 +30,13 @@ usage() {
 }
 
 # Whether this is a Claude Code session: the script's only session test, and
-# the only place it reads CLAUDECODE. When the claude-wrapper change (#101)
-# lands, this is the one place to change, to the same condition as its
-# `inSession` in devenv.nix.
+# the only place it reads the session variables. It is the same condition as
+# `inSession` in devenv.nix, which a script can't use: the `claude` wrapper's
+# marker (packages/claude-wrapper.sh), or Claude Code's own variable, for a
+# session the wrapper didn't start. Change both together, and never make
+# either narrower than CLAUDECODE alone.
 in_session() {
-  [ -n "${CLAUDECODE:-}" ]
+  [ -n "${COLDLOGIC_DEVENV_SESSION:-}" ] || [ -n "${CLAUDECODE:-}" ]
 }
 
 # Every doubt answers "this is the session's own checkout", so a file that

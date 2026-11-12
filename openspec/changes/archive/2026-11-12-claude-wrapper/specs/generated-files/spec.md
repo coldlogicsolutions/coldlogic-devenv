@@ -59,9 +59,9 @@ Tested by: none. The settings path is left out of the session's linking in `deve
 ## ADDED Requirements
 
 ### Requirement: One test decides whether the shell is in a session
-The shell SHALL count as inside a session when `COLDLOGIC_DEVENV_SESSION`, the module's own marker, is set, or when `CLAUDECODE` is. Every step of the shell that depends on being in a session SHALL use that one test, defined once, and nothing else SHALL decide it. `CLAUDECODE` is the fallback for sessions the `claude` wrapper didn't start.
+The shell SHALL count as inside a session when `COLDLOGIC_DEVENV_SESSION`, the module's own marker, is set, or when `CLAUDECODE` is, the fallback for sessions the `claude` wrapper didn't start. Every step that depends on it SHALL use that test, defined once in `devenv.nix` and repeated only in `packages/session-shell.sh`; nothing else SHALL decide it.
 
-Tested by: none. `devenv.nix` defines the test once; the change's tasks search for any other.
+Tested by: `packages/session-shell-test.sh`, for the script's copy.
 
 #### Scenario: A session the wrapper started
 - **WHEN** a shell runs with `COLDLOGIC_DEVENV_SESSION=1` and no `CLAUDECODE`
