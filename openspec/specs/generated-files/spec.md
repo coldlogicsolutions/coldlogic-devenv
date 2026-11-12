@@ -325,13 +325,17 @@ Tested by: `packages/claude-wrapper-test.sh` at build.
 - **THEN** Claude Code starts, and the wrapper prints nothing
 
 ### Requirement: An interrupted refresh starts nothing
-When the wrapper receives SIGINT or SIGTERM while the refresh runs, it SHALL NOT start Claude Code, whatever devenv's exit code and the settings, and SHALL print one `coldlogic:` line on stderr, with the checkout and devenv's exit code, and exit 130. The exit code alone SHALL NOT count as an interruption: any non-zero exit without the signal is a failed refresh, as above.
+When the wrapper receives SIGINT or SIGTERM while the refresh runs, it SHALL pass the signal on to devenv at once and SHALL NOT start Claude Code, whatever devenv's exit code and the settings. It SHALL print one `coldlogic:` line on stderr, with the checkout, the signal and devenv's exit code, and exit 130 for SIGINT or 143 for SIGTERM. Any non-zero exit without the signal is a failed refresh, as above.
 
 Tested by: `packages/claude-wrapper-test.sh` at build.
 
 #### Scenario: Ctrl-C during the refresh
 - **WHEN** the wrapper gets SIGINT while devenv runs, devenv exits 1, and `.claude/settings.json` is there
 - **THEN** Claude Code isn't started, stderr has only one `coldlogic:` line saying the refresh was interrupted, the exit code is 130, and no file of the wrapper's is left in `TMPDIR`
+
+#### Scenario: SIGTERM to the wrapper alone, with devenv hung
+- **WHEN** devenv hangs and only the wrapper's process gets SIGTERM
+- **THEN** devenv is killed with SIGTERM, Claude Code isn't started, and the wrapper exits 143 at once
 
 #### Scenario: A high exit code without a signal
 - **WHEN** devenv exits 255, or 130, with no signal to the wrapper, and `.claude/settings.json` is there

@@ -23,7 +23,7 @@
 #
 # Exit codes: Claude Code's own; 1 when it refuses to start a session with
 # no settings; 127 when there is no Claude Code behind it on PATH; 130
-# when SIGINT or SIGTERM interrupted the refresh.
+# when SIGINT interrupted the refresh, 143 when SIGTERM did.
 #
 # It uses only bash builtins, `git` (`$git_bin`, a store path in the built
 # application), `mktemp` and `rm` (`$mktemp_bin` and `$rm_bin`, likewise)
@@ -140,8 +140,15 @@ checkout="$top"
 # is what the developer needs; a refresh that works prints nothing, warnings
 # included. The file is removed before claude starts, or on any exit
 # before. Without one (mktemp fails), both streams go straight to stderr.
+#
+# `tasks run` defaults to `--mode before`, so devenv:files:cleanup runs
+# first, as in the shell (devenv rev 9655d32: src/modules/files.nix gives
+# devenv:files `after = [ "devenv:files:cleanup" ]`).
 refresh() {
   local -a shell_vars=("${!DEVENV_@}")
+  # A background job of a script starts with SIGINT ignored; devenv gets
+  # both signals as it would from a terminal.
+  trap - INT TERM
   cd "$checkout" || return
   unset CLAUDECODE COLDLOGIC_DEVENV_SESSION ${shell_vars[@]+"${shell_vars[@]}"}
   exec devenv --quiet tasks run devenv:files
@@ -154,24 +161,46 @@ else
 fi
 # An interruption is told by the signal reaching the wrapper, not by
 # devenv's exit code: devenv may catch SIGINT and exit 1, and an ordinary
-# failure may exit 255. Ctrl-C reaches the whole foreground process group,
-# the wrapper with devenv. The subshell resets these traps, so devenv gets
-# the signals as it would from a terminal.
+# failure may exit 255. The refresh runs in the background so the wrapper
+# can take a signal at once, not only after devenv exits: it records the
+# signal and passes it on to devenv, which a signal sent to the wrapper
+# alone would otherwise miss. Ctrl-C reaches devenv too, from the terminal.
 code=0
-interrupted=""
-trap 'interrupted=1' INT TERM
+signal=""
+child=""
+on_signal() {
+  signal="$1"
+  if [ -n "$child" ]; then
+    kill -"$1" "$child" 2>/dev/null || true
+  fi
+}
+trap 'on_signal INT' INT
+trap 'on_signal TERM' TERM
 if [ -n "$errlog" ]; then
-  (refresh) </dev/null >"$errlog" 2>&1 || code=$?
+  (refresh) </dev/null >"$errlog" 2>&1 &
 else
-  (refresh) </dev/null >&2 || code=$?
+  (refresh) </dev/null >&2 &
 fi
+child=$!
+# A signal ends `wait` early, with devenv maybe still running: wait again,
+# until devenv has exited and its code is known.
+while :; do
+  code=0
+  wait "$child" || code=$?
+  if ! kill -0 "$child" 2>/dev/null; then
+    break
+  fi
+done
 trap - INT TERM
 
 # Interrupted: the developer meant to stop, or the machine did. Start
 # nothing, whatever the refresh's exit code and the settings. Its output
-# isn't shown; it is only the interruption.
-if [ -n "$interrupted" ]; then
-  echo "coldlogic: not starting claude: the refresh of the generated files in $checkout was interrupted (devenv tasks run devenv:files exited $code)." >&2
+# isn't shown; it is only the interruption. 130 for SIGINT, 143 for SIGTERM.
+if [ -n "$signal" ]; then
+  echo "coldlogic: not starting claude: the refresh of the generated files in $checkout was interrupted by SIG$signal (devenv tasks run devenv:files exited $code)." >&2
+  if [ "$signal" = TERM ]; then
+    exit 143
+  fi
   exit 130
 fi
 

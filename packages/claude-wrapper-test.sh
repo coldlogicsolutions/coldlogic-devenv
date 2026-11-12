@@ -93,6 +93,12 @@ echo devenv-stderr >&2
 if [ -n "${STUB_DEVENV_KILL:-}" ]; then
   kill -"$STUB_DEVENV_KILL" "$PPID"
 fi
+# A hung devenv: the wrapper'"'"'s and its own PID, then a sleep in its place.
+if [ -n "${STUB_DEVENV_HANG:-}" ]; then
+  echo "$PPID $$" >"$STUB_LOG/devenv-pids.tmp"
+  mv "$STUB_LOG/devenv-pids.tmp" "$STUB_LOG/devenv-pids"
+  exec sleep "$STUB_DEVENV_HANG"
+fi
 exit "${STUB_DEVENV_EXIT:-0}"'
   write_exe "$case_dir/stubs/git" '
 if [ "$1 $2" = "rev-parse --show-toplevel" ] && [ -n "${STUB_GIT_TOP:-}" ]; then
@@ -197,6 +203,8 @@ lines_are() {
   while IFS= read -r l || [ -n "$l" ]; do count=$((count + 1)); done <"$case_dir/log/$1"
   [ "$count" = "$2" ]
 }
+# gone <pid>: no process has that PID.
+gone() { [ -n "$1" ] && ! kill -0 "$1" 2>/dev/null; }
 
 # (a) the launch passes through; the refresh runs without the marker.
 fresh
@@ -471,19 +479,55 @@ run
 check "(q3) SIGINT, devenv exits 1: exit 130" exits 130
 check "(q3) ... claude not started" absent claude
 check "(q3) ... one line on stderr" lines_are stderr 1
-check "(q3) ... saying it was interrupted" contains stderr "was interrupted"
+check "(q3) ... saying it was interrupted" contains stderr "was interrupted by SIGINT"
 check "(q3) ... with devenv's code" contains stderr "exited 1"
 check "(q3) ... and nothing on stdout" [ -z "$out" ]
 check "(q3) ... and its file removed" tmp_clean
 
-# (q3b) SIGTERM the same.
+# (q3b) SIGTERM the same, but exit 143.
 fresh
 mkdir -p "$case_dir/proj/.claude"
 echo '{}' >"$case_dir/proj/.claude/settings.json"
 extra=(STUB_DEVENV_KILL=TERM STUB_DEVENV_EXIT=1)
 run
-check "(q3b) SIGTERM: exit 130" exits 130
+check "(q3b) SIGTERM: exit 143" exits 143
 check "(q3b) ... claude not started" absent claude
+check "(q3b) ... saying so" contains stderr "was interrupted by SIGTERM"
+
+# (q5) a hung devenv, and SIGTERM sent to the wrapper's process alone, not
+# its group: the wrapper passes it on to devenv and exits 143 at once, not
+# when devenv would have ended (30s; the run's timeout is 20s).
+fresh
+mkdir -p "$case_dir/proj/.claude"
+echo '{}' >"$case_dir/proj/.claude/settings.json"
+extra=(STUB_DEVENV_HANG=30)
+SECONDS=0
+(
+  run
+  echo "$code" >"$case_dir/code"
+) &
+bg=$!
+tries=0
+while [ ! -s "$case_dir/log/devenv-pids" ] && [ "$tries" -lt 100 ]; do
+  sleep 0.1
+  tries=$((tries + 1))
+done
+wrapper_pid=""
+devenv_pid=""
+if [ -s "$case_dir/log/devenv-pids" ]; then
+  read -r wrapper_pid devenv_pid <"$case_dir/log/devenv-pids"
+  kill -TERM "$wrapper_pid"
+fi
+wait "$bg" || true
+elapsed=$SECONDS
+code="$(<"$case_dir/code")"
+out=""
+check "(q5) hung devenv started" [ -n "$devenv_pid" ]
+check "(q5) SIGTERM to the wrapper alone: exit 143" exits 143
+check "(q5) ... promptly" [ "$elapsed" -lt 10 ]
+check "(q5) ... devenv killed" gone "$devenv_pid"
+check "(q5) ... claude not started" absent claude
+check "(q5) ... saying so" contains stderr "was interrupted by SIGTERM"
 
 # (q4) a high exit code with no signal is an ordinary failure: with the
 # settings there, claude starts with the warning.
