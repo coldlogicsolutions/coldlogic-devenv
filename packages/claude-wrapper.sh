@@ -182,6 +182,10 @@ else
   (refresh) </dev/null >&2 &
 fi
 child=$!
+# A signal before `child` was set was recorded but not passed on.
+if [ -n "$signal" ]; then
+  kill -"$signal" "$child" 2>/dev/null || true
+fi
 # A signal ends `wait` early, with devenv maybe still running: wait again,
 # until devenv has exited and its code is known.
 while :; do
@@ -195,9 +199,10 @@ trap - INT TERM
 
 # Interrupted: the developer meant to stop, or the machine did. Start
 # nothing, whatever the refresh's exit code and the settings. Its output
-# isn't shown; it is only the interruption. 130 for SIGINT, 143 for SIGTERM.
+# isn't shown; it is only the interruption, nor is its exit code, which may
+# be `wait`'s own. 130 for SIGINT, 143 for SIGTERM.
 if [ -n "$signal" ]; then
-  echo "coldlogic: not starting claude: the refresh of the generated files in $checkout was interrupted by SIG$signal (devenv tasks run devenv:files exited $code)." >&2
+  echo "coldlogic: not starting claude: the refresh of the generated files in $checkout (devenv tasks run devenv:files) was interrupted by SIG$signal." >&2
   if [ "$signal" = TERM ]; then
     exit 143
   fi

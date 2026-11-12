@@ -168,6 +168,8 @@ contains() {
   all="$(log "$1")"
   [[ $all == *"$2"* ]]
 }
+# lacks <log> <text>: the text is nowhere in the log.
+lacks() { ! contains "$1" "$2"; }
 absent() { [ ! -e "$case_dir/log/$1" ]; }
 # runs <log> <n>: the stand-in ran n times.
 runs() {
@@ -480,7 +482,7 @@ check "(q3) SIGINT, devenv exits 1: exit 130" exits 130
 check "(q3) ... claude not started" absent claude
 check "(q3) ... one line on stderr" lines_are stderr 1
 check "(q3) ... saying it was interrupted" contains stderr "was interrupted by SIGINT"
-check "(q3) ... with devenv's code" contains stderr "exited 1"
+check "(q3) ... without an exit code, which may be wait's" lacks stderr "exited"
 check "(q3) ... and nothing on stdout" [ -z "$out" ]
 check "(q3) ... and its file removed" tmp_clean
 

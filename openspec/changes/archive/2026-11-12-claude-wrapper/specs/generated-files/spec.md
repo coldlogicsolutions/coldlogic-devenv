@@ -202,7 +202,7 @@ Tested by: `packages/claude-wrapper-test.sh` at build.
 - **THEN** Claude Code starts, and the wrapper prints nothing
 
 ### Requirement: An interrupted refresh starts nothing
-When the wrapper receives SIGINT or SIGTERM while the refresh runs, it SHALL pass the signal on to devenv at once and SHALL NOT start Claude Code, whatever devenv's exit code and the settings. It SHALL print one `coldlogic:` line on stderr, with the checkout, the signal and devenv's exit code, and exit 130 for SIGINT or 143 for SIGTERM. Any non-zero exit without the signal is a failed refresh, as above.
+When the wrapper receives SIGINT or SIGTERM while the refresh runs, it SHALL pass the signal on to devenv at once and SHALL NOT start Claude Code, whatever devenv's exit code and the settings. It SHALL print one `coldlogic:` line on stderr, with the checkout and the signal but no exit code, and exit 130 for SIGINT or 143 for SIGTERM. Any non-zero exit without the signal is a failed refresh, as above.
 
 Tested by: `packages/claude-wrapper-test.sh` at build.
 
