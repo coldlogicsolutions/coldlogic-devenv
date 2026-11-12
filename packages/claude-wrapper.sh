@@ -21,7 +21,8 @@
 #   COLDLOGIC_WRAPPERS_RUN, with its own path added
 #
 # Exit codes: Claude Code's own; 1 when it refuses to start a session with
-# no settings; 127 when there is no Claude Code behind it on PATH.
+# no settings; 127 when there is no Claude Code behind it on PATH; the
+# refresh's own, 128 or more, when a signal stopped it.
 #
 # It uses only bash builtins, `git` (`$git_bin`, a store path in the built
 # application), `mktemp` and `rm` (`$mktemp_bin` and `$rm_bin`, likewise)
@@ -142,6 +143,14 @@ if [ -n "$errlog" ]; then
   (refresh) </dev/null >"$errlog" 2>&1 || code=$?
 else
   (refresh) </dev/null >&2 || code=$?
+fi
+
+# 128 and up: devenv was stopped by a signal (Ctrl-C, SIGTERM, an OOM
+# kill). The developer meant to stop, or the machine did: start nothing,
+# and pass the code on. Its output isn't shown; it is only the interruption.
+if [ "$code" -ge 128 ]; then
+  echo "coldlogic: not starting claude: the refresh of the generated files in $checkout was interrupted (devenv tasks run devenv:files exited $code)." >&2
+  exit "$code"
 fi
 
 # A refresh that succeeds is trusted: nothing printed, the link not looked

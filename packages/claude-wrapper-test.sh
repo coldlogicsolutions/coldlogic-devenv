@@ -186,6 +186,13 @@ args_are() {
 empty_file() { [ -f "$case_dir/log/$1" ] && [ ! -s "$case_dir/log/$1" ]; }
 # tmp_clean: the wrapper left nothing in the case's TMPDIR.
 tmp_clean() { [ -z "$(ls -A "$case_dir/tmp")" ]; }
+# lines_are <log> <n>: the log has exactly n lines.
+lines_are() {
+  local l count=0
+  [ -f "$case_dir/log/$1" ] || return 1
+  while IFS= read -r l || [ -n "$l" ]; do count=$((count + 1)); done <"$case_dir/log/$1"
+  [ "$count" = "$2" ]
+}
 
 # (a) the launch passes through; the refresh runs without the marker.
 fresh
@@ -432,6 +439,30 @@ check "(q2) ... claude ran" runs claude 1
 check "(q2) ... devenv's stderr went through" has stderr devenv-stderr
 check "(q2) ... and its stdout, to stderr" has stderr devenv-stdout
 check "(q2) ... stdout is only claude's" [ "$out" = claude-stdout ]
+
+# (q3) a refresh stopped by a signal (130: Ctrl-C) starts nothing, though
+# the settings are there, and passes the code on with one line.
+fresh
+mkdir -p "$case_dir/proj/.claude"
+echo '{}' >"$case_dir/proj/.claude/settings.json"
+extra=(STUB_DEVENV_EXIT=130)
+run
+check "(q3) interrupted refresh: exit 130" exits 130
+check "(q3) ... claude not started" absent claude
+check "(q3) ... one line on stderr" lines_are stderr 1
+check "(q3) ... saying it was interrupted" contains stderr "was interrupted"
+check "(q3) ... with the code" contains stderr "exited 130"
+check "(q3) ... and nothing on stdout" [ -z "$out" ]
+check "(q3) ... and its file removed" tmp_clean
+
+# (q4) 128, the lowest such code, the same; 127 (p) is a failure.
+fresh
+mkdir -p "$case_dir/proj/.claude"
+echo '{}' >"$case_dir/proj/.claude/settings.json"
+extra=(STUB_DEVENV_EXIT=128)
+run
+check "(q4) exit 128 stops too" exits 128
+check "(q4) ... claude not started" absent claude
 
 # (r) the wrapper's directory twice on PATH.
 fresh

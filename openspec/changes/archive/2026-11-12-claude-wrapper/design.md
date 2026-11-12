@@ -122,7 +122,7 @@ The checkout is `git rev-parse --show-toplevel` when that directory has a `deven
 
 *Rejected: refresh only when something looks stale.* Deciding that needs the evaluation, which is the cost.
 
-*Rejected: a timeout on the refresh.* A cold build legitimately takes minutes, and a timeout needs a tool on `PATH` or by store path. Ctrl-C stops the wrapper and devenv together.
+*Rejected: a timeout on the refresh.* A cold build legitimately takes minutes, and a timeout needs a tool on `PATH` or by store path. Ctrl-C stops the wrapper and devenv together, and a refresh stopped by a signal starts nothing (decision 5).
 
 ### 5. When the refresh fails
 
@@ -132,6 +132,7 @@ Derek's decision, made exact:
 - There: one `coldlogic:` line on stderr (the checkout, the exit code, "may be out of date", and `devenv shell` to see why), then start.
 - Missing: one line naming the file, what the session would lack, and `COLDLOGIC_START_WITHOUT_SETTINGS=1 claude`; exit 1. With the variable set to anything non-empty: one line, then start.
 - `devenv` missing from `PATH` is a failed refresh (the subshell exits 127), not a special case.
+- 128 or more is an interruption, not a failure (review fix R6): a signal stopped devenv (Ctrl-C, SIGTERM, an OOM kill). The developer, or the machine, meant to stop, so nothing starts whatever the settings: one `coldlogic:` line, without devenv's output, and the wrapper exits with that code. (bash usually ends the wrapper itself on a Ctrl-C that reaches both; this covers a signal sent to devenv alone, or one bash doesn't pass on.)
 - A refresh that succeeds is trusted (Derek's decision): no message, no look at the link.
 
 *Rejected: check the link after a successful refresh too.* A project that turns `claude.code` off would never be able to start `claude`, and a devenv that reports success without linking is devenv's bug to surface, not ours to guess at.
