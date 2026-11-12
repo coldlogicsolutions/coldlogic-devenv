@@ -106,9 +106,11 @@ fi
 
 # Commands that start no session read no project settings, so they don't
 # wait for a refresh or a settings check. Only the first argument counts:
-# `claude -p --version` is a prompt. Anything not listed refreshes.
+# `claude -p --version` is a prompt. Anything not listed refreshes, so a
+# new subcommand costs a wait, never a session without its settings. Not
+# listed, as they start sessions: `agents` and `respawn`.
 case "${1-}" in
-  --version | -v | --help | -h | update | doctor | mcp | config | auth | install | migrate-installer)
+  --version | -v | --help | -h | update | upgrade | doctor | mcp | config | auth | setup-token | install | migrate-installer | plugin | plugins | attach | logs | stop | kill | rm | purge | import | auto-mode | gateway | ultrareview)
     exec "$real" "$@"
     ;;
 esac

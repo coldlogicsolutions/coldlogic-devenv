@@ -101,16 +101,20 @@ Tested by: `packages/claude-wrapper-test.sh` at build, with a stand-in `devenv`;
 - **THEN** devenv's file tasks run, and Claude Code starts with `CLAUDECODE` as the terminal set it
 
 ### Requirement: The wrapper skips commands that start no session
-When the first argument is `--version`, `-v`, `--help`, `-h`, `update`, `doctor`, `mcp`, `config`, `auth`, `install` or `migrate-installer`, the wrapper SHALL start Claude Code at once, with the session marker but no refresh, no settings check and no message. Only the first argument SHALL count, and only as an exact match; anything else refreshes.
+When the first argument is exactly one of `--version`, `-v`, `--help`, `-h`, `update`, `upgrade`, `doctor`, `mcp`, `config`, `auth`, `setup-token`, `install`, `migrate-installer`, `plugin`, `plugins`, `attach`, `logs`, `stop`, `kill`, `rm`, `purge`, `import`, `auto-mode`, `gateway` or `ultrareview`, the wrapper SHALL start Claude Code at once, with the marker and no refresh, settings check or message. Anything else SHALL refresh.
 
 Tested by: `packages/claude-wrapper-test.sh` at build.
 
 #### Scenario: A command that starts no session
-- **WHEN** a developer runs `claude --version` or `claude mcp list` in a checkout where the refresh would fail and the settings are missing
+- **WHEN** a developer runs `claude --version`, `claude mcp list` or `claude plugin list` in a checkout where the refresh would fail and the settings are missing
 - **THEN** devenv isn't run, nothing is printed, and Claude Code starts with those arguments
 
 #### Scenario: Not the first argument
 - **WHEN** a developer runs `claude -p mcp` or `claude --model x mcp`
+- **THEN** the refresh runs first
+
+#### Scenario: A command that starts sessions
+- **WHEN** a developer runs `claude agents` or `claude respawn`
 - **THEN** the refresh runs first
 
 ### Requirement: The wrapper leaves other directories alone

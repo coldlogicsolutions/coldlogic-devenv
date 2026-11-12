@@ -104,7 +104,7 @@ The spec's "Each status in `devenv.nix` is a single test of `CLAUDECODE`" become
 
 `CLAUDECODE` can't be the wrapper's fallback: IDE extensions set it in their terminals, where the developer is about to start a session and the refresh must run.
 
-Outside a session, a first argument of `--version`, `-v`, `--help`, `-h`, `update`, `doctor`, `mcp`, `config`, `auth`, `install` or `migrate-installer` also starts the real `claude` at once (review fix R7, Derek's decision): those start no session and read no project settings, so they shouldn't wait for an evaluation or be refused. Only the first argument, exactly: `claude -p --version` is a prompt, and an option before the command (`--model x mcp`) refreshes, which costs a wait but never skips a session's refresh.
+Outside a session, a first argument of `--version`, `-v`, `--help`, `-h`, `update`, `upgrade`, `doctor`, `mcp`, `config`, `auth`, `setup-token`, `install`, `migrate-installer`, `plugin`, `plugins`, `attach`, `logs`, `stop`, `kill`, `rm`, `purge`, `import`, `auto-mode`, `gateway` or `ultrareview` also starts the real `claude` at once (review fixes R7 and R9, Derek's decision; R9's names from `claude --help`): those start no session and read no project settings, so they shouldn't wait for an evaluation or be refused. `agents` and `respawn` start sessions, so they refresh. Only the first argument, exactly: `claude -p --version` is a prompt, and an option before the command (`--model x mcp`) refreshes, which costs a wait but never skips a session's refresh. A subcommand Claude Code adds later refreshes until it's listed: a wait, never a session without its settings.
 
 ### 4. The refresh is devenv's own file tasks, at the checkout's top
 

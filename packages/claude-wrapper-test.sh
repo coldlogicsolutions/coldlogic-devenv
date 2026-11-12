@@ -482,7 +482,7 @@ done
 
 # (y) commands that start no session: no refresh and no settings check,
 # though the refresh would fail and the settings are missing.
-for cmd in --version -v --help -h update doctor mcp config auth install migrate-installer; do
+for cmd in --version -v --help -h update upgrade doctor mcp config auth setup-token install migrate-installer plugin plugins attach logs stop kill rm purge import auto-mode gateway ultrareview; do
   fresh
   extra=(STUB_DEVENV_EXIT=3)
   run "$cmd" extra-arg
@@ -506,10 +506,13 @@ fresh
 run -p 'mcp'
 check "(y2) -p mcp: devenv ran" runs devenv 1
 
-# (y3) a near miss refreshes: only exact names count.
-fresh
-run --versions
-check "(y3) --versions: devenv ran" runs devenv 1
+# (y3) a near miss refreshes: only exact names count. So do the commands
+# that start sessions.
+for cmd in --versions agents respawn; do
+  fresh
+  run "$cmd"
+  check "(y3) $cmd: devenv ran" runs devenv 1
+done
 
 # (r) the wrapper's directory twice on PATH.
 fresh
