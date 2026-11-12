@@ -1,7 +1,7 @@
 # generated-files Specification
 
 ## Purpose
-How `devenv shell` treats the generated links (`.claude/settings.json`, `.mcp.json`, `.pre-commit-config.yaml` and the rest) inside a Claude Code session, whose sandbox can't safely rewrite them. A session never runs devenv's file tasks or writes the settings link; it relinks the rest atomically and reports what it can't fix. A stale link mustn't break the shell or leave the session with no settings (#37, #94).
+How the generated links (`.claude/settings.json`, `.mcp.json`, `.pre-commit-config.yaml` and the rest) are kept current around a Claude Code session, whose sandbox can't safely rewrite them. A session never runs devenv's file tasks or writes the settings link; it relinks the rest atomically and reports what it can't fix. Outside a session, a terminal `devenv shell` refreshes them, and so does the `claude` wrapper before it starts one. A stale link mustn't break the shell or leave the session with no settings (#37, #94, #101).
 
 ## Requirements
 
