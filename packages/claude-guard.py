@@ -11,10 +11,32 @@ lexes each command as bash would, unwraps it, then:
   `perl -i`, `tee`, a `>` redirect, a script that opens a file for
   writing), pointing to the Edit and Write tools, which the project's rules
   allow without a prompt;
-- asks when a command inside matches an ask rule;
-- allows a command only when it is plain (no expansion, cd, redirect to a
-  file, config override or construct this doesn't follow) and every part of
-  it, unwrapped, matches the session's Bash allow rules;
+- asks when a command inside matches an ask rule, or when the call defines
+  a shell function (a call to it can't be followed). Every rule is matched
+  against each command of the call as written, wrapper included, and
+  unwrapped; a rule written with the wrapper also stands for its inner
+  command;
+- checks for denies, as a script, a heredoc or here-string body read by
+  anything not known to take it as data (a read-only filter, `git commit
+  -F -`, `gh-app ... --body-file -`, a tee to scratch files only);
+- denies hiding scripts/check.sh's exit status, in any call it can lex:
+  piping it (directly or through a shell) unless a plain top-level `set`
+  turns on pipefail first, following it with anything but `&& ...` at its
+  own nesting level (the operator after its subshell's `)` or group's `}`
+  counts; what a `&&` leads to may hold any), backgrounding it with `&`,
+  or running it inside a
+  command or process substitution (`$( )`, backticks, `<( )`, `>( )`);
+- allows a call only when its sequences (`&&`, `||`, `;`, newlines) and
+  pipelines are plain (no expansion but $TMPDIR, cd, loop, subshell, config
+  override or other construct this doesn't follow) and every command and
+  stage in them, optionally behind `devenv shell --`, is one an allow rule
+  names or one that only reads, with no option that opens an editor or
+  drops refs (a commit without a message, a forced fetch), no word
+  starting `-o` outside a few programs where it names no file, and no `o`
+  in a short cluster for the programs where it writes or runs one
+  (`unzip -qo`). Quoted heredoc
+  bodies are data, and redirects to a device or a scratch file outside the
+  project are fine;
 - otherwise leaves the call to Claude Code's own rules.
 
 The deny side is a backstop, not a boundary: a script can still do anything
@@ -61,7 +83,7 @@ GIT_RELOCATING = {"--git-dir", "--work-tree", "--namespace", "--exec-path",
 # as long as every argument stays inside the project (see read_only).
 READ_ONLY = {"pwd", "ls", "cat", "head", "tail", "grep", "wc", "cut",
              "tr", "echo", "printf", "true", "column", "basename",
-             "dirname"}
+             "dirname", "sort", "uniq", "jq", "set"}
 
 SECRET_NAMES = (".env", ".dev.vars")
 # Names a glob is tested against, to catch `cat .e*`.
@@ -71,12 +93,34 @@ SECRET_EXAMPLES = (".env", ".env.local", ".env.production", ".dev.vars")
 # gets no allow: the canonical commit message is handled before lexing.
 HEREDOC = re.compile(r"<<-?\s*(['\"]?)([A-Za-z_][A-Za-z0-9_]*)\1")
 PLACEHOLDER = "SUBSTITUTED"
-# What an allowed command may be piped into.
-PIPE_FILTERS = {"tail", "head", "grep", "wc"}
+# `$TMPDIR` or `${TMPDIR}` at the start of a word: the only expansion an
+# allowed command may hold (see tmpdir).
+TMPDIR_WORD = re.compile(r"\$(?:TMPDIR(?![A-Za-z0-9_])|\{TMPDIR\})")
+# A shell function's name, where a definition can start.
+FUNCTION_NAME = r"[A-Za-z_][A-Za-z0-9_.:-]*"
+# Where the bytes written to these go is no file of the project's.
+DEVICES = ("/dev/stdout", "/dev/stderr")
+
+
+def tmpdir(quoted):
+    """What `$TMPDIR` stands for in a word: the hook's own TMPDIR, else
+    /tmp. Both are scratch roots (see scratch), and the sandbox gives a
+    session a TMPDIR under one of them. None, so the word counts as an
+    expansion, when an unquoted value would be split or globbed."""
+    value = os.environ.get("TMPDIR") or "/tmp"
+    if not quoted and not re.fullmatch(r"[A-Za-z0-9_./-]+", value):
+        return None
+    return value
 
 
 class Unparsable(Exception):
     pass
+
+
+class Substitution(str):
+    """The text of a command or process substitution (`$(...)`, a backtick,
+    `<(...)`, `>(...)`), as lex hands it on among the inner scripts: its
+    status never becomes the call's."""
 
 
 class Command:
@@ -87,11 +131,21 @@ class Command:
         # Something the shell expands unquoted ($VAR, a glob, ~), so the
         # words aren't what runs.
         self.expands = False
-        # A file it reads from or writes to by redirection.
-        self.redirects = []
-        # The files among those it writes to.
-        self.writes = []
-        self.heredocs = []
+        # Each redirect to or from a file as (operator, target); /dev/null
+        # and descriptor duplication aren't kept.
+        self.redirect_ops = []
+        # The operator before it and the one that ended it (None at either
+        # end of the text), and how many `(` it sits inside.
+        self.after = None
+        self.ended_by = None
+        # When `)` ended it, the operator after that `)` (and any further
+        # closers): what leads on from the subshell it ends.
+        self.closed_by = None
+        # How many `(` that operator sits inside.
+        self.closed_depth = 0
+        self.depth = 0
+        # The next stage of its pipeline: the command its output goes to.
+        self.next = None
         # Heredoc bodies fed to an interpreter.
         self.scripts = []
         # Quoted strings in a script fed to an interpreter, checked as paths
@@ -100,8 +154,27 @@ class Command:
         # It runs a script this can't read.
         self.unread = False
 
+    @property
+    def redirects(self):
+        """The files it reads from or writes to by redirection."""
+        return [target for _, target in self.redirect_ops]
+
+    @property
+    def writes(self):
+        """The files among those it writes to."""
+        return [target for op, target in self.redirect_ops if op in WRITE_OPS]
+
     def __bool__(self):
-        return bool(self.words or self.redirects)
+        return bool(self.words or self.redirect_ops)
+
+
+# Redirect operators that write to their target.
+WRITE_OPS = (">", ">>", ">|", ">!", ">>!", ">&", "<>")
+# Words that close a compound command (`{ ...; } | sh`, `done | sh`): what
+# such a command pipes on is the output of every command inside it.
+GROUP_CLOSERS = ("}", "done", "fi", "esac")
+# Programs that run what they're given or read as commands.
+RUNS_INPUT = {"eval", "source", ".", "xargs", "exec"}
 
 
 def find_close(text, i, opener="(", closer=")"):
@@ -168,13 +241,28 @@ def skip_double(text, i):
 
 
 def lex(text):
-    """(commands, inner scripts): the simple commands in text, and the
-    bodies of substitutions and of heredocs fed to a shell, to be lexed and
-    checked on their own."""
-    commands, inner = [], []
+    """(commands, inner scripts, function names, scanned bodies): the simple
+    commands in text, the bodies of substitutions and of heredocs and
+    here-strings fed to a shell, to be lexed and checked on their own, the
+    shell functions text defines, and the bodies something other than a
+    known data consumer reads, to be checked for denies only."""
+    commands, inner, functions = [], [], set()
     cmd, word = Command(), None
     pending_redirect = None
     quoted = False
+    # The heredocs opened on the current line, in order, each with the
+    # command that opened it: their bodies follow the line's newline.
+    heredocs = []
+    # Every heredoc body read, with what it needs to judge it once the
+    # pipeline it feeds is known: (body, delimiter quoted, opening command).
+    bodies = []
+    # Pipelines: the command whose output the next command reads (GROUP for
+    # a compound command, `(...) |`), and the first stages fed by compound
+    # commands, which may hold any command of the text.
+    after, pipe_from, depth = None, None, 0
+    # The last command a `)` ended, until the operator after the closers.
+    closing = None
+    group_stages = []
     i = 0
 
     def end_word():
@@ -185,23 +273,52 @@ def lex(text):
         if pending_redirect is not None:
             op, pending_redirect = pending_redirect, None
             if op.startswith("<<") and not op.startswith("<<<"):
-                cmd.heredocs.append((word, was_quoted, op == "<<-"))
-            elif word != "/dev/null":
-                cmd.redirects.append(word)
-                if op in (">", ">>", ">|", ">!", ">>!", ">&", "<>"):
-                    cmd.writes.append(word)
+                heredocs.append((word, was_quoted, op == "<<-", cmd))
+            else:
+                if op == "<<<":
+                    # A here-string is a one-line body: judged by what reads
+                    # it, as a heredoc's is.
+                    bodies.append((word, True, cmd))
+                if word != "/dev/null":
+                    cmd.redirect_ops.append((op, word))
         else:
             cmd.words.append(word)
         word = None
 
-    def end_command():
-        nonlocal cmd
+    def end_command(op=None):
+        """Ends the current command at operator op. Returns it."""
+        nonlocal cmd, after, pipe_from, closing
         end_word()
         if pending_redirect is not None:
             raise Unparsable("redirection without a target")
+        ended = cmd
         if cmd:
+            closing = cmd if op == ")" else None
+        elif (op == ")" and closing is None and commands and commands[-1].depth == depth
+              and commands[-1].ended_by in (";", "\n")):
+            # `(a;)`: the `)` closes what the last command, ended by `;` or
+            # a newline, was in. One a `&` ended keeps it: `(a &) && b`
+            # backgrounds a whatever follows.
+            closing = commands[-1]
+        elif op != ")" and closing is not None:
+            if op != "(":
+                closing.closed_by, closing.closed_depth = op, depth
+            closing = None
+        if cmd:
+            cmd.after, cmd.ended_by, cmd.depth = after, op, depth
+            if pipe_from is not None:
+                if pipe_from is GROUP:
+                    group_stages.append(cmd)
+                else:
+                    pipe_from.next = cmd
+                pipe_from = None
             commands.append(cmd)
+        # A newline after an empty command (`a |` then a newline) keeps the
+        # operator before it.
+        if cmd or op != "\n":
+            after = op
         cmd = Command()
+        return ended
 
     def append(s):
         nonlocal word
@@ -213,29 +330,19 @@ def lex(text):
             end_word()
             i += 1
         elif c == "\n":
-            ended = cmd
-            end_command()
+            end_command("\n")
             i += 1
-            for delimiter, delimiter_quoted, strip_tabs in ended.heredocs:
+            # Every heredoc opened on the line, whichever command opened it
+            # (`cmd <<'EOF' | grep x` opens it in cmd, not grep), in order.
+            # What reads each body is judged at the end, once the rest of
+            # its pipeline (`cat <<'EOF' |`, a newline, the body, `sh`) is
+            # known.
+            opened, heredocs[:] = list(heredocs), []
+            for delimiter, delimiter_quoted, strip_tabs, ended in opened:
                 body, i = take_body(text, i, delimiter, strip_tabs)
-                programs = {os.path.basename(w) for w in ended.words}
-                if SHELLS & programs or pipes_to_shell(text):
-                    inner.append(body)
-                elif any(interpreter(p) for p in programs):
-                    # A script this can't read: no allow from here, so the
-                    # sandbox and Claude Code's rules decide it. A string in
-                    # it that looks like a path still can't name a secrets
-                    # file.
-                    ended.unread = True
-                    ended.scripts.append(body)
-                    ended.mentions.extend(
-                        m.group(2) for m in re.finditer(r"""(['"])([^'"\s]+)\1""", body)
-                        if "/" in m.group(2) or m.group(2).startswith("."))
-                    if not delimiter_quoted:
-                        # bash expands the body before the interpreter reads it.
-                        quoted_text(body, inner, ended)
-                elif not delimiter_quoted:
-                    # An unquoted delimiter: bash still expands the body.
+                bodies.append((body, delimiter_quoted, ended))
+                if not delimiter_quoted:
+                    # An unquoted delimiter: bash expands the body.
                     quoted_text(body, inner, ended)
         elif c == "#" and word is None:
             j = text.find("\n", i)
@@ -267,14 +374,15 @@ def lex(text):
             quoted = True
             i = j + 1
         elif c == '"':
+            at_start = word is None
             quoted = True
             j = skip_double(text, i + 1)
             body = text[i + 1:j - 1]
-            append(quoted_text(body, inner, cmd))
+            append(quoted_text(body, inner, cmd, at_start))
             i = j
         elif text.startswith("$(", i) or text.startswith("<(", i) or text.startswith(">(", i):
             j = find_close(text, i + 2)
-            inner.append(text[i + 2:j - 1])
+            inner.append(Substitution(text[i + 2:j - 1]))
             cmd.expands = True
             append(PLACEHOLDER)
             i = j
@@ -282,14 +390,34 @@ def lex(text):
             j = text.find("`", i + 1)
             if j < 0:
                 raise Unparsable("unclosed `")
-            inner.append(text[i + 1:j])
+            inner.append(Substitution(text[i + 1:j]))
             cmd.expands = True
             append(PLACEHOLDER)
             i = j + 1
         elif c == "$":
+            m = TMPDIR_WORD.match(text, i) if word is None else None
+            value = tmpdir(quoted=False) if m else None
+            if value is not None:
+                append(value)
+                i = m.end()
+            else:
+                cmd.expands = True
+                append("$")
+                i += 1
+        elif c == "(" and (m := re.match(r"\(\s*\)", text[i:])) and (
+                (word is not None and re.fullmatch(FUNCTION_NAME, word) and cmd.words in ([], ["function"]))
+                or (word is None and len(cmd.words) in (1, 2) and cmd.words[:-1] in ([], ["function"])
+                    and re.fullmatch(FUNCTION_NAME, cmd.words[-1]))):
+            # A function definition, `name()` or `name ()`: the call is one
+            # the guard can't follow, and a later call to name runs its body,
+            # not the program of that name. The body is lexed as commands.
+            if word is None:
+                word = cmd.words.pop()
+            functions.add(word)
+            word = None
             cmd.expands = True
-            append("$")
-            i += 1
+            end_command("()")
+            i += m.end()
         elif c in "*?[]{}" or (c in "~=" and word is None):
             # `=cmd` is zsh's path expansion: Claude Code runs zsh here.
             cmd.expands = True
@@ -315,7 +443,15 @@ def lex(text):
                 continue
             if op in ("(", ")"):
                 cmd.expands = True
-            end_command()
+            ended = end_command(op)
+            depth += {"(": 1, ")": -1}.get(op, 0)
+            if op in ("|", "|&"):
+                # A compound command's output (`(...) |`, `done |`) is that
+                # of every command inside it.
+                grouped = not ended or ended.words[:1] in [[w] for w in GROUP_CLOSERS]
+                pipe_from = GROUP if grouped else ended
+            elif op not in ("(", ")"):
+                pipe_from = None
             i += len(op)
         elif c in "<>":
             fd = word if word is not None and word.isdigit() else None
@@ -338,11 +474,130 @@ def lex(text):
             append(c)
             i += 1
     end_command()
-    return commands, inner
+    if heredocs:
+        raise Unparsable("unterminated heredoc")
+    for cmd in commands:
+        if cmd.words[:1] == ["function"] and len(cmd.words) > 1:
+            functions.add(cmd.words[1])
+    # What a compound command pipes on may come from any command in it.
+    grouped = [s for first in group_stages for s in stages(first)]
+    scanned = []
+    for body, delimiter_quoted, opener in bodies:
+        # The body goes to the command that opened it, and from there down
+        # the rest of its pipeline.
+        readers = [opener] + stages(opener.next) + grouped
+        kinds = [reader_kind(opener)] + [stage_kind(s) for s in readers[1:]]
+        if "shell" in kinds:
+            # Checked as commands, as the shell will run it.
+            inner.append(body)
+            continue
+        if not all(data_consumer(r) for r in readers):
+            # Something reads it that this can't say takes it as data (tcsh,
+            # ssh, sqlite3, awk -f -...): its denies are checked as if it
+            # were a script. Approval is decided as below.
+            scanned.append(body)
+        if "interpreter" in kinds:
+            # A script this can't read: no allow from here, so the sandbox
+            # and Claude Code's rules decide it. A string in it that looks
+            # like a path still can't name a secrets file.
+            opener.unread = True
+            opener.scripts.append(body)
+            opener.mentions.extend(
+                m.group(2) for m in re.finditer(r"""(['"])([^'"\s]+)\1""", body)
+                if "/" in m.group(2) or m.group(2).startswith("."))
+        elif "unknown" in kinds:
+            # A program this can't say only reads the body: data, but no
+            # allow from here.
+            opener.unread = True
+    return commands, inner, functions, scanned
 
 
-def pipes_to_shell(text):
-    return bool(re.search(r"\|\s*(bash|sh|zsh|dash)\b", text))
+# Stands for a compound command as the command a pipeline reads from.
+GROUP = object()
+
+
+def stages(first):
+    """first and the pipeline stages after it."""
+    out = []
+    while first is not None:
+        out.append(first)
+        first = first.next
+    return out
+
+
+def reader_kind(cmd):
+    """What a command does with a heredoc body it reads: "shell" (runs it as
+    commands, or might: a program named by an expansion), "interpreter",
+    "data" (the opener, or a stage that only reads), or "unknown"."""
+    if not cmd.words:
+        return "data"
+    if re.search(r"[$*?\[{~]", cmd.words[0]) or PLACEHOLDER in cmd.words[0]:
+        # A program the shell picks by expanding a word (`"$SHELL"`, `/bin/?sh`).
+        return "shell"
+    words = [v for w in cmd.words for v in expand_braces(w)]
+    names = {os.path.basename(w) for w in words}
+    if SHELLS & names or RUNS_INPUT & names:
+        return "shell"
+    if any(interpreter(n) for n in names):
+        return "interpreter"
+    return "data"
+
+
+def stage_kind(cmd):
+    """reader_kind for a later stage of a pipeline, which must also be a
+    program that only reads."""
+    kind = reader_kind(cmd)
+    if kind != "data" or not cmd.words:
+        return kind
+    unwrapped = unwrap(cmd.words)
+    if unwrapped.opaque or not unwrapped.commands or not all(
+            os.path.basename(w[0]) in READ_ONLY for w in unwrapped.commands):
+        return "unknown"
+    return "data"
+
+
+def data_consumer(cmd):
+    """Whether a command reading a heredoc or here-string body surely takes
+    it as data: a read-only filter, a body flag reading stdin (`git commit
+    -F -`, `gh-app ... --body-file -`), or a tee to scratch files only.
+    Anything else (tcsh, ssh, sqlite3,
+    `awk -f -`) might run it."""
+    if not cmd.words:
+        return True
+    try:
+        words = [v for w in cmd.words for v in expand_braces(w)]
+        unwrapped = unwrap(words)
+        commands = unwrapped.commands
+    except Unparsable:
+        commands = [normalize_git_loosely(cmd.words)]
+    return bool(commands) and all(reads_as_data(w) for w in commands)
+
+
+def reads_as_data(words):
+    """data_consumer for one unwrapped command."""
+    prog = os.path.basename(words[0]) if words else ""
+    if prog in READ_ONLY:
+        return True
+    args = words[1:]
+    pairs = list(zip(args, args[1:] + [None]))
+    if prog == "git":
+        args = normalize_git_loosely(words)[1:]
+        pairs = list(zip(args, args[1:] + [None]))
+        return args[:1] in (["commit"], ["tag"]) and any(
+            (w == "--file" or re.match(r"^-[A-Za-z]*F\Z", w)) and nxt == "-"
+            or w == "--file=-" or re.match(r"^-[A-Za-z]*F-\Z", w)
+            for w, nxt in pairs)
+    if prog in ("gh", "gh-app"):
+        return any((w in ("--body-file", "-F") and nxt == "-") or w in ("--body-file=-", "-F-")
+                   for w, nxt in pairs)
+    if prog == "tee":
+        # A copy to scratch files only, as a `>` redirect there would be
+        # (see safe_redirect): `tee "$TMPDIR/notes.md" <<'EOF'`.
+        operands = listed_options(args, "aip", "", {"--append": False, "--ignore-interrupts": False,
+                                                    "--output-error": True}, set(), True)
+        return operands is not None and all(safe_redirect(">", t) for t in operands)
+    return False
+
 
 def take_body(text, i, delimiter, strip_tabs):
     """(a heredoc's body, the index after its closing line). Only `<<-`
@@ -360,9 +615,15 @@ def take_body(text, i, delimiter, strip_tabs):
     raise Unparsable("unterminated heredoc")
 
 
-def quoted_text(body, inner, cmd):
-    """A double-quoted string's text, its substitutions taken out."""
+def quoted_text(body, inner, cmd, at_start=False):
+    """A double-quoted string's text, its substitutions taken out. A
+    `$TMPDIR` opening the string at the start of a word stands for its value
+    (see tmpdir)."""
     out, i = [], 0
+    m = TMPDIR_WORD.match(body) if at_start else None
+    if m:
+        out.append(tmpdir(quoted=True))
+        i = m.end()
     while i < len(body):
         c = body[i]
         if c == "\\" and i + 1 < len(body):
@@ -370,7 +631,7 @@ def quoted_text(body, inner, cmd):
             i += 2
         elif body.startswith("$(", i):
             j = find_close(body, i + 2)
-            inner.append(body[i + 2:j - 1])
+            inner.append(Substitution(body[i + 2:j - 1]))
             cmd.expands = True
             out.append(PLACEHOLDER)
             i = j
@@ -378,7 +639,7 @@ def quoted_text(body, inner, cmd):
             j = body.find("`", i + 1)
             if j < 0:
                 raise Unparsable("unclosed `")
-            inner.append(body[i + 1:j])
+            inner.append(Substitution(body[i + 1:j]))
             cmd.expands = True
             out.append(PLACEHOLDER)
             i = j + 1
@@ -404,23 +665,100 @@ class Unwrapped:
         # Files redirected to, and scripts fed to an interpreter on stdin.
         self.writes = []
         self.scripts = []
+        # Shell functions the text defines.
+        self.functions = set()
+        # The ids of the commands among self.commands run by their own name,
+        # not through a wrapper (`command gh` runs the program gh): where a
+        # function of that name is defined, they call it.
+        self.direct = set()
+        # Each command that has a wrapper, as (its words as written, wrapper
+        # included, the commands it unwraps to, whether something about it
+        # rules out an allow): rules are matched against both spellings.
+        self.written = []
+        # Bodies of heredocs and here-strings read by something not known
+        # to take them as data, each analysed (or read roughly) as a script:
+        # checked for denies only (see scan, which also sets .rough).
+        self.scanned = []
+        self.rough = []
+        # scripts/check.sh is piped on with pipefail off, hiding its status.
+        self.gate_piped = False
+        # scripts/check.sh is followed by `||`, `;`, a newline or `&` and
+        # another command, so the call's status isn't the gate's.
+        self.gate_hidden = False
+        # The text runs scripts/check.sh somewhere.
+        self.gate = False
 
-    def add(self, other):
+    def add(self, other, direct=True):
+        """Merge other in. direct=False: other's commands are run by a
+        program (find -exec, bash -c), which no shell function reaches."""
         self.commands.extend(other.commands)
         self.writes.extend(other.writes)
         self.scripts.extend(other.scripts)
         self.opaque |= other.opaque
         self.wrapped |= other.wrapped
+        self.functions |= other.functions
+        self.gate_piped |= other.gate_piped
+        self.gate_hidden |= other.gate_hidden
+        self.gate |= other.gate
+        self.written.extend(other.written)
+        self.scanned.extend(other.scanned)
+        if direct:
+            self.direct |= other.direct
+
+
+def safe_redirect(op, target):
+    """Whether an output redirect writes only where no file of the project's
+    is: a device, or a scratch file outside every checkout of the project,
+    by its resolved path. A path with `..` in it is never one."""
+    if op not in (">", ">>"):
+        return False
+    if target in DEVICES:
+        return True
+    return (".." not in target.split("/") and scratch(target)
+            and not project_file(target) and not in_checkout(target))
+
+
+def in_checkout(path):
+    """Whether an absolute path resolves inside the project's root or the
+    checkout the command runs in, scratch directory or not."""
+    cwd, root = WORKING["cwd"], WORKING["root"]
+    if not root or not path.startswith("/"):
+        return False
+    real = os.path.realpath(path)
+    bases = {os.path.realpath(root)}
+    if cwd:
+        bases.add(checkout_of(cwd) or os.path.realpath(cwd))
+    return any(real == b or real.startswith(b + os.sep) for b in bases)
 
 
 def analyse(text):
     """Every command text runs, unwrapped, as an Unwrapped."""
     result = Unwrapped()
-    commands, inner = lex(text)
+    commands, inner, functions, scanned = lex(text)
+    result.functions |= functions
+    if functions:
+        result.opaque = True
     for script in inner:
-        result.add(analyse(script))
-    for cmd in commands:
-        if cmd.expands or cmd.redirects or cmd.unread:
+        sub = analyse(script)
+        if isinstance(script, Substitution) and sub.gate:
+            # A substitution's status is never the call's: `x=$(gate); ...`,
+            # `echo "$(gate)"`.
+            result.gate_hidden = True
+        result.add(sub)
+    for body in scanned:
+        sub = scan(body)
+        result.scanned.append(sub)
+        result.scanned.extend(sub.scanned)
+    # The gate check: scripts/check.sh's status must be the call's. A gate
+    # piped on with pipefail off (see pipefail_after), directly or in a
+    # group or subshell that is (in_pipeline), or run through a shell in a
+    # pipe hides it
+    # (gate_piped); so does any command after it that `||`, `;`, a newline
+    # or `&` leads to, the operator after a subshell's `)` included, or
+    # running it in a substitution (gate_hidden). Only `&& ...` may follow it.
+    pipefail, followed = False, True
+    for k, cmd in enumerate(commands):
+        if cmd.expands or cmd.unread or not all(safe_redirect(op, t) for op, t in cmd.redirect_ops):
             result.opaque = True
         result.writes.extend(cmd.writes)
         result.scripts.extend(cmd.scripts)
@@ -430,13 +768,176 @@ def analyse(text):
         if cmd.words:
             words = [v for w in cmd.words for v in expand_braces(w)]
             if words:
-                result.add(unwrap(words))
+                unwrapped = unwrap(words)
+                if unwrapped.wrapped:
+                    result.written.append((words, unwrapped.commands, unwrapped.opaque or cmd.expands
+                                           or cmd.unread
+                                           or not all(safe_redirect(op, t) for op, t in cmd.redirect_ops)))
+                result.add(unwrapped)
+                if any(is_gate(w) for w in unwrapped.commands + [words]):
+                    result.gate = True
+                    if in_pipeline(commands, k) and not pipefail:
+                        result.gate_piped = True
+                    if hides_status(commands, k):
+                        result.gate_hidden = True
+        pipefail, followed = pipefail_after(cmd, pipefail, followed)
     return result
+
+
+def hides_status(commands, k):
+    """Whether a command after commands[k] that `||`, `;`, a newline or `&`
+    leads to runs last, or a `&` backgrounds commands[k]'s list, so the
+    call's status may not be commands[k]'s.
+    Only operators at the gate's own nesting level count, and, once the
+    gate is the last command of its group or subshell, those at the level
+    that closes into: what a `&&` leads to may hold any operators inside
+    (`gate && { a; b; }`), and `{ gate; } && x` keeps the gate's status.
+    For a command a `)` ends, the operator after the closers counts."""
+    if commands[k].ended_by == "&":
+        # Backgrounded at any depth (`(gate &) && x`): its status is lost.
+        return True
+    levels, closes, after = nesting(commands)
+    current = levels[k]
+    for j in range(k, len(commands)):
+        op = leads_on(commands[j])[0]
+        if after[j] > current:
+            # Inside a compound command a `&&` (or the gate's own group) led
+            # to: its status is the compound's, decided at its closer.
+            continue
+        current = after[j]
+        if op == "&":
+            # Backgrounded at the gate's level, last or not: the call's
+            # status is 0 whatever the gate's is.
+            return True
+        if op not in ("||", ";", "\n") or j + 1 == len(commands):
+            continue
+        nxt = j + 1
+        if closes[nxt] and levels[nxt] == current:
+            # The gate's group ends here: its status is the gate's.
+            continue
+        if any(c.words and not (len(c.words) == 1 and c.words[0] in GROUP_CLOSERS)
+               for c in commands[nxt:]):
+            return True
+    return False
+
+
+GROUP_OPENERS = ("{", "if", "while", "until", "for", "case", "select")
+
+# Reserved words after which the next word is again in command position, so
+# may open a compound command (`then if`, `do {`, `! {`).
+COMMAND_PREFIXES = ("then", "do", "else", "elif", "!", "time")
+
+
+def openers(words):
+    """The compound commands a command's words open: each opener in command
+    position, at its start or after a reserved word or another opener
+    (`then if true`, `{ { a`). A `for`, `case` or `select` is followed by a
+    name, not a command."""
+    found = []
+    for w in words:
+        if w in GROUP_OPENERS:
+            found.append(w)
+            if w in ("for", "case", "select"):
+                break
+        elif w not in COMMAND_PREFIXES:
+            break
+    return found
+
+
+def nesting(commands):
+    """For each command: (its nesting level, by `(` and the compound
+    commands around it; whether it is a lone `}`, `done`, `fi` or `esac`;
+    the level of the operator after it, outside what it closes). Each
+    opener in command position is pushed and each closer pops one."""
+    levels, closes, after = [], [], []
+    stack = []
+    for cmd in commands:
+        stack.extend(openers(cmd.words))
+        closer = len(cmd.words) == 1 and cmd.words[0] in GROUP_CLOSERS
+        levels.append(cmd.depth + len(stack))
+        closes.append(closer)
+        if closer and stack:
+            stack.pop()
+        after.append(leads_on(cmd)[1] + len(stack))
+    return levels, closes, after
+
+
+def leads_on(cmd):
+    """(the operator after cmd, the `(` depth it sits at). For a command a
+    `)` closes (`(a)`, `(a;)`), that is the operator after the closers."""
+    if cmd.ended_by == ")" or cmd.closed_by is not None:
+        return cmd.closed_by, cmd.closed_depth
+    return cmd.ended_by, cmd.depth
+
+
+SEQUENCE_OPS = (";", "\n", "&&", "||", "&")
+
+
+def in_pipeline(commands, k):
+    """Whether commands[k]'s status goes into a pipe: it, or a group or
+    subshell around it, is a stage of a pipeline (`gate | tail`,
+    `{ gate; } | cat`, `(a; gate) | tail`). After a sequence operator at a
+    level, a pipe at that level or inside belongs to another pipeline
+    (`gate && { a; } | cat`, `gate; b | c`) until a closer takes it out."""
+    _, _, after = nesting(commands)
+    blocked = None
+    for j in range(k, len(commands)):
+        op, level = leads_on(commands[j])[0], after[j]
+        if blocked is not None:
+            if level >= blocked:
+                continue
+            blocked = None
+        if op in ("|", "|&"):
+            return True
+        if op in SEQUENCE_OPS:
+            blocked = level
+    return False
+
+
+def scan(body):
+    """A body something may run, analysed as a script for the deny checks
+    (nothing, when it doesn't parse as one). A script in another language
+    runs commands from its strings (`system('git push -f')`), so the body
+    and each string in it are also read roughly, into .rough, which is
+    checked for forbidden commands and deny rules only."""
+    try:
+        result = analyse(body)
+    except (Unparsable, RecursionError):
+        result = Unwrapped()
+    texts = [body] + [a or b for a, b in re.findall(r"'([^'\n]*)'|\"([^\"\n]*)\"", body)]
+    result.rough = [normalize_git_loosely(w) for t in texts for w in rough_words(t)]
+    return result
+
+
+def pipefail_after(cmd, pipefail, followed):
+    """(whether pipefail is on in the calling shell after cmd, whether the
+    commands after cmd can still be followed for it). A `set` turning it on
+    counts only as a plain command the shell is sure to run before what
+    follows: first in the text or after `;` or a newline, at the top level,
+    not piped or in the background, and before any compound command or
+    subshell. Any other mention of pipefail (`set +o pipefail`, a set this
+    doesn't count) turns it off."""
+    words = cmd.words
+    if cmd.depth or (words and (words[0] in RESERVED or words[0] in UNFOLLOWED)) or cmd.after in ("(", ")"):
+        followed = False
+    if not words:
+        return pipefail, followed
+    if (followed and words[0] == "set" and turns_on_pipefail(words) and not cmd.expands
+            and not any(w.startswith("+") for w in words[1:])
+            and cmd.after in (None, ";", "\n") and cmd.ended_by not in ("|", "|&", "&")):
+        return True, followed
+    if any(re.search(r"pipe_?fail", w, re.I) for w in words):
+        return False, followed
+    return pipefail, followed
 
 
 def expand_braces(word, limit=64):
     """A word's brace expansions (`{--force,}` is `--force`), as bash makes
-    them; empty results dropped. More than limit can't be followed."""
+    them; empty results dropped. An empty word (`''`, `""`) is kept, as the
+    shell keeps it, so both readers see the same arguments. More than limit
+    can't be followed."""
+    if word == "":
+        return [""]
     out = []
     todo = [word]
     while todo:
@@ -454,6 +955,9 @@ def expand_braces(word, limit=64):
 
 def unwrap(words):
     result = Unwrapped()
+    # Whether the command left is run by its own name, as a function of that
+    # name would be: only reserved words and assignments came before it.
+    direct, seen_wrapper = True, False
     while words:
         head = os.path.basename(words[0])
         if head in RESERVED:
@@ -461,15 +965,18 @@ def unwrap(words):
             while head == "time" and i < len(words) and words[i].startswith("-"):
                 i += 1
             words, result.opaque = words[i:], True
-        elif head in UNFOLLOWED:
+            continue
+        elif re.match(r"^[A-Za-z_][A-Za-z0-9_]*=", words[0]):
+            words, result.wrapped, result.opaque = words[1:], True, True
+            continue
+        direct = not seen_wrapper
+        if head in UNFOLLOWED:
             # The words after these aren't one command; check each word as
             # the start of one, so a forbidden command is still found.
             result.opaque = True
             for k in range(1, len(words)):
                 result.commands.append(normalize_git(words[k:]))
             return result
-        elif re.match(r"^[A-Za-z_][A-Za-z0-9_]*=", words[0]):
-            words, result.wrapped, result.opaque = words[1:], True, True
         elif head == "env":
             i = 1
             while i < len(words):
@@ -482,7 +989,7 @@ def unwrap(words):
                               else w[2:] if w.startswith("-S") and len(w) > 2 else "")
                     rest = words[i + 1:]
                     result.wrapped = result.opaque = True
-                    result.add(analyse(" ".join(([script] if script else []) + rest)))
+                    result.add(analyse(" ".join(([script] if script else []) + rest)), direct=False)
                     return result
                 elif w.startswith("-") or re.match(r"^[A-Za-z_][A-Za-z0-9_]*=", w):
                     i += 1
@@ -507,7 +1014,7 @@ def unwrap(words):
                 if w in ("-exec", "-execdir", "-ok", "-okdir"):
                     end = next((e for e in range(k + 1, len(words)) if words[e] in (";", "+", "\\;")), len(words))
                     if end > k + 1:
-                        result.add(unwrap(words[k + 1:end]))
+                        result.add(unwrap(words[k + 1:end]), direct=False)
             break
         elif head == "exec":
             i = 1
@@ -534,7 +1041,8 @@ def unwrap(words):
             if script is None:
                 break
             result.wrapped = True
-            result.add(analyse(script))
+            # eval runs in this shell, where its functions are defined.
+            result.add(analyse(script), direct=head == "eval")
             return result
         elif head == "devenv":
             inner = devenv_command(words)
@@ -564,7 +1072,7 @@ def unwrap(words):
                     scripts.append(inline if eq else (words[k + 1] if k + 1 < len(words) else ""))
             for value in scripts:
                 result.opaque = True
-                result.add(analyse(value))
+                result.add(analyse(value), direct=False)
             words, result.wrapped = words[i:], True
         elif head == "cd" or head == "pushd" or head == "popd":
             # Later commands run somewhere else, so their rules and paths
@@ -573,8 +1081,11 @@ def unwrap(words):
             return result
         else:
             break
+        seen_wrapper = True
     if words:
         result.commands.append(normalize_git(words))
+        if direct:
+            result.direct.add(id(result.commands[-1]))
     return result
 
 
@@ -670,6 +1181,38 @@ def long_option(arg, option, shortest):
     return len(name) >= shortest and option.startswith(name)
 
 
+# git commit's short options whose value can take the rest of the word.
+COMMIT_VALUED = "mFCctSu"
+
+# git tag's short options whose value can take the rest of the word.
+TAG_VALUED = "mFun"
+
+# git fetch's long options whose value can be the next word.
+FETCH_SPLIT_VALUED = ("--filter", "--server-option", "--depth", "--deepen", "--shallow-since",
+                      "--shallow-exclude", "--negotiation-tip", "--jobs")
+
+
+def git_short(arg, letters, valued):
+    """Whether a git short option cluster holds one of letters before any
+    letter in valued, whose value takes the rest of the word (`commit
+    -mdocs` is -m with `docs`, not -c)."""
+    if not re.match(r"^-[A-Za-z0-9]", arg):
+        return False
+    for c in arg[1:]:
+        if c in letters:
+            return True
+        if c in valued or not c.isalnum():
+            return False
+    return False
+
+
+def git_option(arg, option):
+    """Whether arg could be git's long option, for refusing it: git takes
+    any unique prefix, one letter after `--` included (`reset --h` is
+    `--hard`), and an ambiguous one fails, so every such prefix counts."""
+    return long_option(arg, option, 3)
+
+
 def program(word):
     """A command word's program name: `wrangler@4`, `@scope/wrangler` and
     `node_modules/.bin/wrangler.js` are wrangler."""
@@ -699,15 +1242,15 @@ def forbidden_from(head, args):
         sub, rest = args[k], args[k + 1:]
         if sub == "push":
             for a in rest:
-                if a.startswith("--force") or long_option(a, "--force", 4):
+                if a.startswith("--force") or git_option(a, "--force"):
                     return "force push"
-                if long_option(a, "--mirror", 4):
+                if git_option(a, "--mirror"):
                     return "push --mirror"
                 if re.match(r"^-[A-Za-z0-9]*f[A-Za-z0-9]*$", a):
                     return "force push"
                 if a.startswith("+") or ":+" in a:
                     return "force push (+refspec)"
-        if sub == "reset" and any(long_option(a, "--hard", 4) for a in rest):
+        if sub == "reset" and any(git_option(a, "--hard") for a in rest):
             return "git reset --hard"
     if head == "wrangler" and "--dry-run" not in args:
         for a in args:
@@ -973,12 +1516,43 @@ def plain_args(words):
         # rule's.
         return False
     prog = program(words[0])
+    if prog == "git" and git_waits_or_drops(words):
+        return False
+    if prog in ("gh", "gh-app") and gh_opens_editor(words[1:]):
+        return False
+    text_options = text_options_of(prog, words)
+    value_next = False
     for w in words[1:]:
+        # A message, title or body (`git commit -m "-o is refused"`,
+        # `gh-app issue comment 3 --body "-e is nice"`) is text, not an
+        # option: the option before takes it whatever it holds. Only the
+        # subcommands where that option takes text count (`git fetch -t` is
+        # `--tags`). A word with whitespace isn't skipped for that alone: git
+        # parses `"--upload-pack=a b"` as an option. A word that could name a
+        # program for git to run is checked even as text, and so is one that
+        # could name an output file (`-o`, `--output`) unless it holds
+        # whitespace, as a sentence does (`git commit -m "-o is refused"`).
+        text, value_next = value_next, not value_next and w in text_options
+        if text and prog == "git" and (w.startswith("-c") or git_option(w, "--config")
+                                       or (w.startswith(("-o", "--output"))
+                                           and not any(c.isspace() for c in w))
+                                       or git_option(w, "--config-env")
+                                       or git_option(w, "--upload-pack")
+                                       or git_option(w, "--receive-pack")
+                                       or git_option(w, "--exec")):
+            text = False
         # For any program: an output file, a list of paths, or configuration
         # that can name a program to run. Some programs take shorter
         # abbreviations (wc's `--f=`) or a short config flag (wrangler's -c,
-        # whose build command runs).
-        if (w == "-o" or long_option(w, "--output", 5) or long_option(w, "--config", 5)
+        # whose build command runs). A word starting `-o` is refused (an
+        # output file, ssh's options, unzip's overwrite) except where it is
+        # known to do neither (`grep -o` prints the match); an `o` later in a
+        # cluster (`-qo`) only for the programs in O_CLUSTER. Elsewhere it
+        # may be another letter's value (`git status -uno`), a harmless flag
+        # (`ls -lo`) or a single-dash long option (go's `-count=1`).
+        if ((prog not in HARMLESS_O and not text
+             and (w.startswith("-o") or (prog in O_CLUSTER and re.match(r"^-[A-Za-z0-9]*o", w))))
+                or long_option(w, "--output", 5) or long_option(w, "--config", 5)
                 or long_option(w, "--files0-from", 8)
                 or (prog in ("wc", "sort", "du") and long_option(w, "--files0-from", 3))
                 or (prog == "cargo" and long_option(w, "--config", 4))
@@ -994,7 +1568,145 @@ def plain_args(words):
         if prog == "git" and long_option(w, "--pathspec-from-file", 7):
             # A file of pathspecs, whose names aren't checked.
             return False
+        if prog == "git" and not text and git_runs_program(words[1:2], w):
+            return False
+        if (prog in ("gh", "gh-app") and not text
+                and (w.startswith("--edit") or re.match(r"^-[A-Za-z]*e", w))):
+            # An editor waits for a user who isn't there: `-e`, `--editor`,
+            # `--edit-last`.
+            return False
     return True
+
+
+# The options whose next word is text (a message, title or body), by
+# subcommand: git's by its subcommand, gh's by (command, subcommand).
+GIT_TEXT_OPTIONS = {"commit": {"-m", "--message"}, "merge": {"-m", "--message"},
+                    "notes": {"-m", "--message"}, "stash": {"-m", "--message"},
+                    "tag": {"-m"}}
+GH_TEXT_OPTIONS = {"-t", "--title", "-b", "--body"}
+GH_TEXT_SUBCOMMANDS = {(c, s) for c in ("issue", "pr") for s in ("create", "edit", "comment")}
+
+
+def text_options_of(prog, words):
+    """The options of this git or gh command whose next word is text."""
+    if prog == "git":
+        sub = words[1] if len(words) > 1 else ""
+        action = words[2] if len(words) > 2 else ""
+        # stash list and show take log and diff options, where -m takes no
+        # value; notes' other subcommands take no message.
+        if sub == "stash" and not (action in ("", "push", "save") or action.startswith("-")):
+            return set()
+        if sub == "notes" and action not in ("add", "append"):
+            return set()
+        return GIT_TEXT_OPTIONS.get(sub, set())
+    if prog in ("gh", "gh-app"):
+        sub = gh_subcommand([a.lower() for a in words[1:]])
+        return GH_TEXT_OPTIONS if sub in GH_TEXT_SUBCOMMANDS else set()
+    return set()
+
+# Programs whose -o only changes what they print (grep's only-matching) or
+# sets a shell option (set -o pipefail, which set_options checks).
+HARMLESS_O = {"grep", "egrep", "fgrep", "rg", "set"}
+# Programs whose -o in a short cluster writes a file, overwrites, or takes a
+# value that can run a program (`unzip -qo`, `ssh -4oProxyCommand=...`).
+O_CLUSTER = {"unzip", "7z", "ssh", "scp", "sftp", "curl", "wget", "cc", "gcc", "clang",
+             "sort", "mount"}
+
+
+def gh_opens_editor(args):
+    """Whether gh would open an editor for a body it isn't given: an issue
+    or pull request created or commented on without one."""
+    sub = gh_subcommand([a.lower() for a in args])
+    if sub not in (("issue", "create"), ("pr", "create"), ("issue", "comment"), ("pr", "comment")):
+        return False
+    short = "bFf" if sub == ("pr", "create") else "bF"
+    return not any(
+        a.split("=", 1)[0] in ("--body", "--body-file", "--fill", "--fill-first", "--fill-verbose")
+        or re.match(r"^-[A-Za-z]*[" + short + "]", a) for a in args)
+
+
+def git_waits_or_drops(words):
+    """Whether a whole git command opens an editor for a message it isn't
+    given (a commit without -m, -F, -C, --no-edit or a plain --fixup; a
+    `--fixup=reword:` or `amend:`; an annotated or signed tag without -m or
+    -F), or a fetch can drop local work or refs
+    (a forced or `+` refspec, a `:` refspec updating a local branch,
+    `--update-head-ok`, `--prune`, `--prune-tags`, `--refmap`)."""
+    args = normalize_git_loosely(words)[1:]
+    if not args:
+        return False
+    sub, rest = args[0], args[1:]
+    if sub == "commit":
+        given = False
+        for k, w in enumerate(rest):
+            if long_option(w, "--fixup", 5):
+                value = w.split("=", 1)[1] if "=" in w else (rest[k + 1] if k + 1 < len(rest) else "")
+                if value.startswith(("reword:", "amend:")):
+                    return True
+                given = True
+            elif (git_short(w, "mFC", COMMIT_VALUED) or long_option(w, "--message", 5)
+                  or long_option(w, "--file", 5) or long_option(w, "--no-edit", 6)
+                  or long_option(w, "--reuse-message", 5)):
+                given = True
+        return not given
+    if sub == "tag":
+        # An annotated or signed tag (`-a`, `-s`, `-u`) with no -m or -F
+        # opens an editor for its message.
+        annotated = given = False
+        for w in rest:
+            if (git_short(w, "asu", TAG_VALUED) or git_option(w, "--annotate")
+                    or git_option(w, "--sign") or git_option(w, "--local-user")):
+                annotated = True
+            if (git_short(w, "mF", TAG_VALUED) or long_option(w, "--message", 5)
+                    or long_option(w, "--file", 5)):
+                given = True
+        return annotated and not given
+    if sub == "fetch":
+        operands, skip = [], False
+        for w in rest:
+            if skip:
+                skip = False
+                continue
+            if w == "--":
+                continue
+            if (git_short(w, "fupP", "jo") or git_option(w, "--force")
+                    or git_option(w, "--update-head-ok") or git_option(w, "--prune")
+                    or git_option(w, "--prune-tags") or git_option(w, "--refmap")):
+                return True
+            # An option whose value is the next word: that word isn't an
+            # operand. Only the full name, so an abbreviation that might
+            # not take one leaves the next word an operand.
+            skip = w in FETCH_SPLIT_VALUED or bool(re.match(r"^-[A-Za-z0-9]*[jo]$", w)
+                                                    and not git_short(w[:-1], "jo", ""))
+            if not w.startswith("-"):
+                operands.append(w)
+        # The first operand is the remote; a refspec after it with a `:`
+        # updates a local ref, and a `+` forces it.
+        return any(o.startswith("+") for o in operands) or any(":" in o for o in operands[1:])
+    return False
+
+
+def git_runs_program(sub, w):
+    """Whether a git argument names a program for git to run (fetch's
+    `--upload-pack`, push's `--receive-pack`, `--exec`, a transport helper
+    URL that runs a command), or opens an editor or an interactive prompt,
+    which waits for a user who isn't there. Fetch's `-u` is
+    `--update-head-ok`, refused in git_waits_or_drops."""
+    sub = sub[0] if sub else ""
+    if (git_option(w, "--upload-pack") or git_option(w, "--receive-pack")
+            or git_option(w, "--exec") or w.startswith(("ext::", "fd::"))):
+        return True
+    if git_option(w, "--edit-description") or git_option(w, "--interactive"):
+        return True
+    if sub == "commit" and (git_short(w, "ecp", COMMIT_VALUED) or git_option(w, "--edit")
+                            or git_option(w, "--reedit-message") or git_option(w, "--patch")):
+        return True
+    if sub == "tag" and (git_short(w, "e", TAG_VALUED) or git_option(w, "--edit")):
+        return True
+    if sub == "add" and (re.match(r"^-[A-Za-z]*[iep]", w) or git_option(w, "--edit")
+                         or git_option(w, "--patch")):
+        return True
+    return False
 
 
 def reads_environment(words, w):
@@ -1132,6 +1844,18 @@ def _rule_regex(rule, widen=False):
     return re.compile("[^\n]*".join(re.escape(p) for p in rule.split("*")) + r"\Z")
 
 
+def inner_rules(rules):
+    """The inner command of each rule written with the devenv wrapper
+    (`devenv shell --quiet -- gh-app issue create *` gives `gh-app issue
+    create *`), when that command's program is named outright."""
+    out = []
+    for rule in rules:
+        m = re.match(r"devenv shell(?: --quiet| -q)? -- (\S.*)\Z", rule, re.S)
+        if m and "*" not in m.group(1).split()[0]:
+            out.append(m.group(1))
+    return out
+
+
 def matches(rules, words):
     """Whether a rule matches the words. A program word holding whitespace
     (`"git status x/evil"` runs a file of that name) matches nothing."""
@@ -1152,20 +1876,145 @@ def read_only(words):
     if any(PLACEHOLDER in a for a in words[1:]):
         # Its arguments are another command's output.
         return False
-    if words[0] == "grep" and any(re.match(r"^-[A-Za-z0-9]*[rRd]", a) or a.startswith("--r")
-                                  or a.startswith("--d") for a in words[1:]):
+    prog, args = words[0], words[1:]
+    if prog == "grep" and any(re.match(r"^-[A-Za-z0-9]*[rRdf]", a) or a.startswith("--r")
+                              or a.startswith("--d") or a.split("=", 1)[0] == "--file"
+                              or long_option(a, "--exclude-from", 10) for a in args):
+        # -f/--file reads its patterns from a file, which could be a secrets
+        # file the path check never sees as one.
+        return False
+    if prog == "printf" and any(a.startswith("-v") for a in args):
+        # Assigns a shell variable (PATH...) that later commands run with.
+        return False
+    if prog == "sort" and sort_operands(args) is None:
+        return False
+    if prog == "uniq":
+        operands = uniq_operands(args)
+        if operands is None or len(operands) > 1:
+            # A second operand is the file it writes.
+            return False
+    if prog == "tail" and any(re.match(r"^[-+][A-Za-z0-9]*[fF]", a) or long_option(a, "--follow", 3)
+                              or long_option(a, "--retry", 3) for a in args):
+        # Following a file never ends: the call would hang.
+        return False
+    if prog == "jq" and any(
+            re.search(r"env|import|include", a, re.I)
+            or re.match(r"^-[A-Za-z]*[fL]", a)
+            or long_option(a, "--from-file", 3) or long_option(a, "--library-path", 3)
+            for a in args):
+        # jq can read the environment ($ENV, env: the App's GH_TOKEN) and load
+        # modules and filters from files.
+        return False
+    if prog == "set" and not set_options(args):
         return False
     return True
+
+
+def listed_options(args, flags, valued, long_flags, long_valued, end_ok):
+    """The operands of a command whose options must all be on a list, or
+    None when one isn't: an option not listed may name a program or a file
+    to read or write without the path showing (`sort --files0-from=list`,
+    `--random-source`, `-o`). flags are short options alone or in a cluster;
+    valued short options take the rest of the word or the next one; long
+    options are matched exactly, long_valued with `=value` or the next
+    word. end_ok: whether `--` may end the options."""
+    operands = []
+    i = 0
+    while i < len(args):
+        a = args[i]
+        if a == "--":
+            if not end_ok:
+                return None
+            operands.extend(args[i + 1:])
+            break
+        if a.startswith("--"):
+            name = a.split("=", 1)[0]
+            if name in long_valued:
+                i += 1 if "=" in a else 2
+                continue
+            if name not in long_flags or ("=" in a and not long_flags[name]):
+                return None
+            i += 1
+            continue
+        if a.startswith("-") and a != "-":
+            for k, c in enumerate(a[1:], 1):
+                if c in valued:
+                    if k == len(a) - 1:
+                        i += 1
+                    break
+                if c not in flags:
+                    return None
+            i += 1
+            continue
+        operands.append(a)
+        i += 1
+    return operands
+
+
+def sort_operands(args):
+    """sort's operands, or None for an option this doesn't approve."""
+    return listed_options(
+        args, "nrufbhVsz", "kt",
+        {"--numeric-sort": False, "--reverse": False, "--unique": False, "--ignore-case": False,
+         "--ignore-leading-blanks": False, "--human-numeric-sort": False, "--version-sort": False,
+         "--stable": False, "--zero-terminated": False},
+        {"--key", "--field-separator"}, end_ok=True)
+
+
+def uniq_operands(args):
+    """uniq's operands, or None for an option this doesn't approve. `--` is
+    refused: after it `-x` is an operand, the file it writes."""
+    return listed_options(
+        args, "cdDuiz", "fsw",
+        {"--count": False, "--repeated": False, "--unique": False, "--ignore-case": False,
+         "--zero-terminated": False, "--all-repeated": True, "--group": True},
+        {"--skip-fields", "--skip-chars", "--check-chars"}, end_ok=False)
+
+
+def set_options(args):
+    """Whether `set` only turns on pipefail and -e, -u or -x: options that
+    make the calling shell fail sooner or louder, nothing else."""
+    if not args:
+        return False
+    i = 0
+    while i < len(args):
+        a = args[i]
+        m = re.fullmatch(r"-([eux]*)(o?)", a)
+        if not m or a == "-":
+            return False
+        if m.group(2):
+            if args[i + 1:i + 2] != ["pipefail"]:
+                return False
+            i += 1
+        i += 1
+    return True
+
+
+def turns_on_pipefail(words):
+    return words[0] == "set" and any(
+        a == "pipefail" and k > 1 and re.fullmatch(r"-[eux]*o", words[k - 1])
+        for k, a in enumerate(words) if k > 0)
 
 
 def rough_deny(command):
     """A deny reason from reading the text without parsing it: each run of
     words between operators and newlines, quotes dropped. Used only when the
-    real parse fails, so an unparsable part can't hide a forbidden one."""
-    for segment in re.split(r"[;&|()\n`]+|\$\(", command):
-        words = [w.strip("'\"") for w in segment.split()]
-        words = [w for w in words if w]
-        if not words:
+    real parse fails, so an unparsable part can't hide a forbidden one.
+    Quoted heredoc bodies are data (see heredoc_data), and a call to a shell
+    function the text defines isn't judged as the program of that name."""
+    command = heredoc_data(command)
+    functions = set(re.findall(r"(?:^|[\s;&|(){}])(" + FUNCTION_NAME + r")\s*\(\s*\)", command))
+    functions |= set(re.findall(r"\bfunction\s+(" + FUNCTION_NAME + ")", command))
+    # A here-string is checked as commands too (`sh <<<'git push -f'`).
+    command = command.replace("<<<", " <<< ")
+    todo = rough_words(command)
+    while todo:
+        words = todo.pop(0)
+        if "<<<" in words:
+            k = words.index("<<<")
+            todo.append(words[k + 1:])
+            words = words[:k]
+        if not words or words[0] in functions:
             continue
         try:
             reason = forbidden(normalize_git_loosely(words))
@@ -1177,6 +2026,103 @@ def rough_deny(command):
             if secret_path(w):
                 return f"{w.lstrip('<>')} is a secrets file."
     return None
+
+
+def heredoc_data(text):
+    """text without the bodies of its quoted heredocs, for rough_deny. A body
+    stays unless every command on the line opening it surely takes it as
+    data (see data_consumer: `cat <<'EOF'`, `git commit -F - <<'EOF'`), or
+    when that line ends in a pipe, and from an unterminated body on,
+    everything stays. Quotes and comments are
+    skipped while looking for `<<`, so a quoted `<<'X'` opens nothing."""
+    spans, pending = [], []
+    i = line_start = 0
+    quote = None
+    while i < len(text):
+        c = text[i]
+        if quote:
+            if quote == '"' and c == "\\":
+                i += 2
+                continue
+            if c == quote:
+                quote = None
+            i += 1
+            continue
+        if c == "\\":
+            i += 2
+        elif c in "'\"":
+            quote = c
+            i += 1
+        elif c == "#" and (i == 0 or text[i - 1] in " \t\n;&|()"):
+            j = text.find("\n", i)
+            i = len(text) if j < 0 else j
+        elif c == "\n":
+            line = text[line_start:i]
+            # A line ending in a pipe goes on after the bodies: what reads
+            # them is on a line this doesn't look at.
+            runs = not line_reads_data(line) or re.search(r"\|&?[ \t]*\Z", line)
+            i += 1
+            for delimiter, delimiter_quoted, strip_tabs in pending:
+                try:
+                    _, end = take_body(text, i, delimiter, strip_tabs)
+                except Unparsable:
+                    return remove_spans(text, spans)
+                if delimiter_quoted and not runs:
+                    spans.append((i, end))
+                i = end
+            pending = []
+            line_start = i
+        elif text.startswith("<<<", i):
+            i += 3
+        elif (m := HEREDOC.match(text, i)) and text.startswith("<<", i):
+            pending.append((m.group(2), bool(m.group(1)), text.startswith("<<-", i)))
+            i = m.end()
+        else:
+            i += 1
+    data = remove_spans(text, spans)
+    if re.search(r"(?:[)}]|\b(?:done|fi|esac))[ \t]*\|", data):
+        # A compound command piped on (`{ cat <<'EOF' ... } | sh`): any
+        # body may go where its output goes.
+        return text
+    return data
+
+
+def line_reads_data(line):
+    """Whether every command on a line surely takes what it reads as data
+    (see data_consumer), read roughly: heredoc openers and redirects
+    dropped, quotes stripped."""
+    line = re.sub(r"\d*<<-?[ \t]*(['\"]?)[A-Za-z0-9_.-]+\1", " ", line)
+    line = re.sub(r"\d*[<>]+&?[ \t]*[^\s;&|()]+", " ", line)
+    for words in rough_words(line):
+        cmd = Command()
+        # `$TMPDIR` opening a word stands for its value, as in the full
+        # reader, so a tee to scratch reads as one.
+        cmd.words = [tmpdir(quoted=True) + w[m.end():] if (m := TMPDIR_WORD.match(w)) else w
+                     for w in words]
+        if not data_consumer(cmd):
+            return False
+    return True
+
+
+def rough_words(text):
+    """Each run of words between operators and newlines in text, quotes
+    dropped: the rough reading's commands."""
+    out = []
+    for segment in re.split(r"[;&|()\n`]+|\$\(", text):
+        words = [w.strip("'\"") for w in segment.split()]
+        words = [w for w in words if w]
+        if words:
+            out.append(words)
+    return out
+
+
+def remove_spans(text, spans):
+    out, last = [], 0
+    for start, end in spans:
+        out.append(text[last:start])
+        last = end
+    out.append(text[last:])
+    return "".join(out)
 
 
 def normalize_git_loosely(words):
@@ -1358,21 +2304,33 @@ def decide(tool, tool_input, policy):
 
     command = tool_input.get("command", "")
     # The canonical commit message is data: check the command with a stand-in.
-    checked = command
-    m_wrapper = WRAPPER.match(command)
-    inner_text = command[m_wrapper.end():] if m_wrapper else command
-    m_commit = COMMIT_MESSAGE.match(inner_text)
-    if m_commit:
-        checked = (m_wrapper.group(0) if m_wrapper else "") + m_commit.group(1) + " -" + m_commit.group(2) + "m message"
+    checked = commit_stand_in(command)
     try:
         result = analyse(checked)
         for words in result.commands:
+            if id(words) in result.direct and words[0] in result.functions:
+                # A call to a function the call defines: its body is checked
+                # where it's defined, and the call asks below.
+                continue
             reason = forbidden(words)
             if reason:
                 return "deny", f"Not allowed in a session: {reason}."
             named = secret_named(words)
             if named:
                 return "deny", f"{named.lstrip('>')} is a secrets file. Change .env.example instead, and say what the real file needs."
+        for body in result.scanned:
+            # A body something may run as a script (`ssh host <<'EOF'`).
+            for words in body.commands + body.rough:
+                try:
+                    reason = forbidden(words)
+                except Unparsable:
+                    reason = None
+                if reason:
+                    return "deny", f"Not allowed in a session, in what a heredoc or here-string feeds: {reason}."
+            for words in body.commands:
+                named = secret_named(words)
+                if named:
+                    return "deny", f"{named.lstrip('>')} is a secrets file."
     except Unparsable as e:
         # A command this can't follow gets no automatic allow, and a user
         # decides it, unless a rough reading finds something to deny.
@@ -1381,7 +2339,7 @@ def decide(tool, tool_input, policy):
             return "deny", reason
         return "ask", f"coldlogic guard can't follow this command ({e})."
 
-    edit = shell_edit(result)
+    edit = shell_edit(result) or next(filter(None, (shell_edit(b) for b in result.scanned)), None)
     if edit:
         # A shell edit prompts the user, the Edit and Write tools don't.
         return "deny", (f"coldlogic guard: {edit} changes a project file from Bash. Make the change "
@@ -1389,104 +2347,306 @@ def decide(tool, tool_input, policy):
                         "call. Scratch output can go to $TMPDIR or /dev/null.")
 
     commands = [w for w in result.commands if not w[0].startswith(">")]
-    deny = [rule_regex(r, widen=True) for r in policy.get("deny", [])]
-    ask = [rule_regex(r, widen=True) for r in policy.get("ask", [])]
-    # Rules see both what runs and what was written (`devenv shell:*`).
+    # Every rule is matched against each command of the call in both
+    # spellings: as written, wrapper included, and unwrapped. A rule written
+    # with the wrapper (`devenv shell --quiet -- gh-app issue create *`) also
+    # stands for its inner command.
+    deny_rules, ask_rules = policy.get("deny", []), policy.get("ask", [])
+    deny = [rule_regex(r, widen=True) for r in deny_rules + inner_rules(deny_rules)]
+    ask = [rule_regex(r, widen=True) for r in ask_rules + inner_rules(ask_rules)]
     if any(r.match(checked) for r in deny):
         return "deny", "Denied by a deny rule."
     # Rules also see git with every global option dropped, so an inert one
     # (`git --literal-pathspecs push`) doesn't dodge them.
-    ruled = commands + [normalize_git_loosely(w) for w in commands if os.path.basename(w[0]) == "git"]
-    for words in ruled:
+    def spellings(unwrapped):
+        cmds = [w for w in unwrapped.commands if not w[0].startswith(">")]
+        return (cmds + [normalize_git_loosely(w) for w in cmds if os.path.basename(w[0]) == "git"]
+                + [words for words, _, _ in unwrapped.written])
+    ruled = spellings(result)
+    for words in ruled + [w for body in result.scanned for w in spellings(body) + body.rough]:
         if matches(deny, words):
             return "deny", f"Denied by this project's rules: {' '.join(words)}"
+    if result.gate_piped:
+        # The conventions forbid hiding the gate's exit status.
+        return "deny", ("coldlogic guard: piping scripts/check.sh hides its exit status. Run it as "
+                        "`set -o pipefail; ... | tail -40`, or redirect it to \"$TMPDIR/check.log\" "
+                        "and read that.")
+    if result.gate_hidden:
+        return "deny", ("coldlogic guard: a command after scripts/check.sh (after `||`, `;`, a newline "
+                        "or `&`), backgrounding it with `&`, or running it inside `$(...)`, hides its "
+                        "exit status. Run the gate "
+                        "on its own, or follow it only with `&& ...`.")
+    if result.functions:
+        return "ask", "coldlogic guard: this call defines a shell function, which the guard can't follow."
     if any(r.match(checked) for r in ask):
         return "ask", "An ask rule covers this command."
     for words in ruled:
         if matches(ask, words):
             return "ask", f"An ask rule covers: {' '.join(words)}"
 
-    allow = [rule_regex(r) for r in policy.get("allow", [])]
+    allow_rules = policy.get("allow", [])
+    allow = [rule_regex(r) for r in allow_rules]
+    # An allow rule written with the wrapper allows its inner command only
+    # as run through the wrapper.
+    through_wrapper = allow + [rule_regex(r) for r in inner_rules(allow_rules)]
     # `checked` has the commit message's stand-in already.
-    pipeline = simple_command(checked) if not away_from_root() else None
-    # The plain reading and the full analysis must agree on every command:
-    # the first one an allow rule names (or a read-only one), the rest
-    # read-only filters (`| tail -20`).
-    if (pipeline is not None and commands == pipeline and len(result.commands) == len(pipeline)
-            and not result.opaque and all(plain_args(w) for w in pipeline)
-            and (read_only(pipeline[0]) or matches(allow, pipeline[0]))
-            and all(w[0] in PIPE_FILTERS and read_only(w) for w in pipeline[1:])):
-        return "allow", "coldlogic guard: a plain command an allow rule names."
+    plain = plain_commands(checked) if not away_from_root() else None
+    if plain is not None:
+        cmds, targets = plain
+        # The plain reading and the full analysis must agree on every
+        # command, in order, and on every file written; each command, every
+        # stage of a pipeline included, must be approved on its own.
+        written = sorted(w[0][1:] for w in result.commands if w[0].startswith(">"))
+        if ([c.words for c in cmds] == commands and written == sorted(targets)
+                and not result.opaque
+                and all(approved(c.words, through_wrapper if c.wrapped else allow) for c in cmds)):
+            return "allow", "coldlogic guard: every command in this call is one an allow rule names or only reads."
+        for c in cmds:
+            if c.wrapped and not approved(c.words, through_wrapper) and matches(allow, c.original):
+                # A rule allowing the wrapper itself would let anything through it.
+                return "ask", "coldlogic guard: a rule allows the wrapper, not the command inside it."
     # Claude Code's own rules would allow a command that one names, though
     # an option or path in it is one this hook refuses: ask instead.
     for w in commands:
         if matches(allow, w) and not plain_args(w):
             return "ask", f"coldlogic guard: an allow rule names {w[0]}, but not with these arguments."
-    if result.wrapped and matches(allow, command.split()):
-        # A rule allowing the wrapper itself would let anything through it.
-        return "ask", "coldlogic guard: a rule allows the wrapper, not the command inside it."
+    for words, inner, opaque in result.written:
+        # A rule allowing the wrapper itself would let anything through it,
+        # and Claude Code matches it against each command of the call. Each
+        # wrapped command counts on its own words, not the whole text's: a
+        # rule for `git status` says nothing of `git status && eval ...`.
+        if matches(allow, words) and (opaque or not all(approved(w, through_wrapper) for w in inner)):
+            return "ask", "coldlogic guard: a rule allows the wrapper, not the command inside it."
     # Anything else is left to Claude Code's own rules, as it would be
     # without this hook.
     return None
 
 
-# The one compound form allowed: a commit whose message is a quoted heredoc.
+# The one substitution allowed: a commit whose message is a quoted heredoc,
+# as a command of its own, optionally behind `devenv shell --`.
 COMMIT_MESSAGE = re.compile(
-    r"""(git commit(?: -[aqsvn]+| --(?:all|amend|no-verify|allow-empty|signoff|quiet|verbose|no-edit))*) -([aqsvn]*)m "\$\(cat <<'EOF'\n(?:(?!EOF)[^\n]*\n)*EOF\n\)"\Z""")
-WRAPPER = re.compile(r"devenv shell(?: --quiet| -q)? -- ")
+    r"""((?:devenv shell(?: --quiet| -q)? -- )?git commit(?: -[aqsvn]+| --(?:all|amend|no-verify|allow-empty|signoff|quiet|verbose|no-edit))*) -([aqsvn]*)m "\$\(cat <<'EOF'\n(?:(?!EOF)[^\n]*\n)*EOF\n\)"(?=\Z|[ \t]*(?:&&|;|\n))""")
+
+
+def commit_stand_in(command):
+    """command with each canonical heredoc commit message (COMMIT_MESSAGE)
+    replaced by a stand-in, `git commit -m message`. A message counts only
+    where a command starts: at the start of the text, or after `&&`, `;` or
+    a newline ending text the strict reader reads (plain_commands), so it
+    can't sit inside a quote or another heredoc. The first message that
+    doesn't count stops the replacing."""
+    done, rest = "", command
+    while True:
+        m = COMMIT_MESSAGE.search(rest)
+        if not m:
+            return done + rest
+        prefix = done + rest[:m.start()]
+        if prefix:
+            ended = re.search(r"[ \t]*(?:&&|;|\n)[ \t]*\Z", prefix)
+            if not ended or plain_commands(prefix[:ended.start()]) is None:
+                return done + rest
+        done = prefix + m.group(1) + " -" + m.group(2) + "m message"
+        rest = rest[m.end():]
 # Characters that mean nothing to the shell outside quotes.
 PLAIN = re.compile(r"[A-Za-z0-9 _./:@%+,=-]")
 
 
-def simple_command(command):
-    """The commands of a plain pipeline, optionally behind `devenv shell
-    [--quiet] --`, that the shell runs as written: words with no expansion,
-    redirect, comment or escape outside quotes and nothing but text, newlines
-    included, inside them, joined only by `|`, with `2>&1` allowed. Anything
-    else gets no allow from this hook."""
-    text = command[len(m.group(0)):] if (m := WRAPPER.match(command)) else command
-    commands, words, word, i = [], [], None, 0
+class Plain:
+    """A simple command as the strict reader reads it."""
+
+    def __init__(self, original):
+        # Its words as written, `devenv shell --` included.
+        self.original = original
+        # The words that run: past that prefix, git's global options dropped.
+        self.words = original
+        self.wrapped = False
+
+
+# Words that may not start a command the strict reader approves: they change
+# what the rest of the call runs, or aren't one command.
+NOT_PLAIN = RESERVED | UNFOLLOWED | {"cd", "pushd", "popd", "source", "."}
+
+
+def plain_word(text, i):
+    """(a word's value, the index past it) for a word of the strict
+    grammar starting at i, or None: plain characters, '...', "..." with no
+    $ ` \\ inside, and a `$TMPDIR` or `${TMPDIR}`, quoted or not, opening the
+    word."""
+    start, out, bare_tilde = i, [], False
     while i < len(text):
         c = text[i]
-        if text.startswith(" 2>&1", i) and text[i + 5:i + 6] in ("", " "):
-            if word is not None:
-                words.append(word)
-            word = None
-            i += 5
-        elif c == "|" and text[i + 1:i + 2] not in ("|", "&") and word is None and words:
-            commands.append(words)
-            words = []
-            i += 1
-        elif c == " ":
-            if word is not None:
-                words.append(word)
-            word = None
-            i += 1
-        elif c == "'":
+        if c == "'":
             j = text.find("'", i + 1)
             if j < 0:
                 return None
-            word = (word or "") + text[i + 1:j]
+            out.append(text[i + 1:j])
             i = j + 1
         elif c == '"':
             j = text.find('"', i + 1)
-            if j < 0 or re.search(r'[$`\\]', text[i + 1:j]):
+            if j < 0:
                 return None
-            word = (word or "") + text[i + 1:j]
+            body = text[i + 1:j]
+            m = TMPDIR_WORD.match(body) if i == start else None
+            if m:
+                out.append(tmpdir(quoted=True))
+                body = body[m.end():]
+            if re.search(r'[$`\\]', body):
+                return None
+            out.append(body)
             i = j + 1
-        elif PLAIN.match(c) and not (c in "=" and word is None):
-            word = (word or "") + c
+        elif c == "$":
+            m = TMPDIR_WORD.match(text, i) if i == start else None
+            value = tmpdir(quoted=False) if m else None
+            if value is None:
+                return None
+            out.append(value)
+            i = m.end()
+        elif c in " \t\n;&|":
+            break
+        elif PLAIN.match(c) and not (c == "=" and i == start):
+            out.append(c)
+            i += 1
+        elif c == "~" and i > start:
+            # Checked below: only in a revision (`HEAD~1`). A quoted `~`
+            # is just a character.
+            out.append(c)
+            bare_tilde = True
             i += 1
         else:
             return None
-    if word is not None:
-        words.append(word)
-    commands.append(words)
-    for words in commands:
-        if not words or "=" in words[0] or os.path.basename(words[0]) in WRAPPERS | SHELLS:
+    if i == start:
+        return None
+    if bare_tilde and not REVISION.fullmatch(text[start:i]):
+        return None
+    return "".join(out), i
+
+
+# A git revision with `~` ancestry (`HEAD~1`, `origin/main~2..HEAD`): the
+# only words where the strict reader takes an unquoted `~`. Not first, so no
+# home directory; and with zsh's EXTENDED_GLOB, where `a~b` matches files
+# named a but not b, only names spelled out in full could match. `^` isn't
+# taken: as a zsh glob operator it can match names the word doesn't spell.
+REVISION = re.compile(r"[A-Za-z0-9_./@-]+(?:~[0-9]*)+(?:\.\.\.?[A-Za-z0-9_./@-]+(?:~[0-9]*)*)?")
+
+
+def plain_commands(command):
+    """(the simple commands, the files written) of a call the shell runs as
+    written, or None. The commands are joined by `&&`, `||`, `;`, newlines
+    and `|`, each optionally behind `devenv shell [--quiet|-q] --`; their
+    words are plain_word's; their redirects only duplicate a descriptor
+    (`2>&1`, `>&2`), write or append to a device or a scratch file outside
+    the project, or open a heredoc with a fully quoted delimiter, whose body
+    is skipped after the line's newline as the shell does. Anything else
+    (`&`, `|&`, subshells, groups, `!`, reserved words, substitutions,
+    comments, escapes, input redirects, assignments, wrappers) gets no allow
+    from this hook. Bash and zsh read all of this alike."""
+    cmds, targets, pending = [], [], []
+    words = None
+    # A command must follow: after `|`, `&&` or `||`.
+    need = False
+
+    def end():
+        nonlocal words
+        c, words = Plain(words), None
+        run = c.original
+        if run[:2] == ["devenv", "shell"]:
+            k = 3 if run[2:3] in (["--quiet"], ["-q"]) else 2
+            if run[k:k + 1] != ["--"] or len(run) <= k + 1:
+                return False
+            run, c.wrapped = run[k + 1:], True
+        head = os.path.basename(run[0])
+        if "=" in run[0] or head in WRAPPERS | SHELLS or head in NOT_PLAIN:
             # A runner or wrapper: the rule names what it runs, not it.
-            return None
-    return [normalize_git(w) if w[0] == "git" else w for w in commands]
+            return False
+        try:
+            c.words = normalize_git(run) if run[0] == "git" else run
+        except Unparsable:
+            return False
+        cmds.append(c)
+        return True
+
+    i = 0
+    while i < len(command):
+        c = command[i]
+        rest = command[i:]
+        if c in " \t":
+            i += 1
+        elif c == "\n":
+            i += 1
+            for delimiter, strip_tabs in pending:
+                try:
+                    _, i = take_body(command, i, delimiter, strip_tabs)
+                except Unparsable:
+                    return None
+            pending = []
+            if words is not None and not end():
+                return None
+        elif rest.startswith(("&&", "||")) or c in "|;":
+            op = rest[:2] if rest.startswith(("&&", "||")) else c
+            if words is None or rest.startswith(("|&", ";;")) or not end():
+                return None
+            need = op != ";"
+            i += len(op)
+        elif m := re.match(r"[0-9]?>&[0-9](?=[\s;&|]|\Z)", rest):
+            if words is None:
+                return None
+            i += m.end()
+        elif m := re.match(r"(?:[0-9]?>>?|&>>?)(?![|!&(>])[ \t]*", rest):
+            target = plain_word(command, i + m.end())
+            if words is None or target is None:
+                return None
+            value, i = target
+            if value != "/dev/null":
+                if not safe_redirect(">", value):
+                    return None
+                targets.append(value)
+        elif rest.startswith("<<") and not rest.startswith("<<<"):
+            m = re.match(r"<<(-?)[ \t]*(?:'([A-Za-z_][A-Za-z0-9_]*)'|\"([A-Za-z_][A-Za-z0-9_]*)\")(?=[\s;&|]|\Z)", rest)
+            if words is None or not m:
+                return None
+            pending.append((m.group(2) or m.group(3), bool(m.group(1))))
+            i += m.end()
+        else:
+            word = plain_word(command, i)
+            if word is None:
+                return None
+            value, i = word
+            words = (words or []) + [value]
+            need = False
+    if pending or (words is not None and not end()) or need or not cmds:
+        return None
+    return cmds, targets
+
+
+def approved(words, allow):
+    """Whether a command may run without a prompt as part of a call: an
+    allow rule names it or it only reads, its arguments stay inside the
+    project, and it isn't a shell or an interpreter reading its script from
+    stdin."""
+    prog = program(words[0])
+    if prog in SHELLS or (interpreter(prog) and not any(not a.startswith("-") for a in words[1:])):
+        return False
+    return plain_args(words) and (read_only(words) or matches(allow, words))
+
+
+def is_gate(words):
+    """Whether a command runs the gate, scripts/check.sh: by its path, or as
+    a shell's or `source`'s script (`bash scripts/check.sh`)."""
+    def gate_path(w):
+        return os.path.normpath(w) == "scripts/check.sh" or w.endswith("/scripts/check.sh")
+    if not words:
+        return False
+    if gate_path(words[0]):
+        return True
+    if program(words[0]) in SHELLS or words[0] in ("source", "."):
+        i = 1
+        while i < len(words) and words[i][:1] in ("-", "+") and words[i] not in ("-", "--"):
+            # -o and +o take an option name.
+            i += 2 if words[i] in ("-o", "+o") else 1
+        if i < len(words) and words[i] == "--":
+            i += 1
+        return i < len(words) and gate_path(words[i])
+    return False
 
 
 def settings_rules():
