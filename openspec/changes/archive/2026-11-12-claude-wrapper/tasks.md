@@ -126,7 +126,7 @@ Decision 2. The new test is a superset of the old one, so no step here can make 
 
 No test runs the tasks, so these are done by hand in this worktree's own shell. Find each generated script with `devenv shell --quiet -- printenv DEVENV_TASK_FILE`, then `jq` on that file for the task's `status` or `command` path, then read it.
 
-- [ ] 4.1 Run `devenv shell --quiet -- printenv PATH` and verify the directory of the new `coldlogic-claude` store path comes before the real `claude`'s directory (`/opt/homebrew/bin` on Derek's machine). Read that directory's `claude` (a link to the application) and verify: the line `git_bin=/nix/store/…/bin/git` is there, there is no `export PATH`, and the `bin` directory holds only `claude`.
+- [x] 4.1 Run `devenv shell --quiet -- printenv PATH` and verify the directory of the new `coldlogic-claude` store path comes before the real `claude`'s directory (`/opt/homebrew/bin` on Derek's machine). Read that directory's `claude` (a link to the application) and verify: the line `git_bin=/nix/store/…/bin/git` is there, the wrapper adds nothing to PATH (the `export PATH="$PATH"` that writeShellApplication writes is a no-op), and the `bin` directory holds only `claude`.
 - [x] 4.2 Read the generated status scripts of `devenv:files` and `devenv:files:cleanup`. Verify each is only the shared test. Run each four ways with `env -u CLAUDECODE -u COLDLOGIC_DEVENV_SESSION` plus the variables to set, and confirm: `CLAUDECODE=1` alone exits 0; `COLDLOGIC_DEVENV_SESSION=1` alone exits 0; both exit 0; neither exits 1. A status only tests, so running it with the variables cleared is safe; do not run a task's command script that way.
 - [x] 4.3 Read the generated command scripts of `coldlogic:session-files`, `coldlogic:generated-files-stale` and `coldlogic:prune-worktrees`. Verify each starts with the shared test, spelled exactly as in the statuses, and that the first two leave at once outside a session and the third inside one.
 - [x] 4.4 Run `devenv shell --quiet -- true` and verify the session behaves as before the change: `devenv:files` and `devenv:files:cleanup` are `(cached)`, `coldlogic:session-files` succeeds, and the generated-files notice appears exactly when it did before.
@@ -162,6 +162,8 @@ No test runs the tasks, so these are done by hand in this worktree's own shell. 
 ## 6. Checks from a terminal (Derek, before merge)
 
 The session can't make these: they need a shell outside any session. Each records its result in the PR. A failure of 6.1 to 6.3 goes back to design.md before the merge.
+
+Archived with 6.1 to 6.8 open by design: they are Derek's manual terminal checks, recorded in the PR rather than ticked here.
 
 - [ ] 6.1 Cost. In the main checkout's devenv shell, run `time claude --version` three times, then once more after `touch devenv.nix`. Record the warm and the after-change times. Verify the warm time is acceptable; if it is over two seconds, stop and raise design.md's open question 1.
 - [ ] 6.2 `PATH` under direnv. In a fresh terminal, `cd` into the checkout (direnv loads) and run `type -a claude`. Verify the first entry is the `coldlogic-claude` store path and the real one follows.
