@@ -281,7 +281,7 @@ Tested by: `claude-guard-test.py`, "Unparsable" cases; the error and plan-mode p
 - **THEN** the guard denies it
 
 ### Requirement: The project's own worktrees are recognised by their git metadata
-The guard SHALL count a directory as one of the project's own worktrees only when it is `<project>/.claude/worktrees/<name>` or `<project>.worktrees/<name>`, its `.git` file names a directory under the project's `.git/worktrees` that names it back, and that directory's `commondir` exists and resolves to the project's `.git`. Relative paths in these files SHALL be read as git reads them.
+A directory SHALL count as the project's own worktree only when it sits in `<project>.worktrees`, `<project>/.claude/worktrees` or `<root>/.claude/worktrees`, its `.git` file names a directory in `<project>/.git/worktrees` that names it back, and that one's `commondir` resolves to `<project>/.git` (paths read as git reads them). `<project>` SHALL be the main checkout a linked-worktree root's `.git` file names, else the root.
 
 Tested by: `claude-guard-test.py`, the "project's own worktrees" block.
 
@@ -305,8 +305,28 @@ Tested by: `claude-guard-test.py`, the "project's own worktrees" block.
 - **WHEN** a sibling worktree's `.git/worktrees/x` has no `commondir`, and a session there runs `git status`
 - **THEN** the guard returns no allow
 
+#### Scenario: A sibling of a root that is a linked worktree
+- **WHEN** the session's root is `<main>.worktrees/x`, a linked worktree of the main checkout `<main>`, and `<main>.worktrees/y` and `<main>/.claude/worktrees/n` were made by `git worktree add` from it
+- **THEN** the guard counts `<main>.worktrees/y` and `<main>/.claude/worktrees/n` as the project's own worktrees
+
+#### Scenario: A worktree under a linked root's own .claude
+- **WHEN** the session's root is `<main>.worktrees/x` and `<main>.worktrees/x/.claude/worktrees/m` was made by `git worktree add` from it (EnterWorktree)
+- **THEN** the guard counts it as one of the project's own worktrees for that session, and not for a session rooted in `<main>` or `<main>.worktrees/y`
+
+#### Scenario: A root whose .git file is relative
+- **WHEN** the session's root is `<main>.worktrees/x`, whose `.git` file holds a relative path, an allow rule covers `git status *`, and a session in `<main>.worktrees/y` runs `git status`
+- **THEN** the guard allows it
+
+#### Scenario: The same checks from a root that is a linked worktree
+- **WHEN** the session's root is `<main>.worktrees/x` and a session runs `git status` in a directory that only claims to be a worktree, a worktree whose `commondir` leads elsewhere, another repository's worktree, or a worktree of the project outside both places
+- **THEN** the guard returns no allow
+
+#### Scenario: A root whose .git file names no main checkout
+- **WHEN** the session's root has a `.git` file whose directory has no `commondir` (a broken worktree, a submodule), or whose `commondir` isn't a checkout's `.git` directory (a worktree of a bare repository)
+- **THEN** the guard takes the root itself for `<project>`, as before: a command in the root is judged as in any project root, and `git status` in `<main>.worktrees/y` returns no allow
+
 ### Requirement: The project's own worktrees are judged like its root
-At the top of one of the project's own worktrees, or in a subdirectory of one with no other repository in between, a command SHALL get the same decision it would get in the project root. Paths inside such a worktree SHALL count as inside the project.
+At the top of one of the project's own worktrees, or in a subdirectory of one with no other repository in between, a command SHALL get the same decision it would get in the project root, and paths inside such a worktree SHALL count as inside the project, whether the session's root is the main checkout or one of those worktrees. For a session rooted in a linked worktree, the main checkout SHALL NOT count as one of them.
 
 Tested by: `claude-guard-test.py`, the "project's own worktrees" block.
 
@@ -352,6 +372,30 @@ Tested by: `claude-guard-test.py`, the "project's own worktrees" block.
 
 #### Scenario: A relative program below a worktree's top
 - **WHEN** an allow rule covers `scripts/check.sh` and a session in `<project>.worktrees/x/packages` runs `scripts/check.sh`
+- **THEN** the guard asks
+
+#### Scenario: A sibling worktree, from a session rooted in a linked worktree
+- **WHEN** the session's root is `<main>.worktrees/x`, allow rules cover `git status *`, `git log *` and `git add *`, and a session runs `git status` in `<main>.worktrees/y`, `git add a.py` in `<main>.worktrees/y/packages`, or `git log` in `<main>/.claude/worktrees/n/src`
+- **THEN** the guard allows it
+
+#### Scenario: A sibling worktree's .claude, from a session rooted in a linked worktree
+- **WHEN** the session's root is `<main>.worktrees/x` and a session edits `<main>.worktrees/y/.claude/skills/s/SKILL.md`, a regular file, or `<main>/.claude/worktrees/n/.claude/settings.json`
+- **THEN** the guard asks
+
+#### Scenario: Source and .git in a sibling worktree, from a session rooted in a linked worktree
+- **WHEN** the session's root is `<main>.worktrees/x` and a session writes `<main>.worktrees/y/src/main.rs` or `<main>.worktrees/y/.git`
+- **THEN** the guard leaves the first to Claude Code's rules and denies the second
+
+#### Scenario: A shell edit in a sibling worktree, from a session rooted in a linked worktree
+- **WHEN** the session's root is `<main>.worktrees/x` and a session in `<main>.worktrees/y/packages` runs `echo x > ../src/b.rs`, which names no scratch file
+- **THEN** the guard denies it, as a Bash call changing a project file
+
+#### Scenario: -C naming a sibling, from a session rooted in a linked worktree
+- **WHEN** the session's root is `<main>.worktrees/x`, an allow rule covers `git status *`, and a session at the top of `<main>.worktrees/x` runs `git -C <main>.worktrees/y status`
+- **THEN** the guard returns no allow, while the same command at the top of `<main>.worktrees/y` is allowed
+
+#### Scenario: The main checkout, from a session rooted in a linked worktree
+- **WHEN** the session's root is `<main>.worktrees/x`, allow rules cover `git status *` and `git switch *`, and a session in `<main>` runs `git status` or `git switch main`
 - **THEN** the guard asks
 
 ### Requirement: git -C naming the checkout a command runs in is dropped before rules match

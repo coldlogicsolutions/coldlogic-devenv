@@ -1337,6 +1337,48 @@ with tempfile.TemporaryDirectory() as top:
     nocd = os.path.join(top, "proj.worktrees", "nocd")
     linked(root, nocd, "nocd")
     os.remove(os.path.join(root, ".git", "worktrees", "nocd", "commondir"))
+    # A second sibling, for sessions rooted in x (#65).
+    y = os.path.join(top, "proj.worktrees", "y")
+    linked(root, y, "y")
+    for d in ("packages", "src", os.path.join(".claude", "skills", "s")):
+        os.makedirs(os.path.join(y, d))
+    open(os.path.join(y, ".claude", "skills", "s", "SKILL.md"), "w").close()
+    # A worktree EnterWorktree makes from a session rooted in x, under x's
+    # own .claude/worktrees, and a look-alike beside it.
+    own = os.path.join(sib, ".claude", "worktrees", "m")
+    linked(root, own, "m")
+    os.makedirs(os.path.join(own, "src"))
+    own_fake = os.path.join(sib, ".claude", "worktrees", "f")
+    os.makedirs(own_fake)
+    with open(os.path.join(own_fake, ".git"), "w") as f:
+        f.write(f"gitdir: {os.path.join(root, '.git', 'worktrees', 'm')}\n")
+    # A sibling whose gitdir back-pointer can't be read as text.
+    badback = os.path.join(top, "proj.worktrees", "badback")
+    linked(root, badback, "badback")
+    with open(os.path.join(root, ".git", "worktrees", "badback", "gitdir"), "wb") as f:
+        f.write(b"\xff\xfe\n")
+    # A root whose `.git` file can't be read as text.
+    badgit = os.path.join(top, "proj.worktrees", "badgit")
+    os.makedirs(badgit)
+    with open(os.path.join(badgit, ".git"), "wb") as f:
+        f.write(b"gitdir: \xff\xfe\n")
+    # A submodule-style checkout: its gitdir has no commondir or gitdir file.
+    subm = os.path.join(top, "proj.worktrees", "subm")
+    os.makedirs(os.path.join(root, ".git", "modules", "subm"))
+    os.makedirs(subm)
+    with open(os.path.join(subm, ".git"), "w") as f:
+        f.write(f"gitdir: {os.path.join(root, '.git', 'modules', 'subm')}\n")
+    # A worktree of a bare repository: its commondir is no checkout's `.git`.
+    bare = os.path.join(top, "bare.git")
+    bw = os.path.join(top, "bare.git.worktrees", "bw")
+    os.makedirs(os.path.join(bare, "worktrees", "bw"))
+    os.makedirs(bw)
+    with open(os.path.join(bw, ".git"), "w") as f:
+        f.write(f"gitdir: {os.path.join(bare, 'worktrees', 'bw')}\n")
+    with open(os.path.join(bare, "worktrees", "bw", "commondir"), "w") as f:
+        f.write("..\n")
+    with open(os.path.join(bare, "worktrees", "bw", "gitdir"), "w") as f:
+        f.write(os.path.join(bw, ".git") + "\n")
     policy ={**POLICY, "allow": POLICY["allow"] + ["git switch *"], "ask": POLICY["ask"] + ["git switch -f *"]}
     try:
         for cwd, command, expected in [
@@ -1419,6 +1461,127 @@ with tempfile.TemporaryDirectory() as top:
                 if got != expected:
                     failures += 1
                     print(f"FAIL {command!r} in {cwd}: expected {expected}, got {got}")
+        finally:
+            guard.scratch = real_scratch
+        # A session that starts in a linked worktree (#65) finds the
+        # project's other worktrees from the main checkout, and nothing else.
+        P = os.path.join
+        for session, cwd, command, expected in [
+            # Siblings are judged like the root.
+            (sib, y, "git status", "allow"),
+            (sib, y, "git log --oneline -5", "allow"),
+            (sib, y, "git switch -c feat/y", "allow"),
+            (sib, y, "git switch -f main", "ask"),
+            (sib, y, "git push --force", "deny"),
+            (sib, P(y, "packages"), "git add a.py", "allow"),
+            (sib, P(y, "packages"), "scripts/check.sh", "ask"),
+            (sib, y, "devenv shell --quiet -- scripts/check.sh", "allow"),
+            (sib, rel, "git status", "allow"),
+            (sib, nested, "git status", "allow"),
+            (sib, P(nested, "src"), "git log", "allow"),
+            # A worktree under the linked root's own .claude/worktrees is
+            # one too, for that session only.
+            (sib, own, "git status", "allow"),
+            (sib, P(own, "src"), "git log", "allow"),
+            # A look-alike inside the root gets no allow, like any
+            # repository nested in it (under_sub).
+            (sib, own_fake, "git status", None),
+            (root, own, "git status", "ask"),
+            (y, own, "git status", "ask"),
+            # What isn't the project's own worktree still isn't.
+            (sib, fake, "git status", "ask"),
+            (sib, bc, "git status", "ask"),
+            (sib, ow, "git status", "ask"),
+            (sib, away, "git status", "ask"),
+            (sib, under_sub, "git status", "ask"),
+            (sib, nocd, "git status", "ask"),
+            # The main checkout stays outside a linked-rooted session's project.
+            (sib, root, "git status", "ask"),
+            (sib, P(root, "sub"), "git status", "ask"),
+            (nested, root, "git status", "ask"),
+            # Only a -C naming the checkout the command runs in is dropped.
+            (sib, sib, f"git -C {y} status", None),
+            (sib, y, f"git -C {y} status", "allow"),
+            (sib, y, "git -C ../y status", "allow"),
+            (sib, y, f"git -C {sib} status", None),
+            (sib, sib, f"git -C {root} status", None),
+            (sib, sib, "cat ../y/README.md", None),
+            # Other linked roots: a relative `.git` file, a worktree under
+            # .claude, and a worktree elsewhere.
+            (rel, sib, "git status", "allow"),
+            (rel, y, "git status", "allow"),
+            (rel, rel, "git status", "allow"),
+            (nested, sib, "git status", "allow"),
+            (nested, P(y, "packages"), "git add a.py", "allow"),
+            (away, sib, "git status", "allow"),
+            # Roots whose `.git` file names no main checkout, or another
+            # repository's: the root alone, as before.
+            (nocd, nocd, "git status", "allow"),
+            (nocd, sib, "git status", "ask"),
+            (nocd, y, "git status", "ask"),
+            (subm, subm, "git status", "allow"),
+            (subm, sib, "git status", "ask"),
+            (bw, bw, "git status", "allow"),
+            (bw, sib, "git status", "ask"),
+            (bc, sib, "git status", "ask"),
+            (badgit, badgit, "git status", "allow"),
+            (badgit, sib, "git status", "ask"),
+            (sib, badback, "git status", "ask"),
+        ]:
+            guard.WORKING.update(cwd=cwd, root=session)
+            got = guard.decide("Bash", {"command": command}, policy)
+            checks += 1
+            got = got[0] if got else None
+            if got != expected:
+                failures += 1
+                print(f"FAIL {command!r} in {cwd}, session in {session}: expected {expected}, got {got}")
+        for session, cwd, tool, path, expected in [
+            # A sibling's Claude Code configuration asks.
+            (sib, sib, "Edit", f"{y}/.claude/skills/s/SKILL.md", "ask"),
+            (sib, y, "Edit", f"{y}/.claude/skills/s/SKILL.md", "ask"),
+            (sib, sib, "Write", f"{y}/.claude/settings.json", "ask"),
+            (sib, sib, "Edit", f"{nested}/.claude/settings.json", "ask"),
+            (sib, sib, "Write", f"{y}/.git", "deny"),
+            (sib, sib, "Write", f"{y}/src/main.rs", None),
+            (sib, sib, "Write", f"{nested}/src/main.rs", None),
+            (sib, sib, "Edit", f"{sib}/.claude/skills/y/SKILL.md", "ask"),
+            (sib, sib, "Edit", f"{ow}/.claude/settings.json", None),
+            (sib, sib, "Edit", f"{fake}/.claude/settings.json", None),
+            (nocd, nocd, "Edit", f"{y}/.claude/skills/s/SKILL.md", None),
+            (subm, subm, "Edit", f"{y}/.claude/skills/s/SKILL.md", None),
+            # A worktree under the linked root's own .claude/worktrees.
+            (sib, P(own, "src"), "Edit", f"{own}/.claude/settings.json", "ask"),
+            (sib, P(own, "src"), "Write", f"{own}/.git", "deny"),
+            (sib, P(own, "src"), "Write", f"{own}/src/main.rs", None),
+            # The main checkout isn't this session's project, so Claude
+            # Code's own rules decide (no Edit allow rule covers it).
+            (sib, sib, "Edit", f"{root}/.claude/settings.local.json", None),
+        ]:
+            guard.WORKING.update(cwd=cwd, root=session)
+            got = guard.decide(tool, {"file_path": path}, policy)
+            checks += 1
+            got = got[0] if got else None
+            if got != expected:
+                failures += 1
+                print(f"FAIL {tool} {path} in {cwd}, session in {session}: expected {expected}, got {got}")
+        guard.scratch = lambda path: False
+        try:
+            for session, cwd, command, expected in [
+                # A shell edit of a sibling's file is denied.
+                (sib, P(y, "packages"), "echo x > ../src/b.rs", "deny"),
+                (sib, y, "echo x > src/a.rs", "deny"),
+                (sib, y, f"echo x > {top}/elsewhere.txt", None),
+                (sib, P(sib, "packages"), "echo x > ../src/b.rs", "deny"),
+                (nocd, P(y, "packages"), "echo x > ../src/b.rs", None),
+                (sib, P(own, "src"), "echo x > a.rs", "deny"),
+            ]:
+                guard.WORKING.update(cwd=cwd, root=session)
+                got = guard.decide("Bash", {"command": command}, policy)
+                checks += 1
+                got = got[0] if got else None
+                if got != expected:
+                    failures += 1
+                    print(f"FAIL {command!r} in {cwd}, session in {session}: expected {expected}, got {got}")
         finally:
             guard.scratch = real_scratch
     finally:
@@ -1665,8 +1828,6 @@ with tempfile.TemporaryDirectory() as top:
                       "git switch * --discard-changes", "git switch -fc *"]}
         for session in (root, sib):
             for cwd in (sib, nested):
-                if session == sib and cwd == nested:
-                    continue
                 for command, expected in [
                     ("git switch --no-track -c feat/x origin/main", "allow"),
                     ("git switch --no-track -c fix/guard-y origin/main", "allow"),
