@@ -8,6 +8,8 @@ let
   claude-guard = import ./packages/claude-guard.nix { inherit pkgs; };
   session-relink = import ./packages/session-relink.nix { inherit pkgs; };
   session-shell = import ./packages/session-shell.nix { inherit pkgs; };
+  memory-recall = import ./packages/memory-recall.nix { inherit pkgs; };
+  memory-migrate = import ./packages/memory-migrate.nix { inherit pkgs; };
   prune-worktrees = import ./packages/prune-worktrees.nix { inherit pkgs gh-app; };
   claude-plugins-install = pkgs.writeShellApplication {
     name = "claude-plugins-install";
@@ -39,6 +41,104 @@ let
       set = builtins.getEnv "COLDLOGIC_GPG_AGENT_SOCKET";
     in
     if set != "" then set else "${gnupgHome}/S.gpg-agent";
+  # The shared memory store (README, "Shared memory"), opted into per machine
+  # with COLDLOGIC_MEMORY_URL, read here as gnupgHome reads GNUPGHOME.
+  # normaliseMemoryUrl returns the URL without trailing slashes when the
+  # whole value is `http(s)://<host>[:<port>][/<segment>...]` (host and
+  # segments from letters, digits, `.`, `_`, `~`, `-`), and "" otherwise: no
+  # credentials, query, fragment or space. The URL only reaches a shell
+  # through escapeShellArg, so this catches a mistake early rather than
+  # stopping injection. The recall hook checks it with the same pattern.
+  normaliseMemoryUrl =
+    value:
+    let
+      matched = builtins.match "(https?://[A-Za-z0-9._~-]+(:[0-9]+)?(/[A-Za-z0-9._~-]+)*)/*" value;
+    in
+    if matched == null then "" else builtins.head matched;
+  # Evaluated with every shell, where memoryUrl asserts them.
+  normaliseMemoryUrlCases = [
+    (normaliseMemoryUrl "https://m.example.ts.net" == "https://m.example.ts.net")
+    (normaliseMemoryUrl "https://m.example.ts.net/" == "https://m.example.ts.net")
+    (normaliseMemoryUrl "https://m.example.ts.net///" == "https://m.example.ts.net")
+    (normaliseMemoryUrl "http://10.0.0.5:8000" == "http://10.0.0.5:8000")
+    (normaliseMemoryUrl "https://h/base/path/" == "https://h/base/path")
+    (normaliseMemoryUrl "m.example.ts.net" == "")
+    (normaliseMemoryUrl "ftp://h" == "")
+    (normaliseMemoryUrl "https://u:p@h" == "")
+    (normaliseMemoryUrl "https://h?x=1" == "")
+    (normaliseMemoryUrl "https://h#f" == "")
+    (normaliseMemoryUrl "https://h/a b" == "")
+    (normaliseMemoryUrl "" == "")
+    # No IPv6 literal: the host has no brackets, so `[::1]` can't be set.
+    (normaliseMemoryUrl "http://[::1]:8000" == "")
+  ];
+  # Whether a normalised memory URL's host is this machine: `localhost` or a
+  # name under it (with or without the root's trailing dot), 127.0.0.0/8 in
+  # dotted form, or 0.0.0.0. The sandbox's allowLocalBinding lets a session's
+  # commands reach such a host past the proxy, so the store's REST API, and
+  # with it the ask rules on the MCP tools, could be bypassed from the Bash
+  # tool. It's warned about, not refused: a store on loopback is a reasonable
+  # trial setup. Other spellings of 127.0.0.1 (an integer, hex) aren't caught.
+  memoryLoopback =
+    url:
+    let
+      hostMatch = builtins.match "https?://([^:/]+).*" url;
+      host = if hostMatch == null then "" else pkgs.lib.toLower (builtins.head hostMatch);
+    in
+    builtins.match "(.+\\.)?localhost\\.?" host != null
+    || builtins.match "127(\\.[0-9]+){0,3}\\.?" host != null
+    || builtins.match "0+(\\.0+){0,3}" host != null;
+  memoryLoopbackCases = [
+    (memoryLoopback "http://localhost:8000")
+    (memoryLoopback "http://LocalHost")
+    (memoryLoopback "http://localhost.")
+    (memoryLoopback "http://memory.localhost/base")
+    (memoryLoopback "http://127.0.0.1:8000")
+    (memoryLoopback "http://127.1.2.3")
+    (memoryLoopback "http://127.1")
+    (memoryLoopback "http://0.0.0.0:8000")
+    (!memoryLoopback "https://m.example.ts.net")
+    (!memoryLoopback "http://10.0.0.5:8000")
+    (!memoryLoopback "http://127.example.com")
+    (!memoryLoopback "http://localhost.example.com")
+    (!memoryLoopback "http://notlocalhost")
+    (!memoryLoopback "http://1270.0.0.1")
+    (!memoryLoopback "")
+  ];
+  # "" when unset, or set but unusable, which is warned about and otherwise
+  # treated as unset: nothing else fails the shell over optional settings.
+  memoryUrl =
+    let
+      set = builtins.getEnv "COLDLOGIC_MEMORY_URL";
+      url = normaliseMemoryUrl set;
+    in
+    assert pkgs.lib.assertMsg (pkgs.lib.all pkgs.lib.id normaliseMemoryUrlCases)
+      "coldlogic: normaliseMemoryUrl misreads a memory store URL";
+    assert pkgs.lib.assertMsg (pkgs.lib.all pkgs.lib.id memoryLoopbackCases)
+      "coldlogic: memoryLoopback misreads a memory store URL";
+    if set != "" && url == "" then
+      pkgs.lib.warn "coldlogic: COLDLOGIC_MEMORY_URL isn't an http(s) URL without credentials, query or fragment, so the shared memory store is off" ""
+    else if memoryLoopback url then
+      pkgs.lib.warn "coldlogic: COLDLOGIC_MEMORY_URL is on this machine (loopback), and the sandbox's allowLocalBinding is on, so a session's commands may reach the store directly and bypass the ask rules on its memory tools" url
+    else
+      url;
+  # The GitHub login for the `scope:user:<login>` tag, in lower case; "" when
+  # unset, or set but unusable (warned about).
+  memoryUser =
+    let
+      set = builtins.getEnv "COLDLOGIC_MEMORY_USER";
+    in
+    if builtins.match "[A-Za-z0-9][A-Za-z0-9-]*" set != null then
+      pkgs.lib.toLower set
+    else if set != "" then
+      pkgs.lib.warn "coldlogic: COLDLOGIC_MEMORY_USER isn't a GitHub login, so no user scope is used" ""
+    else
+      "";
+  memoryConfigured = memoryUrl != "";
+  # Turns Claude Code's built-in auto memory off, independently of the URL:
+  # only the exact value 1 does, and any other value leaves it alone without
+  # a warning, since there is no usable-but-wrong value to catch.
+  autoMemoryDisabled = builtins.getEnv "COLDLOGIC_DISABLE_AUTO_MEMORY" == "1";
 in
 {
   # Every shell substitutes from the cache this repository's
@@ -46,7 +146,12 @@ in
   cachix.pull = [ "coldlogic" ];
 
   profiles.developer.module =
-    { config, lib, ... }:
+    {
+      config,
+      lib,
+      options,
+      ...
+    }:
     let
       # The generated files devenv links (not its copy or seed modes). The
       # notice compares all of them.
@@ -244,6 +349,248 @@ in
         ".claude/hooks"
         ".claude/skills"
       ];
+      # The shared memory store's MCP tools, by name, for the rules below and
+      # the self-check. Reading and storing need no prompt; everything that
+      # changes or removes memories asks, by a tool. Tools in neither list
+      # get no rule, so the permission mode decides, and so does a tool a
+      # later version of the service adds: no glob allows the whole server.
+      memoryAllowTools = [
+        "memory_search"
+        "memory_list"
+        "memory_health"
+        "memory_stats"
+        "memory_store"
+      ];
+      memoryAskTools = [
+        "memory_delete"
+        "memory_update"
+        "memory_cleanup"
+        "memory_consolidate"
+        "memory_quality"
+        "memory_resolve"
+        "memory_distill"
+        "mistake_note_update"
+        "mistake_note_delete"
+        "unquarantine_memory"
+      ];
+      memoryTool = tool: "mcp__memory__${tool}";
+      # This module's own contribution to the settings for the auto memory
+      # switch, a binding of its own so the self-check can read it apart from
+      # a project's own `autoMemoryEnabled`, which the merged settings mix in.
+      autoMemorySetting = lib.optionalAttrs autoMemoryDisabled { autoMemoryEnabled = false; };
+      autoMemoryEnv = lib.optionalAttrs autoMemoryDisabled { COLDLOGIC_DISABLE_AUTO_MEMORY = "1"; };
+      # Likewise this module's contributions for the memory store, used where
+      # they're generated below.
+      memoryEnv = lib.optionalAttrs memoryConfigured (
+        {
+          COLDLOGIC_MEMORY_URL = memoryUrl;
+        }
+        // lib.optionalAttrs (memoryUser != "") { COLDLOGIC_MEMORY_USER = memoryUser; }
+      );
+      memoryServers = lib.optionalAttrs memoryConfigured {
+        memory = {
+          type = "http";
+          url = "${memoryUrl}/mcp";
+        };
+      };
+      # The module's whole definition of claude.code.mcpServers when the store
+      # is configured: claude.nix's server, the option's default, which any
+      # definition replaces, so it is added back, and the store's. A project
+      # that replaces the option replaces this too; the self-check reads this
+      # binding, so that is the project's choice and not a failure.
+      memoryMcpServers = options.claude.code.mcpServers.default // memoryServers;
+      memoryEnabledServers = lib.optional memoryConfigured "memory";
+      # The store's tools, each by its full name (`""` renders the bare name),
+      # never as a glob over the server (see memoryAllowTools). Ask is checked
+      # before allow, so an ask on the server would prompt on every read. The
+      # claude.ai connector of the same store is denied: its calls would go
+      # over the public endpoint, outside these rules. A connector's tools
+      # keep its display name's case (`mcp__claude_ai_Granola__*`), so both
+      # names the account's connector may have, `Memory` and `memory`, are
+      # denied; one named anything else isn't covered.
+      memoryConnectorRules = map (name: "mcp__claude_ai_${name}__*") [
+        "memory"
+        "Memory"
+      ];
+      memoryRules = lib.optionalAttrs memoryConfigured (
+        lib.genAttrs (map memoryTool memoryAllowTools) (_: {
+          allow = [ "" ];
+        })
+        // lib.genAttrs (map memoryTool memoryAskTools) (_: {
+          ask = [ "" ];
+        })
+        // lib.genAttrs memoryConnectorRules (_: {
+          deny = [ "" ];
+        })
+      );
+      # Prints the session's shared memories and when to save one
+      # (packages/memory-recall.sh) on every source, a compaction or a clear
+      # included, after which the text would otherwise be gone. It runs
+      # outside the Bash sandbox, which keeps the store's host out (see
+      # allowedDomains), and exits 0 within about 3 seconds whatever the store
+      # does: its requests share one 3-second budget, however many scopes it
+      # asks for and however slowly the store answers.
+      memoryHooks = lib.optionalAttrs memoryConfigured {
+        coldlogic-memory-recall = {
+          hookType = "SessionStart";
+          command =
+            "${memory-recall}/bin/coldlogic-memory-recall --url ${lib.escapeShellArg memoryUrl}"
+            + lib.optionalString (memoryUser != "") " --user ${lib.escapeShellArg memoryUser}"
+            + lib.optionalString autoMemoryDisabled " --auto-memory-off";
+        };
+      };
+      # Whether an `allowedDomains` entry lets the sandbox reach host, as the
+      # sandbox matches them (sandbox-runtime's matchesDomainPattern): `*`
+      # matches every host, `*.<suffix>` any host below the suffix, anything
+      # else only that host, case-insensitively, and an entry may end in
+      # `:<port>`. Here `*.<suffix>` also counts as covering the suffix itself,
+      # which the sandbox doesn't do, to err towards failing the self-check.
+      domainCovers =
+        host: entry:
+        let
+          lower = lib.toLower entry;
+          withoutPort = builtins.match "(.*):[0-9]+" lower;
+          pattern = if withoutPort == null then lower else builtins.head withoutPort;
+          suffix = lib.removePrefix "*." pattern;
+          h = lib.toLower host;
+        in
+        pattern == "*"
+        || h == pattern
+        || (lib.hasPrefix "*." pattern && (h == suffix || lib.hasSuffix ".${suffix}" h));
+      # Evaluated with every shell, by the self-check below.
+      domainCoversCases = [
+        (domainCovers "m.example.ts.net" "m.example.ts.net")
+        (domainCovers "m.example.ts.net" "M.Example.TS.net")
+        (domainCovers "m.example.ts.net" "m.example.ts.net:443")
+        (domainCovers "m.example.ts.net" "*.ts.net")
+        (domainCovers "m.example.ts.net" "*.example.ts.net")
+        (domainCovers "m.example.ts.net" "*.example.ts.net:8443")
+        (domainCovers "m.example.ts.net" "*.EXAMPLE.ts.net:443")
+        (domainCovers "example.ts.net" "*.example.ts.net")
+        (domainCovers "m.example.ts.net" "*")
+        (!domainCovers "m.example.ts.net" "example.ts.net")
+        (!domainCovers "m.example.ts.net" "*.other.ts.net")
+        (!domainCovers "m.example.ts.net" "*.xample.ts.net")
+        (!domainCovers "m.example.ts.net" "github.com")
+        (!domainCovers "m.example.ts.net" "m.example.ts.net.evil.com")
+      ];
+      # A self-check of the generated settings for the memory store and the
+      # auto memory switch, so a change that drops an ask rule, allows a
+      # destructive tool or opens the store's host to the sandbox fails
+      # evaluation. Each switch is checked on and off; the gate builds the
+      # shell with both set, with neither, and with each alone
+      # (scripts/check.sh). It runs in
+      # every project that imports this module, so where a switch is off it
+      # checks only merged keys whose names only this module uses (the
+      # COLDLOGIC_ variables, the connector's rule, the recall hook), never
+      # one a project may set itself (its own `autoMemoryEnabled`, or a
+      # `memory` server with its rules and enabledMcpjsonServers entry, which
+      # an unconditional one of this module's would pass as). It reads the
+      # settings, so only
+      # coldlogic:generated-files-stale, which nothing in them refers to, may
+      # use it: from a hook command or claude.code.env it would recurse.
+      memorySettingsCases =
+        let
+          settings = config.files."${config.claude.code.settingsPath}".json;
+          env = settings.env or { };
+          allow = settings.permissions.allow or [ ];
+          ask = settings.permissions.ask or [ ];
+          deny = settings.permissions.deny or [ ];
+          enabled = settings.enabledMcpjsonServers or [ ];
+          recallCommands = builtins.filter (lib.hasInfix "coldlogic-memory-recall") (
+            lib.concatMap (entry: map (hook: hook.command or "") (entry.hooks or [ ])) (
+              settings.hooks.SessionStart or [ ]
+            )
+          );
+          host =
+            let
+              matched = builtins.match "https?://([^/:]+).*" memoryUrl;
+            in
+            if matched == null then "" else builtins.head matched;
+          # The project's own allowedDomains entries that let the sandbox
+          # reach the store. Deliberately a hard failure even though a
+          # project chose them: the developer opted into the store, and a
+          # sandbox that reaches it lets a command delete memories around the
+          # ask rules. The case's name says which entries and what to do.
+          covering = builtins.filter (domainCovers host) (settings.sandbox.network.allowedDomains or [ ]);
+          coveringList = lib.concatMapStringsSep ", " builtins.toJSON covering;
+          hostCase =
+            if host == "" then
+              "the store's host can be read from COLDLOGIC_MEMORY_URL"
+            else if covering == [ ] then
+              "the store's host kept out of the sandbox, by name or by a wildcard"
+            else
+              "the sandbox's allowedDomains entry ${coveringList} covers the memory store's host ${host}, so a session's commands could reach it around the ask rules: narrow that entry so it doesn't cover ${host}, or unset COLDLOGIC_MEMORY_URL";
+        in
+        {
+          "domainCovers reads allowedDomains entries as the sandbox does" = lib.all lib.id domainCoversCases;
+        }
+        // (
+          if autoMemoryDisabled then
+            {
+              "autoMemoryEnabled is false" = (settings.autoMemoryEnabled or null) == false;
+              "env sets COLDLOGIC_DISABLE_AUTO_MEMORY" = (env.COLDLOGIC_DISABLE_AUTO_MEMORY or null) == "1";
+            }
+          else
+            # The merged variable, a name only this module uses. A project may
+            # set autoMemoryEnabled itself, so the merged key can't be read
+            # here; the module's own binding is, which catches its condition
+            # being lost, though not a generation site that bypasses it.
+            {
+              "env has no COLDLOGIC_DISABLE_AUTO_MEMORY" = !(env ? COLDLOGIC_DISABLE_AUTO_MEMORY);
+              "the module sets no autoMemoryEnabled" = autoMemorySetting == { };
+            }
+        )
+        // (
+          if memoryConfigured then
+            {
+              # The module's own definition, not the merged .mcp.json, which
+              # a project may replace.
+              "the module keeps claude.nix's mcp.devenv.sh server" = memoryMcpServers ? "mcp.devenv.sh";
+              "a SessionStart recall hook, with --auto-memory-off exactly when auto memory is off" =
+                recallCommands != [ ]
+                && lib.all (
+                  command: lib.hasInfix " --auto-memory-off" command == autoMemoryDisabled
+                ) recallCommands;
+              "both MCP servers enabled" =
+                builtins.elem "memory" enabled && builtins.elem "mcp.devenv.sh" enabled;
+              "every read tool allowed" = lib.all (tool: builtins.elem (memoryTool tool) allow) memoryAllowTools;
+              "no destructive tool allowed" =
+                !(lib.any (tool: builtins.elem (memoryTool tool) allow) memoryAskTools);
+              "every destructive tool asks" = lib.all (tool: builtins.elem (memoryTool tool) ask) memoryAskTools;
+              # Written out, not read from memoryConnectorRules, so dropping a
+              # name there fails here.
+              "the connector's tools denied, as memory and as Memory" =
+                builtins.elem "mcp__claude_ai_memory__*" deny && builtins.elem "mcp__claude_ai_Memory__*" deny;
+              "the module's memory server URL" = (memoryMcpServers.memory.url or null) == "${memoryUrl}/mcp";
+              "env sets COLDLOGIC_MEMORY_URL" = (env.COLDLOGIC_MEMORY_URL or null) == memoryUrl;
+              ${hostCase} = host != "" && covering == [ ];
+            }
+          else
+            # Only merged keys whose names no one but this module uses, so a
+            # binding that loses its condition is caught where it lands. Not
+            # checked: a `memory` server, its enabledMcpjsonServers entry and
+            # `mcp__memory__*` rules, all names a project may use for a server
+            # of its own; an unconditional one of those passes.
+            {
+              "no hook named coldlogic-memory-recall" = !(config.claude.code.hooks ? coldlogic-memory-recall);
+              "no SessionStart hook runs coldlogic-memory-recall" = recallCommands == [ ];
+              "env has no COLDLOGIC_MEMORY_URL or COLDLOGIC_MEMORY_USER" =
+                !(env ? COLDLOGIC_MEMORY_URL) && !(env ? COLDLOGIC_MEMORY_USER);
+              "no rule names the claude.ai memory connector" =
+                !(lib.any (
+                  rule: lib.hasPrefix "mcp__claude_ai_memory__" rule || lib.hasPrefix "mcp__claude_ai_Memory__" rule
+                ) (allow ++ ask ++ deny));
+            }
+        );
+      # "" once the cases hold.
+      memorySettingsCheck =
+        let
+          failed = lib.attrNames (lib.filterAttrs (_: ok: !ok) memorySettingsCases);
+        in
+        assert lib.assertMsg (failed == [ ])
+          "coldlogic: the generated memory settings fail their self-check: ${lib.concatStringsSep "; " failed}";
+        "";
     in
     {
       packages = with pkgs; [
@@ -257,6 +604,12 @@ in
         # files before it starts a session, and marks that session
         # (packages/claude-wrapper.sh).
         claude-wrapper
+        # The shared memory store's recall hook, to run by hand, and the
+        # one-off import of auto memory files, run from a terminal. Here
+        # whether or not a store is configured, so the gate's shell build
+        # always runs their tests.
+        memory-recall
+        memory-migrate
       ];
 
       git-hooks.hooks.nixfmt.enable = true;
@@ -279,7 +632,21 @@ in
           # knows the session reads its settings, `.mcp.json` and skills from
           # here (packages/session-shell.sh, own-checkout).
           COLDLOGIC_SESSION_ROOT = config.devenv.root;
-        };
+        }
+        # A session enters `devenv shell` for every command and evaluates this
+        # file with its own environment. One started without these variables
+        # (the desktop app, an IDE) would otherwise relink `.mcp.json` without
+        # the store, and evaluate settings without autoMemoryEnabled, which
+        # coldlogic:generated-files-stale would report as stale. The URL is no
+        # secret, and the sandbox still keeps commands from it.
+        // memoryEnv
+        // autoMemoryEnv;
+        # The shared memory store, over the tailnet, whose ACL is its access
+        # control, so no headers. claude.nix's server is the option's default,
+        # which any definition replaces, so it is added back here; and the
+        # condition is on the whole value, since a definition holding only a
+        # false `mkIf` would still replace the default and leave none.
+        mcpServers = lib.mkIf (memoryServers != { }) memoryMcpServers;
         permissions = {
           # A starting point. Anything broader belongs in the project.
           # The guard hook below applies these to each command inside a
@@ -381,6 +748,16 @@ in
         };
       };
 
+      # The memory store's rules (memoryRules) and recall hook (memoryHooks).
+      # A module of its own because the rules and hooks here are written as
+      # attribute paths, which a generated set can't join.
+      imports = [
+        {
+          claude.code.permissions.rules = memoryRules;
+          claude.code.hooks = memoryHooks;
+        }
+      ];
+
       # Decides each tool call from what it would run (packages/claude-guard.py).
       # It reads the session's Bash rules, the project's included, from a file
       # written here.
@@ -450,7 +827,13 @@ in
           "commit-commands@claude-plugins-official" = true;
           "context7@claude-plugins-official" = true;
         };
-        enabledMcpjsonServers = [ "mcp.devenv.sh" ];
+        enabledMcpjsonServers = [ "mcp.devenv.sh" ] ++ memoryEnabledServers;
+      }
+      # Claude Code's built-in auto memory, off only with
+      # COLDLOGIC_DISABLE_AUTO_MEMORY=1, whether or not a store is configured.
+      # Absent otherwise, so the user's own setting applies.
+      // autoMemorySetting
+      // {
 
         # Paths are absolute: the file is generated per checkout and never
         # committed.
@@ -525,6 +908,11 @@ in
             # `wrangler dev` and the integration suites listen on localhost.
             allowLocalBinding = true;
             # A profile adds its toolchain's registries and documentation.
+            # The shared memory store's host is deliberately not here: the
+            # MCP connection and the recall hook don't need it, and without it
+            # a session's commands can't reach the REST API, so the memory
+            # tools' ask rules are the only path to a destructive call. The
+            # self-check (memorySettingsCases) fails the shell if it's added.
             allowedDomains = [
               "github.com"
               "api.github.com"
@@ -633,8 +1021,11 @@ in
       # and a line of a kind it doesn't know is still listed, as printed, so
       # a new kind can't make the notice go quiet.
       tasks."coldlogic:generated-files-stale" = lib.mkIf (generatedLinks != { }) {
+        # memorySettingsCheck is "", and fails evaluation if the memory
+        # settings are wrong: here, the one place that reads every generated
+        # file and feeds none of them.
         exec = ''
-          ${inSession} || exit 0
+          ${memorySettingsCheck}${inSession} || exit 0
           cd "$DEVENV_ROOT" || exit 0
           ${noticeFunctions}
           # 10: the session reads its own files from another checkout. Any
