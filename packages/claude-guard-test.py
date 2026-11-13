@@ -2,6 +2,7 @@
 
 import importlib.util
 import os
+import re
 import sys
 import tempfile
 
@@ -1933,6 +1934,204 @@ with tempfile.TemporaryDirectory() as top:
                 print(f"FAIL {command!r} in {repo}: expected {expected}, got {got}")
     finally:
         guard.WORKING.update(cwd=None, root=None)
+
+# The module's own allow list, copied from devenv.nix (rules.Bash.allow):
+# keep the two in step. Below it, every command from issues #42, #43, #61,
+# #62, #85 and #86, each run bare and behind `devenv shell --quiet --`.
+MODULE_ALLOW = [
+    "scripts/check.sh", "git status *", "git diff *", "git log *", "git add *",
+    "git commit *", "git switch *", "git branch *", "git worktree *",
+    "git fetch *", "git rev-list *",
+    "gh-app pr view *", "gh-app pr checks *", "gh-app pr list *",
+    "gh-app pr comment *", "gh-app pr create *", "gh-app pr merge *",
+    "gh-app issue create *", "gh-app issue view *", "gh-app issue list *",
+    "gh-app issue comment *", "gh-app issue edit *", "openspec *",
+]
+# Where devenv.nix is beside this file's directory (the gate runs these from
+# the checkout; the package build copies only the two .py files), the copy
+# above must match it.
+_nix = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "devenv.nix")
+if os.path.exists(_nix):
+    with open(_nix) as f:
+        _m = re.search(r"rules\.Bash\.allow = \[(.*?)\];", f.read(), re.S)
+    _shipped = re.findall(r'^\s*"([^"]*)"', _m.group(1), re.M) if _m else None
+    checks += 1
+    if _shipped is None:
+        failures += 1
+        print("FAIL can't find `rules.Bash.allow = [ ... ];` in devenv.nix to check MODULE_ALLOW against")
+    elif _shipped != MODULE_ALLOW:
+        failures += 1
+        print(f"FAIL MODULE_ALLOW differs from devenv.nix rules.Bash.allow: {_shipped}")
+MODULE = [
+    # #42: read-only git.
+    ("git log", ALLOW),
+    ("git log --oneline -5", ALLOW),
+    ("git log --oneline | head -5", ALLOW),
+    ("git log -p -1", ALLOW),
+    ("git log --format=%h%x20%s -3", ALLOW),
+    ("git log origin/main..HEAD", ALLOW),
+    ("git log --oneline -- packages/claude-guard.py", ALLOW),
+    ("git -C . log --oneline -5", ALLOW),
+    ("git status", ALLOW),
+    ("git status --short", ALLOW),
+    ("git diff", ALLOW),
+    ("git diff origin/main...HEAD", ALLOW),
+    ("git diff --stat HEAD~1", ALLOW),
+    # What the guard refuses for any allowed git.
+    ("git -C /elsewhere log", NONE),
+    ("git log --output=x", ASK),
+    ("git -c core.pager=x log", ASK),
+    ("git log $(rm -rf x)", NONE),
+    ("git log -1 && git push --force", DENY),
+    ("git log -1; rm -rf build", NONE),
+    # No rule names these: Claude Code's own rules decide.
+    ("git show HEAD", NONE),
+    ("git blame README.md", NONE),
+    ("git rev-parse HEAD", NONE),
+    # #85: the devenv version and help queries, and nothing else of devenv's.
+    ("devenv --version", ALLOW),
+    ("devenv -V", ALLOW),
+    ("devenv version", ALLOW),
+    ("devenv --version && git status", ALLOW),
+    ("devenv --version | head -1", ALLOW),
+    ("devenv --version 2>&1", ALLOW),
+    ("devenv --version shell -- rm -rf x", ASK),
+    ("devenv -V shell -- git push --force", DENY),
+    ("devenv --version extra", ASK),
+    ("devenv --quiet --version", ASK),
+    ("devenv --versio", ASK),
+    ("/nix/store/x/bin/devenv --version", ASK),
+    ("devenv --weird-flag shell -- ls", ASK),
+    # Its help, at the top or for a subcommand, only reads too.
+    ("devenv --help", ALLOW),
+    ("devenv -h", ALLOW),
+    ("devenv help", ALLOW),
+    ("devenv shell --help", ALLOW),
+    ("devenv tasks -h", ALLOW),
+    ("devenv version --help", ALLOW),
+    ("devenv help shell", ALLOW),
+    ("devenv help help", ALLOW),
+    ("devenv up --help", ALLOW),
+    ("devenv shell -h", ALLOW),
+    ("devenv --help | head -20", ALLOW),
+    ("devenv --hel", ASK),
+    ("devenv --help shell", ASK),
+    ("devenv shell --help -- rm -rf x", ASK),
+    ("devenv shell --help extra", ASK),
+    ("devenv -q shell --help", ASK),
+    ("devenv bogus --help", NONE),
+    ("devenv help bogus", NONE),
+    ("devenv help shell extra", NONE),
+    # `version` is read as a subcommand, so a word after it gets no allow.
+    ("devenv version extra", NONE),
+    ("devenv update", NONE),
+    ("devenv up", NONE),
+    ("devenv shell", NONE),
+    ("devenv shell --quiet -- rm -rf build", NONE),
+    ("devenv --version; rm -rf build", NONE),
+    ("devenv --version > out.txt", DENY),
+    ("devenv version; git push --force", DENY),
+    # #43: issues and pull requests as the App, with a body.
+    ("gh-app issue view 42 --json title,body,comments", ALLOW),
+    ("gh-app issue list", ALLOW),
+    ("gh-app issue list --state open --search guard", ALLOW),
+    ("gh-app pr list", ALLOW),
+    ("gh-app issue create --title t --body 'line1\nline2 with `code` and $(x)'", ALLOW),
+    ("gh-app issue create --title t --body \"line1\nline2\"", ALLOW),
+    ("gh-app issue create --title t --body-file \"$TMPDIR/body.md\"", ALLOW),
+    ("gh-app issue create --title t --body-file /private/tmp/claude-501/scratch/body.md", ALLOW),
+    ("gh-app issue comment 5 --body-file \"$TMPDIR/body.md\"", ALLOW),
+    ("gh-app issue edit 5 --body-file \"$TMPDIR/body.md\"", ALLOW),
+    ("gh-app pr create --title t --body-file \"$TMPDIR/body.md\"", ALLOW),
+    # A double-quoted body with backticks or `$` runs what it holds, and a
+    # body in `$( )` is a substitution: the supported forms are above.
+    ("gh-app issue create --title t --body \"uses `git status` here\"", NONE),
+    ("gh-app issue create --title t --body \"uses `gh pr merge 5` here\"", DENY),
+    ("gh-app issue create --title t --body \"costs $HOME\"", NONE),
+    ("gh-app issue create --title t --body \"$(cat <<'EOF'\nRun gh pr merge 5.\nEOF\n)\"", NONE),
+    # #61: a body on stdin that quotes forbidden commands.
+    ("gh-app issue create --title t --body-file - <<'EOF'\nRun gh pr merge 55 --auto --squash, then git push --force.\nEOF", ALLOW),
+    ("gh-app issue create --title t --body-file - <<'EOF' 2>&1 | grep 'https://'\ngh pr merge 55\nEOF", ALLOW),
+    ("gh-app issue create --title t --body-file - <<EOF\nx\nEOF", NONE),
+    # #62: auto-merge as the App.
+    ("gh-app pr merge 31 --auto --squash", ALLOW),
+    ("gh-app pr merge 31 -R coldlogicsolutions/claude-plugins-coldlogic --auto --squash", ALLOW),
+    ("gh-app pr merge --auto --squash 31", ALLOW),
+    ("gh pr merge 31 --auto --squash", DENY),
+    # #86: another repository's issues.
+    ("gh-app issue comment 78 -R coldlogicsolutions/coldlogic-devenv --body \"plain text\"", ALLOW),
+    ("gh-app issue comment 49 -R coldlogicsolutions/coldlogic-devenv --body-file /private/tmp/claude-501/scratch/comment-49.md", ALLOW),
+    ("gh-app issue create -R coldlogicsolutions/coldlogic-devenv --title t --body x", ALLOW),
+    ("gh-app issue view 78 -R coldlogicsolutions/coldlogic-devenv", ALLOW),
+    ("gh-app issue list -R coldlogicsolutions/coldlogic-devenv", ALLOW),
+    ("gh-app issue comment 78 --body-file /etc/passwd", ASK),
+    ("gh-app issue comment 78", ASK),
+    # A cd changes what the rules and paths after it mean.
+    ("cd /Users/x/Projects/infrastructure && devenv shell --quiet -- gh-app issue comment 78 "
+     "-R coldlogicsolutions/coldlogic-devenv --body x", NONE),
+]
+FUNCTION = "gh() { devenv shell --quiet -- gh-app \"$@\"; }\ngh pr merge 55 --auto --squash"
+module_policy = {"allow": MODULE_ALLOW}
+for command, expected in (
+        [(c, e) for command, e in MODULE for c in (command, "devenv shell --quiet -- " + command)]
+        # #61: a function named gh asks. Behind the wrapper only its first
+        # line is wrapped: the guard can't parse it, and its rough reading
+        # sees `gh pr merge` and denies. Failing closed, on purpose.
+        + [(FUNCTION, ASK), ("devenv shell --quiet -- " + FUNCTION, DENY)]):
+    got = guard.decide("Bash", {"command": command}, module_policy)
+    checks += 1
+    got = got[0] if got else None
+    if got != expected:
+        failures += 1
+        print(f"FAIL module allow list {command!r}: expected {expected}, got {got}")
+
+# The same list where the session's directory is known: `-C` naming it.
+with tempfile.TemporaryDirectory() as top:
+    root = os.path.join(os.path.realpath(top), "p")
+    os.makedirs(os.path.join(root, "sub"))
+    open(os.path.join(root, "README.md"), "w").close()
+    guard.WORKING.update(cwd=root, root=root)
+    try:
+        for command, expected in [
+            (f"git -C {root} log --oneline -5", ALLOW),
+            (f"git -C {root} status", ALLOW),
+            ("git -C . status", ALLOW),
+            (f"git -C {root}/sub log", NONE),
+            ("devenv --version", ALLOW),
+        ]:
+            for c in (command, "devenv shell --quiet -- " + command):
+                got = guard.decide("Bash", {"command": c}, module_policy)
+                checks += 1
+                got = got[0] if got else None
+                if got != expected:
+                    failures += 1
+                    print(f"FAIL module allow list in {root} {c!r}: expected {expected}, got {got}")
+    finally:
+        guard.WORKING.update(cwd=None, root=None)
+
+# A devenv version or help query only reads, so it needs no rule; an ask or deny
+# rule still wins, and a rule for the wrapper doesn't change what's inside.
+for policy, command, expected in [
+    ({}, "devenv --version", ALLOW),
+    ({}, "devenv -V", ALLOW),
+    ({}, "devenv version", ALLOW),
+    ({}, "devenv shell --quiet -- devenv --version", ALLOW),
+    ({"allow": ["devenv shell *"]}, "devenv shell --quiet -- devenv --version", ALLOW),
+    ({"ask": ["devenv *"]}, "devenv --version", ASK),
+    ({"deny": ["devenv *"]}, "devenv --version", DENY),
+    ({"ask": ["devenv *"]}, "devenv shell --help", ASK),
+    ({"deny": ["devenv *"]}, "devenv --help", DENY),
+    ({"ask": ["devenv --version"]}, "devenv shell --quiet -- devenv --version", ASK),
+    ({}, "devenv --version shell -- rm -rf x", ASK),
+    ({"allow": ["devenv shell *"]}, "devenv shell --quiet -- rm -rf build", ASK),
+    ({"allow": ["devenv *"]}, "devenv update", NONE),
+]:
+    got = guard.decide("Bash", {"command": command}, policy)
+    checks += 1
+    got = got[0] if got else None
+    if got != expected:
+        failures += 1
+        print(f"FAIL devenv version query {policy} {command!r}: expected {expected}, got {got}")
 
 total = checks
 print(f"{total - failures}/{total} passed")
