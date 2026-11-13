@@ -123,6 +123,22 @@ devenv shell --quiet -- scripts/check.sh
 
 It exits non-zero if any check failed, and the pull request runs it again as the `check` job.
 
+### Testing the guard
+
+To find out what the guard decides for a command, don't run the command. The guard judges a call; it doesn't contain it. Whatever it lets through runs for real, and so does anything a probe script leaves behind when a heredoc ends early (#79: a reviewer's probe posted PR comments and made a commit).
+
+Use one of these instead:
+
+- Add a case to `packages/claude-guard-test.py` and run the cases:
+
+  ```
+  devenv shell --quiet -- python3 -I packages/claude-guard-test.py
+  ```
+
+- Load `packages/claude-guard.py` in Python and copy `POLICY` from that test file, as its first lines do. Set where the call runs with `guard.WORKING.update(cwd=<dir>, root=<project root>)`: without a cwd, path checks are skipped and the probe says `None` where the real guard would ask or deny. Then call `guard.decide("Bash", {"command": "<the command>"}, POLICY)` on the command as a string. It returns the decision and its reason, or `None` when the call is left to Claude Code's rules.
+
+This holds for reviewers and subagents too: the command under test stays a string.
+
 ## Staying current
 
 Each project pins the module in `devenv.lock`, so CI images keyed on that file stay stable. The update workflow proposes the update as a PR, weekly and whenever the module's main moves, and the shell warns when the pin is behind:

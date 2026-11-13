@@ -2313,19 +2313,32 @@ def names_secret(path):
 def claude_config(path):
     """Whether a path inside the project is in a `.claude` directory, other
     than inside one of its worktrees (`.claude/worktrees/<name>/...`), which
-    are checkouts of the project."""
+    are checkouts of the project. A path is judged by where it leads and,
+    when it is itself a link, by where it sits (its directory resolved, its
+    own name kept), so a file linked in `.claude` counts wherever it leads:
+    devenv's settings.json is a link into the Nix store. A linked directory
+    above the last component is judged only by where it leads."""
+    views = []
     where = resolve(path)
-    if where is None or where[1] is None:
-        return False
-    parts = unicodedata.normalize("NFKC", where[1]).casefold().split(os.sep)
-    i = 0
-    while i < len(parts):
-        if parts[i] == ".claude":
-            if parts[i + 1:i + 2] == ["worktrees"] and len(parts) > i + 3:
-                i += 3
-                continue
-            return True
-        i += 1
+    if where is not None and where[1] is not None:
+        views.append(where[1])
+    literal = os.path.expanduser(path).rstrip("/")
+    head, name = os.path.split(literal)
+    cwd = WORKING["cwd"]
+    if cwd and name not in ("", ".", "..") and os.path.islink(os.path.join(cwd, literal)):
+        parent = resolve(head)
+        if parent is not None and parent[1] is not None:
+            views.append(os.path.normpath(os.path.join(parent[1], name)))
+    for inside in views:
+        parts = unicodedata.normalize("NFKC", inside).casefold().split(os.sep)
+        i = 0
+        while i < len(parts):
+            if parts[i] == ".claude":
+                if parts[i + 1:i + 2] == ["worktrees"] and len(parts) > i + 3:
+                    i += 3
+                    continue
+                return True
+            i += 1
     return False
 
 

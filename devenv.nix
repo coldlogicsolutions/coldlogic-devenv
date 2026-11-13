@@ -163,8 +163,9 @@ in
           # matched with `.env.*`: denyRead wins over allowRead there, so
           # `.env.*` would also hide `.env.example`. The guard hook denies any other `.env.*` named in
           # a command or a file tool. A write deny overrides allowWrite, so
-          # only `.env` itself is write-denied; the guard hook keeps other
-          # `.env.*` files from being written by name.
+          # of the `.env` files only `.env` itself is write-denied; the guard
+          # hook keeps other `.env.*` files from being written by name.
+          # `secrets/**` below is write-denied whole.
           readVariants = [
             ".env.local"
             ".env.*.local"
@@ -175,7 +176,10 @@ in
           ];
           denyWrite = true;
         }
-        { path = "secrets/**"; }
+        {
+          path = "secrets/**";
+          denyWrite = true;
+        }
       ];
       secretRules = map (secret: "**/${secret.path}") secrets;
       inCheckout = path: [
