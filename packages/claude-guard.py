@@ -1216,9 +1216,38 @@ def shell_script(words):
     return None
 
 
+# The whole of a devenv version or help query: devenv's argument parser
+# prints the text and exits before anything runs, so it is a command that
+# only reads, not a wrapper.
+DEVENV_QUERY = (["--version"], ["-V"], ["version"], ["--help"], ["-h"], ["help"])
+# devenv's subcommands (devenv 2.4.0's `devenv --help`), whose help it
+# prints as `devenv <subcommand> --help` or `devenv help <subcommand>`. A
+# subcommand missing here only means its help prompts.
+DEVENV_SUBCOMMANDS = {
+    "user-config", "init", "generate", "shell", "update", "search", "info", "up",
+    "down", "processes", "tasks", "test", "container", "inputs", "machines",
+    "changelogs", "repl", "gc", "build", "eval", "direnvrc", "version", "mcp",
+    "lsp", "hook", "allow", "revoke", "help",
+}
+
+
+def devenv_query(words):
+    """Whether these words are exactly a devenv version or help query, with
+    the program spelled `devenv` and nothing else: a path to it, another
+    option, more words, or an abbreviation is not one."""
+    if not words or words[0] != "devenv":
+        return False
+    rest = words[1:]
+    return (rest in DEVENV_QUERY
+            or (len(rest) == 2 and rest[0] in DEVENV_SUBCOMMANDS and rest[1] in ("--help", "-h"))
+            or (len(rest) == 2 and rest[0] == "help" and rest[1] in DEVENV_SUBCOMMANDS))
+
+
 def devenv_command(words):
     """The command `devenv [flags] shell [flags] [--] command` runs, or None
     if this is another devenv subcommand or an interactive shell."""
+    if devenv_query(words):
+        return None
     i = 1
     seen_shell = False
     while i < len(words):
@@ -2424,7 +2453,10 @@ def matches(rules, words):
 
 
 def read_only(words):
-    """Whether this is a READ_ONLY command reading only inside the project."""
+    """Whether this is a READ_ONLY command reading only inside the project,
+    or a devenv version or help query (devenv_query), which reads nothing."""
+    if devenv_query(words):
+        return True
     if words[0] not in READ_ONLY:
         return False
     if any(PLACEHOLDER in a for a in words[1:]):
@@ -3116,13 +3148,13 @@ def plain_commands(command):
         nonlocal words
         c, words = Plain(words), None
         run = c.original
-        if run[:2] == ["devenv", "shell"]:
+        if run[:2] == ["devenv", "shell"] and not devenv_query(run):
             k = 3 if run[2:3] in (["--quiet"], ["-q"]) else 2
             if run[k:k + 1] != ["--"] or len(run) <= k + 1:
                 return False
             run, c.wrapped = run[k + 1:], True
         head = os.path.basename(run[0])
-        if "=" in run[0] or head in WRAPPERS | SHELLS or head in NOT_PLAIN:
+        if "=" in run[0] or (head in WRAPPERS | SHELLS and not devenv_query(run)) or head in NOT_PLAIN:
             # A runner or wrapper: the rule names what it runs, not it.
             return False
         try:
