@@ -52,8 +52,20 @@ in
       # notice compares all of them.
       generatedLinks = lib.filterAttrs (_: file: (file.copyMode or "symlink") == "symlink") config.files;
       # The ones a session links itself: all but the settings, which a session
-      # never creates, replaces or removes. Only a terminal shell refreshes it.
+      # never creates, replaces or removes. Only a terminal shell refreshes it,
+      # or the `claude` wrapper before a session starts.
       sessionLinks = removeAttrs generatedLinks [ config.claude.code.settingsPath ];
+      # `claude`, which checks the settings path after a failed refresh, in
+      # whichever checkout it starts: so relative to the checkout. The option
+      # is absolute: devenv's src/modules/integrations/claude.nix (rev
+      # 9655d32, as locked) defaults it to
+      # "${config.devenv.root}/.claude/settings.json", and its `files` key is
+      # that path. So the root comes off here; a path a project sets outside
+      # its root stays absolute, which the wrapper checks as it is.
+      claude-wrapper = import ./packages/claude-wrapper.nix {
+        inherit pkgs;
+        settingsPath = lib.removePrefix "${config.devenv.root}/" config.claude.code.settingsPath;
+      };
       # packages/session-relink.sh with `opts`, then `--`, then each file in
       # `links` and the store path it should link to. Run from $DEVENV_ROOT.
       # Exits 1 when nothing is stale, 0 when something is, and anything else
@@ -119,10 +131,22 @@ in
         ".mcp.json"
       ];
       otherLinks = removeAttrs generatedLinks sessionOnlyFiles;
+      # Inside a Claude Code session: the `claude` wrapper's marker
+      # (packages/claude-wrapper.sh), or Claude Code's own variable, for a
+      # session the wrapper didn't start (the desktop app, an IDE extension).
+      # The shell tasks' session test: no task may decide it another way, and
+      # it must never be narrower than CLAUDECODE alone, or such a session
+      # would run devenv's link step in its sandbox (#68). The `claude`
+      # wrapper's nested check (packages/claude-wrapper.sh) differs on
+      # purpose: it reads CLAUDE_CODE_CHILD_SESSION, not CLAUDECODE, since an
+      # IDE extension sets CLAUDECODE in its terminals, where no session runs
+      # yet and the wrapper must refresh. Its refresh clears both variables
+      # so this test lets the file tasks run.
+      inSession = ''{ [ -n "''${COLDLOGIC_DEVENV_SESSION:-}" ] || [ -n "''${CLAUDECODE:-}" ]; }'';
       # The status of devenv's two file tasks: skip (exit 0) in a session,
-      # run (exit 1) outside one. Nothing else may decide it.
+      # run (exit 1) outside one.
       skipInSession = ''
-        [ -n "''${CLAUDECODE:-}" ]
+        ${inSession}
       '';
       # What no session reads or writes, at any depth in the checkout. Each
       # `path` becomes a Read and an Edit deny rule (`**/<path>`) and sandbox
@@ -225,6 +249,10 @@ in
         # For `coldlogic-prune-worktrees --dry-run`; the hooks and the task
         # below run it themselves.
         prune-worktrees
+        # `claude`, ahead of the real one on PATH: refreshes the generated
+        # files before it starts a session, and marks that session
+        # (packages/claude-wrapper.sh).
+        claude-wrapper
       ];
 
       git-hooks.hooks.nixfmt.enable = true;
@@ -562,7 +590,8 @@ in
       # The session links the files itself instead (coldlogic:session-files),
       # atomically and one at a time, so one file the sandbox refuses doesn't
       # stop the rest (#78). It never writes the settings link, which only a
-      # terminal shell refreshes, in case a settings file changing under a
+      # terminal shell or the `claude` wrapper, before a session starts,
+      # refreshes, in case a settings file changing under a
       # running session is what makes Claude Code remove it (#94). devenv's
       # state file is left as the last terminal shell wrote it, and the next
       # terminal shell's cleanup removes any orphans.
@@ -580,7 +609,7 @@ in
       # failed dependency (#37).
       tasks."coldlogic:session-files" = lib.mkIf (config.files != { }) {
         exec = ''
-          [ -n "''${CLAUDECODE:-}" ] || exit 0
+          ${inSession} || exit 0
           cd "$DEVENV_ROOT" || exit 0
           ${sessionRelink [ ] sessionLinks} >/dev/null 2>&1 || true
           exit 0
@@ -601,7 +630,7 @@ in
       # a new kind can't make the notice go quiet.
       tasks."coldlogic:generated-files-stale" = lib.mkIf (generatedLinks != { }) {
         exec = ''
-          [ -n "''${CLAUDECODE:-}" ] || exit 0
+          ${inSession} || exit 0
           cd "$DEVENV_ROOT" || exit 0
           ${noticeFunctions}
           # 10: the session reads its own files from another checkout. Any
@@ -735,7 +764,7 @@ in
       # shell.
       tasks."coldlogic:prune-worktrees" = {
         exec = ''
-          [ -z "''${CLAUDECODE:-}" ] || exit 0
+          if ${inSession}; then exit 0; fi
           [ -z "''${CI:-}" ] || exit 0
           ${prune-worktrees}/bin/coldlogic-prune-worktrees --background --session-dir "$DEVENV_ROOT" || true
           exit 0

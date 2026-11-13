@@ -1,0 +1,665 @@
+#!/usr/bin/env bash
+# Tests for claude-wrapper.sh, run when packages/claude-wrapper.nix builds:
+#
+#   bash packages/claude-wrapper-test.sh packages/claude-wrapper.sh
+#
+# Needs bash and coreutils only. Stand-ins for devenv, git and the real
+# claude log what they were given; nothing runs the real devenv. Every
+# wrapper under test is a copy of the script, started by its path, so
+# BASH_SOURCE is what PATH would give.
+#
+# The stand-ins' bodies are single-quoted on purpose: they expand when a
+# stand-in runs, not when it is written.
+# shellcheck disable=SC2016
+set -eu
+
+# Also run by hand inside a session, which sets these.
+unset CLAUDECODE CLAUDE_CODE_CHILD_SESSION COLDLOGIC_DEVENV_SESSION COLDLOGIC_WRAPPERS_RUN COLDLOGIC_START_WITHOUT_SETTINGS DEVENV_ROOT DEVENV_DOTFILE DEVENV_STATE DEVENV_PROFILE DEVENV_RUNTIME git_bin mktemp_bin rm_bin settings_path
+
+script="$(cd "$(dirname "${1:?usage: claude-wrapper-test.sh <claude-wrapper.sh>}")" && pwd)/$(basename "$1")"
+root="$(mktemp -d)"
+root="$(cd "$root" && pwd -P)"
+trap 'rm -rf "$root"' EXIT
+
+bash_bin="$(command -v bash)"
+timeout_bin="$(command -v timeout)"
+# The built wrapper names these by store path; the tests name them too, so
+# cases with a narrow PATH still have them.
+mktemp_abs="$(command -v mktemp)"
+rm_abs="$(command -v rm)"
+outer_path="$PATH"
+passed=0
+failed=0
+n=0
+code=0
+out=""
+
+# install_wrapper <dir>: the script as <dir>/claude.
+install_wrapper() {
+  mkdir -p "$1"
+  {
+    printf '#!%s\n' "$bash_bin"
+    tail -n +2 "$script"
+  } >"$1/claude"
+  chmod +x "$1/claude"
+}
+
+# write_exe <file> <body>: an executable bash script. Builtins only, so it
+# works with any PATH.
+write_exe() {
+  printf '#!%s\n%s\n' "$bash_bin" "$2" >"$1"
+  chmod +x "$1"
+}
+
+# Copies standard input to the file $1, with builtins only.
+copy_stdin='copy_stdin() { local l; : >"$1"; while IFS= read -r l || [ -n "$l" ]; do printf "%s\n" "$l" >>"$1"; done; }'
+
+fresh() {
+  n=$((n + 1))
+  case_dir="$root/case$n"
+  mkdir -p "$case_dir/stubs" "$case_dir/real/bin" "$case_dir/proj" "$case_dir/log" "$case_dir/tmp"
+  install_wrapper "$case_dir/wrap/bin"
+  : >"$case_dir/proj/devenv.nix"
+  write_exe "$case_dir/real/bin/claude" "$copy_stdin"'
+log="$STUB_LOG/claude"
+{
+  echo ran
+  echo "cwd=$PWD"
+  echo "CLAUDECODE=${CLAUDECODE-unset}"
+  echo "session=${COLDLOGIC_DEVENV_SESSION-unset}"
+  echo "wrappers=${COLDLOGIC_WRAPPERS_RUN-unset}"
+  echo "DEVENV_ROOT=${DEVENV_ROOT-unset}"
+  echo "path=$PATH"
+  for a in "$@"; do echo "arg=<$a>"; done
+} >>"$log"
+copy_stdin "$STUB_LOG/claude-stdin"
+echo claude-stdout
+exit "${STUB_CLAUDE_EXIT:-0}"'
+  write_exe "$case_dir/stubs/devenv" "$copy_stdin"'
+{
+  echo ran
+  echo "cwd=$PWD"
+  echo "args=$*"
+  echo "CLAUDECODE=${CLAUDECODE-unset}"
+  echo "session=${COLDLOGIC_DEVENV_SESSION-unset}"
+  for v in DEVENV_ROOT DEVENV_DOTFILE DEVENV_STATE DEVENV_PROFILE DEVENV_RUNTIME; do
+    echo "$v=${!v-unset}"
+  done
+} >>"$STUB_LOG/devenv"
+copy_stdin "$STUB_LOG/devenv-stdin"
+echo devenv-stdout
+echo devenv-stderr >&2
+# A signal to the wrapper, devenv'"'"'s parent, as Ctrl-C sends both.
+if [ -n "${STUB_DEVENV_KILL:-}" ]; then
+  kill -"$STUB_DEVENV_KILL" "$PPID"
+fi
+# A hung devenv: the wrapper'"'"'s and its own PID, then a sleep in its place.
+if [ -n "${STUB_DEVENV_HANG:-}" ]; then
+  echo "$PPID $$" >"$STUB_LOG/devenv-pids.tmp"
+  mv "$STUB_LOG/devenv-pids.tmp" "$STUB_LOG/devenv-pids"
+  exec sleep "$STUB_DEVENV_HANG"
+fi
+exit "${STUB_DEVENV_EXIT:-0}"'
+  write_exe "$case_dir/stubs/git" '
+if [ "$1 $2" = "rev-parse --show-toplevel" ] && [ -n "${STUB_GIT_TOP:-}" ]; then
+  echo "$STUB_GIT_TOP"
+  exit 0
+fi
+exit 128'
+  entry="$case_dir/wrap/bin/claude"
+  path="$case_dir/wrap/bin:$case_dir/stubs:$case_dir/real/bin:$outer_path"
+  git_top="$case_dir/proj"
+  run_dir="$case_dir/proj"
+  stdin_file=/dev/null
+  extra=()
+  cd "$case_dir"
+}
+
+# run <args...>: the wrapper at $entry, from $run_dir, with $path, the
+# case's $extra variables and $stdin_file. Sets $code and $out; stderr goes
+# to log/stderr. The timeout turns a loop into a failure, not a hung build.
+# The timeout is a child of the substitution, not exec'd in its place, and
+# its status goes through a file: a wrapper that dies of SIGINT makes
+# timeout die of it too, and a command substitution that dies of SIGINT
+# would take this script with it.
+run() {
+  code=0
+  : >"$case_dir/run-code"
+  out="$(
+    cd "$run_dir"
+    export STUB_LOG="$case_dir/log"
+    export TMPDIR="$case_dir/tmp" mktemp_bin="$mktemp_abs" rm_bin="$rm_abs"
+    if [ -n "$git_top" ]; then
+      export STUB_GIT_TOP="$git_top"
+    fi
+    for kv in ${extra[@]+"${extra[@]}"}; do
+      export "${kv?}"
+    done
+    export PATH="$path"
+    rc=0
+    "$timeout_bin" 20 "$entry" "$@" <"$stdin_file" 2>"$case_dir/log/stderr" || rc=$?
+    echo "$rc" >"$case_dir/run-code"
+  )" || true
+  code="$(<"$case_dir/run-code")"
+}
+
+check() {
+  name="$1"
+  shift
+  if "$@"; then
+    passed=$((passed + 1))
+    echo "ok   $name"
+  else
+    failed=$((failed + 1))
+    echo "FAIL $name (exit $code; out '$out')"
+    for f in "$case_dir"/log/*; do
+      [ -f "$f" ] || continue
+      echo "     ${f##*/}: $(tr '\n' '|' <"$f")"
+    done
+  fi
+}
+
+# Log helpers, with bash builtins: the build has no grep.
+log() { cat "$case_dir/log/$1" 2>/dev/null || true; }
+# has <log> <line>: the log has exactly that line.
+has() {
+  local l
+  [ -f "$case_dir/log/$1" ] || return 1
+  while IFS= read -r l; do
+    if [ "$l" = "$2" ]; then return 0; fi
+  done <"$case_dir/log/$1"
+  return 1
+}
+# contains <log> <text>: the text is somewhere in the log.
+contains() {
+  local all
+  all="$(log "$1")"
+  [[ $all == *"$2"* ]]
+}
+# lacks <log> <text>: the text is nowhere in the log.
+lacks() { ! contains "$1" "$2"; }
+absent() { [ ! -e "$case_dir/log/$1" ]; }
+# runs <log> <n>: the stand-in ran n times.
+runs() {
+  local l count=0
+  if [ -f "$case_dir/log/$1" ]; then
+    while IFS= read -r l; do
+      if [ "$l" = ran ]; then count=$((count + 1)); fi
+    done <"$case_dir/log/$1"
+  fi
+  [ "$count" = "$2" ]
+}
+exits() { [ "$code" = "$1" ]; }
+# args_are <lines>: claude's arg= lines, in order, are exactly these.
+args_are() {
+  local l got=""
+  [ -f "$case_dir/log/claude" ] || return 1
+  while IFS= read -r l; do
+    case "$l" in
+      arg=*) got="${got:+$got
+}$l" ;;
+    esac
+  done <"$case_dir/log/claude"
+  [ "$got" = "$1" ]
+}
+# empty_file <log>: the log exists and is empty.
+empty_file() { [ -f "$case_dir/log/$1" ] && [ ! -s "$case_dir/log/$1" ]; }
+# tmp_clean: the wrapper left nothing in the case's TMPDIR.
+tmp_clean() { [ -z "$(ls -A "$case_dir/tmp")" ]; }
+# lines_are <log> <n>: the log has exactly n lines.
+lines_are() {
+  local l count=0
+  [ -f "$case_dir/log/$1" ] || return 1
+  while IFS= read -r l || [ -n "$l" ]; do count=$((count + 1)); done <"$case_dir/log/$1"
+  [ "$count" = "$2" ]
+}
+# gone <pid>: no process has that PID.
+gone() { [ -n "$1" ] && ! kill -0 "$1" 2>/dev/null; }
+
+# (a) the launch passes through; the refresh runs without the marker.
+fresh
+run -p 'a b' '' '*' --flag=x
+check "(a) exit 0" exits 0
+check "(a) claude gets exactly its arguments" args_are "arg=<-p>
+arg=<a b>
+arg=<>
+arg=<*>
+arg=<--flag=x>"
+check "(a) devenv runs the file tasks" has devenv "args=--quiet tasks run devenv:files"
+check "(a) ... without the marker" has devenv "session=unset"
+check "(a) claude has the marker" has claude "session=1"
+check "(a) stdout is only claude's" [ "$out" = claude-stdout ]
+check "(a) stderr is empty: devenv's output is held back on success" empty_file stderr
+check "(a) ... and its file removed" tmp_clean
+check "(a) claude gets PATH unchanged" has claude "path=$path"
+
+# (b) standard input reaches claude, not devenv.
+fresh
+echo question >"$case_dir/question"
+stdin_file="$case_dir/question"
+run -p
+check "(b) claude reads the input" [ "$(log claude-stdin)" = question ]
+check "(b) devenv reads none of it" empty_file devenv-stdin
+
+# (c) claude's exit code is the command's.
+fresh
+extra=(STUB_CLAUDE_EXIT=7)
+run
+check "(c) exit 7" exits 7
+
+# (d) the marker alone: a session the wrapper started.
+fresh
+before="$(ls -A "$case_dir/proj")"
+extra=(COLDLOGIC_DEVENV_SESSION=1)
+run -p hello
+check "(d) marker: no devenv" absent devenv
+check "(d) ... claude ran with its arguments" args_are "arg=<-p>
+arg=<hello>"
+check "(d) ... and the marker" has claude "session=1"
+check "(d) ... and nothing new in the project" [ "$(ls -A "$case_dir/proj")" = "$before" ]
+
+# (d2) CLAUDE_CODE_CHILD_SESSION alone: a session started another way.
+fresh
+extra=(CLAUDE_CODE_CHILD_SESSION=1)
+run
+check "(d2) child session: no devenv" absent devenv
+check "(d2) ... claude ran with the marker" has claude "session=1"
+
+# (d3) both, and CLAUDECODE: a session's Bash tool.
+fresh
+extra=(COLDLOGIC_DEVENV_SESSION=1 CLAUDE_CODE_CHILD_SESSION=1 CLAUDECODE=1)
+run
+check "(d3) session tool: no devenv" absent devenv
+check "(d3) ... claude keeps CLAUDECODE" has claude "CLAUDECODE=1"
+
+# (e) CLAUDECODE alone: an IDE terminal, which must still refresh.
+fresh
+extra=(CLAUDECODE=1)
+run
+check "(e) IDE terminal: devenv runs without CLAUDECODE" has devenv "CLAUDECODE=unset"
+check "(e) ... and without the marker" has devenv "session=unset"
+check "(e) claude gets CLAUDECODE as given" has claude "CLAUDECODE=1"
+check "(e) ... and the marker" has claude "session=1"
+
+# (f) a subdirectory: refresh at the top, claude where it was started.
+fresh
+mkdir -p "$case_dir/proj/src/deep"
+run_dir="$case_dir/proj/src/deep"
+run
+check "(f) devenv runs at the checkout's top" has devenv "cwd=$case_dir/proj"
+check "(f) claude starts in the subdirectory" has claude "cwd=$case_dir/proj/src/deep"
+
+# (g) a project with only devenv.yaml.
+fresh
+rm "$case_dir/proj/devenv.nix"
+: >"$case_dir/proj/devenv.yaml"
+run
+check "(g) devenv.yaml marks the checkout" has devenv "cwd=$case_dir/proj"
+
+# (g2) a sibling worktree: the shell's DEVENV_ROOT names another checkout,
+# and git's top, a devenv project, wins.
+fresh
+mkdir -p "$case_dir/other"
+extra=(DEVENV_ROOT="$case_dir/other")
+run
+check "(g2) git's top wins over DEVENV_ROOT" has devenv "cwd=$case_dir/proj"
+
+# (g3) the shell's devenv variables, which name another checkout, don't
+# reach the refresh; claude still gets them.
+fresh
+mkdir -p "$case_dir/other"
+extra=(DEVENV_ROOT="$case_dir/other" DEVENV_DOTFILE="$case_dir/other/.devenv" DEVENV_STATE="$case_dir/other/.devenv/state" DEVENV_PROFILE="$case_dir/other/profile" DEVENV_RUNTIME="$case_dir/other/run")
+run
+check "(g3) the refresh has no DEVENV_ROOT" has devenv "DEVENV_ROOT=unset"
+check "(g3) ... no DEVENV_DOTFILE" has devenv "DEVENV_DOTFILE=unset"
+check "(g3) ... no DEVENV_STATE" has devenv "DEVENV_STATE=unset"
+check "(g3) ... no DEVENV_PROFILE" has devenv "DEVENV_PROFILE=unset"
+check "(g3) ... no DEVENV_RUNTIME" has devenv "DEVENV_RUNTIME=unset"
+check "(g3) ... and claude keeps them" has claude "DEVENV_ROOT=$case_dir/other"
+
+# (h) git's top is no devenv project: nothing refreshed or checked, even
+# with the shell's DEVENV_ROOT naming a project whose refresh would fail and
+# whose settings are missing.
+fresh
+mkdir -p "$case_dir/plain"
+git_top="$case_dir/plain"
+run_dir="$case_dir/plain"
+extra=(DEVENV_ROOT="$case_dir/proj" STUB_DEVENV_EXIT=3)
+run
+check "(h) no devenv files at the top: no devenv" absent devenv
+check "(h) ... no refusal: claude ran" runs claude 1
+check "(h) ... in its directory" has claude "cwd=$case_dir/plain"
+check "(h) ... with the marker" has claude "session=1"
+check "(h) ... and nothing on stderr" empty_file stderr
+
+# (i) not in git: the same.
+fresh
+mkdir -p "$case_dir/elsewhere"
+git_top=""
+run_dir="$case_dir/elsewhere"
+extra=(DEVENV_ROOT="$case_dir/proj" STUB_DEVENV_EXIT=3)
+run
+check "(i) git fails: no devenv" absent devenv
+check "(i) ... no refusal: claude ran" runs claude 1
+check "(i) ... in its directory" has claude "cwd=$case_dir/elsewhere"
+check "(i) ... and nothing on stderr" empty_file stderr
+
+# (j) no project and no shell's project.
+fresh
+git_top=""
+run
+check "(j) no project: no devenv" absent devenv
+check "(j) ... claude ran with the marker" has claude "session=1"
+check "(j) ... and nothing on stderr" empty_file stderr
+
+# (k) the refresh fails, settings in place.
+fresh
+mkdir -p "$case_dir/proj/.claude"
+: >"$case_dir/settings-target"
+ln -s "$case_dir/settings-target" "$case_dir/proj/.claude/settings.json"
+extra=(STUB_DEVENV_EXIT=3)
+run
+check "(k) failed refresh, settings there: claude ran" runs claude 1
+check "(k) ... stderr says it couldn't refresh" contains stderr "couldn't refresh"
+check "(k) ... with the exit code" contains stderr "exited 3"
+check "(k) ... and that they may be out of date" contains stderr "may be out of date"
+check "(k) ... and claude has the marker" has claude "session=1"
+check "(k) ... devenv's stderr shown" has stderr devenv-stderr
+check "(k) ... and its stdout, where a task's failure goes, on stderr" has stderr devenv-stdout
+check "(k) ... but not on claude's stdout" [ "$out" = claude-stdout ]
+check "(k) ... and its file removed" tmp_clean
+
+# (l) the refresh fails, no settings: refused.
+fresh
+extra=(STUB_DEVENV_EXIT=3)
+run
+check "(l) failed refresh, no settings: exit 1" exits 1
+check "(l) ... claude not started" absent claude
+check "(l) ... stderr says so" contains stderr "not starting claude"
+check "(l) ... names the settings" contains stderr "$case_dir/proj/.claude/settings.json"
+check "(l) ... and the override" contains stderr "COLDLOGIC_START_WITHOUT_SETTINGS=1 claude"
+check "(l) ... devenv's stderr shown" has stderr devenv-stderr
+check "(l) ... and its stdout" has stderr devenv-stdout
+check "(l) ... and nothing on stdout" [ -z "$out" ]
+check "(l) ... and its file removed on the refusal" tmp_clean
+
+# (m) a dangling settings link counts as missing.
+fresh
+mkdir -p "$case_dir/proj/.claude"
+ln -s "$case_dir/gone" "$case_dir/proj/.claude/settings.json"
+extra=(STUB_DEVENV_EXIT=3)
+run
+check "(m) dangling link: exit 1" exits 1
+check "(m) ... claude not started" absent claude
+check "(m) ... stderr says so" contains stderr "not starting claude"
+
+# (m2) a directory in the settings' place counts as missing too: Claude
+# Code reads no settings from it.
+fresh
+mkdir -p "$case_dir/proj/.claude/settings.json"
+extra=(STUB_DEVENV_EXIT=3)
+run
+check "(m2) directory: exit 1" exits 1
+check "(m2) ... claude not started" absent claude
+check "(m2) ... stderr says so" contains stderr "not starting claude"
+
+# (m3) a link to a regular file counts as there: the check follows it.
+fresh
+mkdir -p "$case_dir/proj/.claude"
+echo '{}' >"$case_dir/settings-target.json"
+ln -s "$case_dir/settings-target.json" "$case_dir/proj/.claude/settings.json"
+extra=(STUB_DEVENV_EXIT=3)
+run
+check "(m3) link to a file: claude ran" runs claude 1
+
+# (n) the override.
+fresh
+extra=(STUB_DEVENV_EXIT=3 COLDLOGIC_START_WITHOUT_SETTINGS=1)
+run
+check "(n) override: claude ran" runs claude 1
+check "(n) ... and stderr says it starts anyway" contains stderr "Starting claude anyway"
+check "(n) ... and claude has the marker" has claude "session=1"
+
+# (o) a regular settings file counts as there.
+fresh
+mkdir -p "$case_dir/proj/.claude"
+echo '{}' >"$case_dir/proj/.claude/settings.json"
+extra=(STUB_DEVENV_EXIT=3)
+run
+check "(o) regular settings file: claude ran" runs claude 1
+
+# (o2) a non-default settings path, as the built wrapper gets it from
+# claude.code.settingsPath: that file is the one checked, in the checkout.
+fresh
+mkdir -p "$case_dir/proj/conf" "$case_dir/proj/src"
+echo '{}' >"$case_dir/proj/conf/claude.json"
+run_dir="$case_dir/proj/src"
+extra=(STUB_DEVENV_EXIT=3 settings_path=conf/claude.json)
+run
+check "(o2) custom settings path there: claude ran" runs claude 1
+check "(o2) ... and stderr says they may be out of date" contains stderr "may be out of date"
+
+# (o3) the custom file missing refuses, though .claude/settings.json is
+# there, and names the custom file.
+fresh
+mkdir -p "$case_dir/proj/.claude"
+echo '{}' >"$case_dir/proj/.claude/settings.json"
+extra=(STUB_DEVENV_EXIT=3 settings_path=conf/claude.json)
+run
+check "(o3) custom settings path missing: exit 1" exits 1
+check "(o3) ... claude not started" absent claude
+check "(o3) ... names the custom file" contains stderr "$case_dir/proj/conf/claude.json is missing"
+
+# (o4) a settings path outside the checkout stays absolute (devenv.nix
+# strips only the checkout's own prefix): that file is checked, not one
+# under the checkout.
+fresh
+mkdir -p "$case_dir/elsewhere"
+echo '{}' >"$case_dir/elsewhere/claude.json"
+extra=(STUB_DEVENV_EXIT=3 "settings_path=$case_dir/elsewhere/claude.json")
+run
+check "(o4) absolute settings path there: claude ran" runs claude 1
+check "(o4) ... and stderr says they may be out of date" contains stderr "may be out of date"
+fresh
+extra=(STUB_DEVENV_EXIT=3 "settings_path=$case_dir/elsewhere/claude.json")
+run
+check "(o4) absolute settings path missing: exit 1" exits 1
+check "(o4) ... claude not started" absent claude
+check "(o4) ... names the absolute file, not one under the checkout" contains stderr "and $case_dir/elsewhere/claude.json is missing"
+
+# (p) no devenv on PATH is a failed refresh. PATH holds only the case's
+# directories, so no outer devenv can answer.
+fresh
+rm "$case_dir/stubs/devenv"
+mkdir -p "$case_dir/proj/.claude"
+echo '{}' >"$case_dir/proj/.claude/settings.json"
+path="$case_dir/wrap/bin:$case_dir/stubs:$case_dir/real/bin"
+run
+check "(p) no devenv: claude ran" runs claude 1
+check "(p) ... and stderr has exit 127" contains stderr "exited 127"
+
+# (q) a refresh that works is trusted, settings or not.
+fresh
+extra=(STUB_DEVENV_EXIT=0)
+run
+check "(q) refresh works, no settings: claude ran" runs claude 1
+check "(q) ... and nothing on stderr, devenv's stdout and stderr included" empty_file stderr
+check "(q) ... nor on stdout but claude's" [ "$out" = claude-stdout ]
+check "(q) ... and its file removed" tmp_clean
+
+# (q2) without a file to hold it (mktemp fails), devenv's output goes
+# straight to stderr, and the refresh still runs.
+fresh
+extra=(mktemp_bin="$case_dir/no-mktemp")
+run
+check "(q2) no mktemp: devenv ran" runs devenv 1
+check "(q2) ... claude ran" runs claude 1
+check "(q2) ... devenv's stderr went through" has stderr devenv-stderr
+check "(q2) ... and its stdout, to stderr" has stderr devenv-stdout
+check "(q2) ... stdout is only claude's" [ "$out" = claude-stdout ]
+
+# (q3) Ctrl-C during the refresh, which devenv catches and exits 1 on:
+# nothing starts, though the settings are there; one line, and the wrapper
+# dies of SIGINT, which the shell reports as 130 (as it would the fallback
+# exit 130). (q3b) and (q5) the same for SIGTERM and 143.
+fresh
+mkdir -p "$case_dir/proj/.claude"
+echo '{}' >"$case_dir/proj/.claude/settings.json"
+extra=(STUB_DEVENV_KILL=INT STUB_DEVENV_EXIT=1)
+run
+check "(q3) SIGINT, devenv exits 1: exit 130" exits 130
+check "(q3) ... claude not started" absent claude
+check "(q3) ... one line on stderr" lines_are stderr 1
+check "(q3) ... saying it was interrupted" contains stderr "was interrupted by SIGINT"
+check "(q3) ... without an exit code, which may be wait's" lacks stderr "exited"
+check "(q3) ... and nothing on stdout" [ -z "$out" ]
+check "(q3) ... and its file removed" tmp_clean
+
+# (q3b) SIGTERM the same, but exit 143.
+fresh
+mkdir -p "$case_dir/proj/.claude"
+echo '{}' >"$case_dir/proj/.claude/settings.json"
+extra=(STUB_DEVENV_KILL=TERM STUB_DEVENV_EXIT=1)
+run
+check "(q3b) SIGTERM: exit 143" exits 143
+check "(q3b) ... claude not started" absent claude
+check "(q3b) ... saying so" contains stderr "was interrupted by SIGTERM"
+
+# (q5) a hung devenv, and SIGTERM sent to the wrapper's process alone, not
+# its group: the wrapper passes it on to devenv and exits 143 at once, not
+# when devenv would have ended (30s; the run's timeout is 20s).
+fresh
+mkdir -p "$case_dir/proj/.claude"
+echo '{}' >"$case_dir/proj/.claude/settings.json"
+extra=(STUB_DEVENV_HANG=30)
+SECONDS=0
+(
+  run
+  echo "$code" >"$case_dir/code"
+) &
+bg=$!
+tries=0
+while [ ! -s "$case_dir/log/devenv-pids" ] && [ "$tries" -lt 100 ]; do
+  sleep 0.1
+  tries=$((tries + 1))
+done
+wrapper_pid=""
+devenv_pid=""
+if [ -s "$case_dir/log/devenv-pids" ]; then
+  read -r wrapper_pid devenv_pid <"$case_dir/log/devenv-pids"
+  kill -TERM "$wrapper_pid"
+fi
+wait "$bg" || true
+elapsed=$SECONDS
+code="$(<"$case_dir/code")"
+out=""
+check "(q5) hung devenv started" [ -n "$devenv_pid" ]
+check "(q5) SIGTERM to the wrapper alone: exit 143" exits 143
+check "(q5) ... promptly" [ "$elapsed" -lt 10 ]
+check "(q5) ... devenv killed" gone "$devenv_pid"
+check "(q5) ... claude not started" absent claude
+check "(q5) ... saying so" contains stderr "was interrupted by SIGTERM"
+
+# (q4) a high exit code with no signal is an ordinary failure: with the
+# settings there, claude starts with the warning.
+for c in 255 130; do
+  fresh
+  mkdir -p "$case_dir/proj/.claude"
+  echo '{}' >"$case_dir/proj/.claude/settings.json"
+  extra=("STUB_DEVENV_EXIT=$c")
+  run
+  check "(q4) exit $c, no signal: claude ran" runs claude 1
+  check "(q4) ... with the warning" contains stderr "exited $c). Starting claude"
+done
+
+# (y) commands that start no session: no refresh and no settings check,
+# though the refresh would fail and the settings are missing.
+for cmd in --version -v --help -h update upgrade doctor mcp config auth setup-token install migrate-installer plugin plugins; do
+  fresh
+  extra=(STUB_DEVENV_EXIT=3)
+  run "$cmd" extra-arg
+  check "(y) $cmd: no devenv" absent devenv
+  check "(y) $cmd: claude ran with its arguments" args_are "arg=<$cmd>
+arg=<extra-arg>"
+  check "(y) $cmd: ... and the marker" has claude "session=1"
+  check "(y) $cmd: ... and nothing on stderr" empty_file stderr
+done
+
+# (y2) only the first argument counts: a prompt, or an option before the
+# command, refreshes.
+fresh
+run -p --version
+check "(y2) -p --version: devenv ran" runs devenv 1
+check "(y2) ... claude ran" runs claude 1
+fresh
+run --model x mcp
+check "(y2) --model x mcp: devenv ran" runs devenv 1
+fresh
+run -p 'mcp'
+check "(y2) -p mcp: devenv ran" runs devenv 1
+
+# (y3) a near miss refreshes: only exact names count. So does every other
+# command, when in doubt: those that start sessions, and those that may.
+for cmd in --versions agents respawn attach logs stop kill rm purge import auto-mode gateway ultrareview; do
+  fresh
+  run "$cmd"
+  check "(y3) $cmd: devenv ran" runs devenv 1
+done
+
+# (r) the wrapper's directory twice on PATH.
+fresh
+path="$case_dir/wrap/bin:$case_dir/wrap/bin:$case_dir/stubs:$case_dir/real/bin:$outer_path"
+run
+check "(r) listed twice: claude ran once" runs claude 1
+check "(r) ... devenv once" runs devenv 1
+
+# (s) the wrapper's directory through a link.
+fresh
+mkdir -p "$case_dir/link"
+ln -s "$case_dir/wrap/bin" "$case_dir/link/bin"
+path="$case_dir/link/bin:$case_dir/wrap/bin:$case_dir/stubs:$case_dir/real/bin:$outer_path"
+entry="$case_dir/link/bin/claude"
+run
+check "(s) through a link: claude ran once" runs claude 1
+
+# (t) two wrappers: each runs once, the refresh once.
+fresh
+install_wrapper "$case_dir/wrap2/bin"
+path="$case_dir/wrap/bin:$case_dir/wrap2/bin:$case_dir/stubs:$case_dir/real/bin:$outer_path"
+run
+check "(t) two wrappers: claude ran once" runs claude 1
+check "(t) ... with both wrappers recorded" has claude "wrappers=$case_dir/wrap/bin/claude:$case_dir/wrap2/bin/claude"
+check "(t) ... and devenv once" runs devenv 1
+
+# (u) two wrappers and no Claude Code: no loop.
+fresh
+install_wrapper "$case_dir/wrap2/bin"
+path="$case_dir/wrap/bin:$case_dir/wrap2/bin:$case_dir/stubs"
+run
+check "(u) two wrappers, no claude: exit 127, not a loop" exits 127
+
+# (v) no Claude Code: nothing refreshed.
+fresh
+path="$case_dir/wrap/bin:$case_dir/stubs"
+run
+check "(v) no claude: exit 127" exits 127
+check "(v) ... stderr says so" contains stderr "no Claude Code found"
+check "(v) ... and no devenv" absent devenv
+
+# (w) a non-executable file and a directory named claude are skipped.
+fresh
+mkdir -p "$case_dir/noexec" "$case_dir/isdir/claude"
+: >"$case_dir/noexec/claude"
+path="$case_dir/wrap/bin:$case_dir/noexec:$case_dir/isdir:$case_dir/stubs:$case_dir/real/bin:$outer_path"
+run
+check "(w) non-executable and directory skipped: claude ran" runs claude 1
+
+# (x) the variables a session's Bash tool passes on.
+fresh
+extra=(COLDLOGIC_WRAPPERS_RUN="$case_dir/wrap/bin/claude" COLDLOGIC_DEVENV_SESSION=1)
+run
+check "(x) from a session: claude ran once" runs claude 1
+check "(x) ... and no devenv" absent devenv
+
+echo "$passed passed, $failed failed"
+[ "$failed" = 0 ]
