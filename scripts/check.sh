@@ -16,6 +16,11 @@ set -uo pipefail
 root=$(git rev-parse --show-toplevel) || exit 1
 cd "$root" || exit 1
 
+# Every build below is the unconfigured one wherever the gate runs: a session
+# carries these variables once they are set (devenv.nix, claude.code.env). The
+# configured build sets them itself.
+unset COLDLOGIC_MEMORY_URL COLDLOGIC_MEMORY_USER COLDLOGIC_DISABLE_AUTO_MEMORY
+
 names=()
 results=()
 
@@ -105,9 +110,21 @@ with_tools "shellcheck" shell_scripts_lint
 with_tools "openspec validate" openspec validate --all --strict
 
 # Builds this repository's shell, which builds every module package and so
-# runs claude-guard's, session-relink's, prune-worktrees' and claude-wrapper's
-# build-time tests.
+# runs claude-guard's, session-relink's, prune-worktrees', claude-wrapper's,
+# memory-recall's and memory-migrate's build-time tests, and evaluates the
+# memory settings' self-check (memorySettingsCases) with nothing configured.
 step "build: shell" devenv build shell
+# The same with the shared memory store configured and auto memory off, so the
+# self-check reads the configured settings too. Nothing contacts the host: the
+# recall hook runs only in a session, and `.invalid` never resolves.
+step "build: shell (memory store)" env COLDLOGIC_MEMORY_URL=https://memory.invalid COLDLOGIC_MEMORY_USER=example COLDLOGIC_DISABLE_AUTO_MEMORY=1 devenv build shell
+# The store configured with auto memory left on: the recall hook without
+# --auto-memory-off, and no autoMemoryEnabled or COLDLOGIC_DISABLE_AUTO_MEMORY
+# from the module.
+step "build: shell (memory store, auto memory on)" env COLDLOGIC_MEMORY_URL=https://memory.invalid COLDLOGIC_MEMORY_USER=example devenv build shell
+# Auto memory off with no store: autoMemoryEnabled false and the variable in
+# env, and none of the store's server, rules, variables or hook.
+step "build: shell (auto memory off)" env COLDLOGIC_DISABLE_AUTO_MEMORY=1 devenv build shell
 
 for fixture in tests/fixtures/*/; do
   fixture=${fixture%/}
