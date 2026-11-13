@@ -1232,6 +1232,47 @@ with tempfile.TemporaryDirectory() as root:
             print(f"FAIL {tool} {path}: expected {expected}, got {got}")
     guard.WORKING.update(cwd=None, root=None)
 
+# A link in `.claude` asks wherever it leads (#56): devenv's settings.json is
+# a link into the Nix store. A link elsewhere is judged by where it leads.
+with tempfile.TemporaryDirectory() as top:
+    top = os.path.realpath(top)
+    root = os.path.join(top, "proj")
+    store = os.path.join(top, "store")
+    os.makedirs(os.path.join(root, ".claude", "worktrees", "x", "src"))
+    os.makedirs(store)
+    generated = os.path.join(store, "settings.json")
+    open(generated, "w").close()
+    os.symlink(generated, os.path.join(root, ".claude", "settings.json"))
+    # A link whose target is missing.
+    os.symlink(os.path.join(store, "missing.json"), os.path.join(root, ".claude", "settings.local.json"))
+    # Links outside `.claude`: one into it, one out of the project.
+    os.symlink(os.path.join(root, ".claude", "local.json"), os.path.join(root, "alias.json"))
+    os.symlink(generated, os.path.join(root, "notes.json"))
+    # A link in a worktree under `.claude` is that checkout's file.
+    os.symlink(generated, os.path.join(root, ".claude", "worktrees", "x", "src", "main.rs"))
+    try:
+        for cwd, tool, path, expected in [
+            (root, "Edit", f"{root}/.claude/settings.json", "ask"),
+            (root, "Write", f"{root}/.claude/settings.json", "ask"),
+            (root, "MultiEdit", f"{root}/.claude/settings.json", "ask"),
+            (root, "Edit", ".claude/settings.json", "ask"),
+            (os.path.join(root, ".claude"), "Edit", "settings.json", "ask"),
+            (root, "Write", f"{root}/.claude/settings.local.json", "ask"),
+            (root, "Edit", f"{root}/alias.json", "ask"),
+            (root, "Edit", f"{root}/notes.json", None),
+            (root, "Write", f"{root}/.claude/worktrees/x/src/main.rs", None),
+            (root, "Read", f"{root}/.claude/settings.json", None),
+        ]:
+            guard.WORKING.update(cwd=cwd, root=root)
+            got = guard.decide(tool, {"file_path": path}, POLICY)
+            checks += 1
+            got = got[0] if got else None
+            if got != expected:
+                failures += 1
+                print(f"FAIL {tool} {path} in {cwd} (linked): expected {expected}, got {got}")
+    finally:
+        guard.WORKING.update(cwd=None, root=None)
+
 # The project's own worktrees, wherever they sit (agent worktrees).
 with tempfile.TemporaryDirectory() as top:
     top = os.path.realpath(top)
@@ -1256,6 +1297,12 @@ with tempfile.TemporaryDirectory() as top:
         os.makedirs(os.path.join(sib, d))
     os.makedirs(os.path.join(sib, ".claude", "skills", "y"))
     open(os.path.join(sib, ".claude", "skills", "y", "SKILL.md"), "w").close()
+    # Generated settings: a link out of the project, in the project's own
+    # worktree (asks) and in another repository's (left alone).
+    store = os.path.join(top, "store")
+    os.makedirs(store)
+    open(os.path.join(store, "settings.json"), "w").close()
+    os.symlink(os.path.join(store, "settings.json"), os.path.join(sib, ".claude", "settings.json"))
     nested = os.path.join(root, ".claude", "worktrees", "n")
     linked(root, nested, "n")
     os.makedirs(os.path.join(nested, "src"))
@@ -1271,6 +1318,8 @@ with tempfile.TemporaryDirectory() as top:
     os.makedirs(os.path.join(other, ".git", "worktrees"))
     ow = os.path.join(top, "other.worktrees", "w")
     linked(other, ow, "w")
+    os.makedirs(os.path.join(ow, ".claude"))
+    os.symlink(os.path.join(store, "settings.json"), os.path.join(ow, ".claude", "settings.json"))
     # Linked worktrees of the project in neither place they are made.
     away = os.path.join(top, "elsewhere", "wt")
     linked(root, away, "away")
@@ -1343,6 +1392,9 @@ with tempfile.TemporaryDirectory() as top:
             (sib, "Edit", f"{root}/.claude/settings.local.json", "ask"),
             (sib, "Write", f"{sib}/src/main.rs", None),
             (sib, "Write", f"{sib}/.git", "deny"),
+            (sib, "Edit", f"{sib}/.claude/settings.json", "ask"),
+            (root, "Write", f"{sib}/.claude/settings.json", "ask"),
+            (sib, "Read", f"{sib}/.claude/settings.json", None),
             (sib, "Edit", f"{ow}/.claude/settings.json", None),
         ]:
             guard.WORKING.update(cwd=cwd, root=root)
