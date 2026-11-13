@@ -1573,64 +1573,73 @@ def checkout_of(path):
     its own worktrees in either place they sit (see own_worktree). None when
     the first `.git` on the way up belongs to anything else (a nested
     repository, another repository's worktree, a look-alike, a worktree
-    elsewhere), or when there is none. Remembered per guard call (decide
-    clears it), by real path and project."""
+    elsewhere), or when there is none. When the root is itself one of the
+    project's worktrees, the others are found from the main checkout (#65,
+    see project_base), and the main checkout is then not one of the
+    session's checkouts. Remembered per guard call (decide clears it), by
+    real path and root."""
     real = os.path.realpath(path)
     base = os.path.realpath(WORKING["root"] or WORKING["cwd"])
     key = (real, base)
     if key not in CHECKOUTS:
-        CHECKOUTS[key] = _checkout_of(real, base)
+        CHECKOUTS[key] = _checkout_of(real, base, project_base(base))
     return CHECKOUTS[key]
 
 
-# checkout_of's answers in this guard call.
+# checkout_of's answers in this guard call, by (real path, root), and
+# project_base's under (None, root), a key no path makes.
 CHECKOUTS = {}
 
 
-def _checkout_of(real, base):
+def _checkout_of(real, base, project):
     while True:
         if real == base:
             return base
         if os.path.lexists(os.path.join(real, ".git")):
-            return real if own_worktree(real, base) else None
+            return real if own_worktree(real, project, base) else None
         parent = os.path.dirname(real)
         if parent == real:
             return None
         real = parent
 
 
-def own_worktree(here, base):
+def own_worktree(here, project, root):
     """Whether here is the top of one of the project's own git worktrees,
-    in one of the two places they are made: `<project>/.claude/worktrees/<name>`
-    (EnterWorktree) or beside the project in `<project>.worktrees/<name>` (a
-    WorktreeCreate hook). Its `.git` file names a directory under the
-    project's `.git/worktrees`, which names it back, and whose commondir is
-    the project's `.git`. Paths in those files may be relative: git reads
-    the `.git` file's against the worktree, the others against the gitdir."""
+    in one of the places they are made: `<project>/.claude/worktrees/<name>`
+    (EnterWorktree), also `<root>/.claude/worktrees/<name>` when the
+    session's root is itself a linked worktree, or beside the project in
+    `<project>.worktrees/<name>` (a WorktreeCreate hook). Its `.git` file
+    names a directory under the project's `.git/worktrees`, which names it
+    back, and whose commondir is the project's `.git`. Paths in those files
+    may be relative: git reads the `.git` file's against the worktree, the
+    others against the gitdir."""
     here = os.path.realpath(here)
-    if os.path.dirname(here) not in (os.path.realpath(os.path.join(base, ".claude", "worktrees")),
-                                     os.path.realpath(os.path.realpath(base) + ".worktrees")):
+    places = {os.path.realpath(os.path.join(project, ".claude", "worktrees")),
+              os.path.realpath(os.path.realpath(project) + ".worktrees"),
+              os.path.realpath(os.path.join(root, ".claude", "worktrees"))}
+    if os.path.dirname(here) not in places:
         return False
     dirs = linked_git_dirs(here)
     if dirs is None:
         return False
     gitdir, common = dirs
-    if os.path.dirname(gitdir) != os.path.realpath(os.path.join(base, ".git", "worktrees")):
+    if os.path.dirname(gitdir) != os.path.realpath(os.path.join(project, ".git", "worktrees")):
         return False
     try:
         with open(os.path.join(gitdir, "gitdir")) as f:
             if os.path.realpath(os.path.dirname(os.path.join(gitdir, f.read().strip()))) != here:
                 return False
-    except OSError:
+    except (OSError, ValueError):
         return False
-    return common == os.path.realpath(os.path.join(base, ".git"))
+    return common == os.path.realpath(os.path.join(project, ".git"))
 
 
 def linked_git_dirs(top):
     """(gitdir, common dir), by their real paths, that the `.git` file at
     the top of a linked worktree names: its `gitdir:` line, read against the
     worktree, and that gitdir's `commondir`, read against the gitdir. None
-    when top's `.git` is no such file."""
+    when top's `.git` is no such file, or one it can't read (not UTF-8, a
+    NUL in a path): project_base reads the root's on every call."""
     try:
         with open(os.path.join(top, ".git")) as f:
             m = re.match(r"gitdir: (.+)", f.read().strip())
@@ -1639,8 +1648,41 @@ def linked_git_dirs(top):
         gitdir = os.path.realpath(os.path.join(top, m.group(1)))
         with open(os.path.join(gitdir, "commondir")) as f:
             return gitdir, os.path.realpath(os.path.join(gitdir, f.read().strip()))
-    except OSError:
+    except (OSError, ValueError):
         return None
+
+
+def linked_main(top):
+    """The main checkout that the `.git` file at the top of a linked
+    worktree names: the parent of its gitdir's common dir, when that is a
+    directory named `.git`. None otherwise (no such file, no commondir, a
+    bare repository's worktree)."""
+    dirs = linked_git_dirs(top)
+    if dirs is None:
+        return None
+    common = dirs[1]
+    if os.path.basename(common) != ".git" or not os.path.isdir(common):
+        return None
+    return os.path.dirname(common)
+
+
+def project_base(base):
+    """The directory the project's own worktrees are found from: base, the
+    real path of the session's root, or the main checkout when base is a
+    linked worktree, read from `<base>/.git` and its gitdir's commondir
+    (the common dir's parent, when it is a directory named `.git`). The
+    root is taken at its word, as git takes it: a root elsewhere, or one
+    whose commondir names another repository, finds its siblings from that
+    repository's checkout. Each sibling is still checked against the answer
+    by own_worktree. Only `<base>/.git` is read, never a directory above,
+    as devenv.nix's mainCheckout reads it. For a root that is not a linked
+    worktree (the main checkout, a submodule, a worktree with no commondir,
+    a bare repository's worktree, no repository) it is base. Remembered in
+    CHECKOUTS under (None, base)."""
+    key = (None, base)
+    if key not in CHECKOUTS:
+        CHECKOUTS[key] = linked_main(base) or base
+    return CHECKOUTS[key]
 
 
 # What a branch switch in the project's main checkout is told (#88).
@@ -1674,13 +1716,7 @@ def main_checkout():
         return None
     if os.path.isdir(os.path.join(top, ".git")):
         return top
-    dirs = linked_git_dirs(top)
-    if dirs is None:
-        return None
-    common = dirs[1]
-    if os.path.basename(common) != ".git" or not os.path.isdir(common):
-        return None
-    return os.path.dirname(common)
+    return linked_main(top)
 
 
 def packed_refs(gitdir):
