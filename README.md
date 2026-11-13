@@ -1,4 +1,4 @@
-# coldlogic-devenv
+# coldlogic-devenv - I'm a test!
 
 The devenv module every Cold Logic project imports: toolchain profiles, the git-hooks policy, Claude Code settings and deny rules, enablement of the [`coldlogic` plugin](https://github.com/coldlogicsolutions/claude-plugins-coldlogic), and `gh-app`.
 
