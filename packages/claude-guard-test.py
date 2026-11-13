@@ -59,7 +59,7 @@ BASH = [
     ("gh-app api --method=PUT repos/o/r/pulls/1/merge -f merge_method=squash", DENY),
     ("devenv shell --quiet -- gh-app api graphql -f query='mutation{mergePullRequest(input:{pullRequestId:\"X\"}){clientMutationId}}'", DENY),
     ("gh-app api graphql -f query='mutation{enablePullRequestAutoMerge(input:{pullRequestId:\"X\"}){clientMutationId}}'", DENY),
-    ("gh-app api repos/o/r/pulls/1/merge", NONE),
+    ("gh-app api repos/o/r/pulls/1/merge", ALLOW),
     ("gh-app pr merge --auto --squash 12", NONE),
     ("gh-app pr view 12 --json mergeable,mergeStateStatus", ALLOW),
     # From the security review.
@@ -302,7 +302,7 @@ BASH = [
     ("git log --oneline | head -3", ALLOW),
     ("git log | rm -rf x", NONE),
     ("devenv shell --quiet -- wrangler deploy --dry-run --outdir dist", ASK),
-    ("gh-app api repos/o/r/pulls/12/reviews", NONE),
+    ("gh-app api repos/o/r/pulls/12/reviews", ALLOW),
     ("gh api repos/o/r/pulls/12 --jq .mergeable", NONE),
     ("gh pr list --search \"merge\"", NONE),
     ("gh-app api repos/o/r/pulls/12/reviews -f event=APPROVE", DENY),
@@ -2132,6 +2132,319 @@ for policy, command, expected in [
     if got != expected:
         failures += 1
         print(f"FAIL devenv version query {policy} {command!r}: expected {expected}, got {got}")
+
+# #110: a `gh-app api` call that only reads needs no rule. Each row runs
+# bare and behind `devenv shell --quiet --`, against the module's own
+# allow list, which names no `gh-app api`.
+GH_API = [
+    # REST: no method, or GET or HEAD however it is spelled.
+    ("gh-app api repos/o/r/pulls/12", ALLOW),
+    ("gh-app api /repos/o/r/pulls/12", ALLOW),
+    ("gh-app api repos/o/r/pulls/12/reviews", ALLOW),
+    ("gh-app api repos/o/r/pulls/1/merge", ALLOW),
+    ("gh-app api 'repos/{owner}/{repo}/pulls?state=open&per_page=5'", ALLOW),
+    ("gh-app api -X GET repos/o/r/issues", ALLOW),
+    ("gh-app api -XGET repos/o/r/issues", ALLOW),
+    ("gh-app api -X=get repos/o/r/issues", ALLOW),
+    ("gh-app api --method get repos/o/r/issues", ALLOW),
+    ("gh-app api --method=HEAD repos/o/r/issues", ALLOW),
+    ("gh-app api -iXHEAD repos/o/r/issues", ALLOW),
+    ("gh-app api -Xget repos/o/r/issues", ALLOW),
+    ("gh-app api repos/o/r/issues -X GET", ALLOW),
+    # Fields go in the query string only with an explicit GET or HEAD.
+    ("gh-app api -X GET repos/o/r/issues -f state=open -F per_page=5", ALLOW),
+    ("gh-app api --method GET search/issues --raw-field q='repo:o/r is:open' --field=per_page=5", ALLOW),
+    ("gh-app api -XGET repos/o/r/issues -fstate=open", ALLOW),
+    ("gh-app api -X GET repos/o/r/pulls/12/reviews -f per_page=100", ALLOW),
+    ("gh-app api --method=get repos/o/r/pulls/12/reviews -F per_page=100 --paginate", ALLOW),
+    ("gh-app api -XHEAD repos/o/r/pulls/1/merge -F x=1", ALLOW),
+    ("gh-app api repos/o/r/pulls/12/reviews -f body=x", DENY),
+    ("gh-app api -X GET -X POST repos/o/r/pulls/12/reviews -f body=x", DENY),
+    ("gh-app api -X GET repos/o/r/pulls/12/reviews -f event=APPROVE", DENY),
+    ("gh-app api repos/o/r/issues -f state=open", NONE),
+    ("gh-app api repos/o/r/issues -F per_page=5", NONE),
+    ("gh-app api repos/o/r/issues --raw-field state=open", NONE),
+    ("gh-app api repos/o/r/issues --field=title=x", NONE),
+    ("gh-app api repos/o/r/issues -fstate=open", NONE),
+    # Any other method.
+    ("gh-app api -X POST repos/o/r/issues", NONE),
+    ("gh-app api -XDELETE repos/o/r/issues/1/labels/x", NONE),
+    ("gh-app api --method=patch repos/o/r/issues/1", NONE),
+    ("gh-app api -X GET -X POST repos/o/r/issues", NONE),
+    ("gh-app api -X PUT repos/o/r/pulls/1/merge", DENY),
+    ("gh-app api repos/o/r/pulls/12/reviews -f event=APPROVE", DENY),
+    # The options a read may carry.
+    ("gh-app api repos/o/r/pulls --paginate --slurp", ALLOW),
+    ("gh-app api repos/o/r/pulls --cache 1h -i --silent", ALLOW),
+    ("gh-app api repos/o/r/pulls -p corsair --include", ALLOW),
+    ("gh-app api repos/o/r/pulls/12 --jq .mergeable", ALLOW),
+    ("gh-app api repos/o/r/pulls/12 -q '.head.sha'", ALLOW),
+    ("gh-app api repos/o/r/pulls --jq '.[] | [.number, .title] | @tsv'", ALLOW),
+    ("gh-app api repos/o/r/pulls/12 -t '{{.title}}'", ALLOW),
+    ("gh-app api repos/o/r/pulls/12 --template='{{.title}}'", ALLOW),
+    ("gh-app api repos/o/r/contents/README.md -H 'Accept: application/vnd.github.raw'", ALLOW),
+    ("gh-app api repos/o/r/pulls -H X-GitHub-Api-Version:2022-11-28 --header=accept:application/json", ALLOW),
+    # Where the request goes, who it speaks as, what it prints.
+    ("gh-app api --hostname ghe.example.com repos/o/r/pulls", NONE),
+    ("gh-app api https://api.github.com/repos/o/r/pulls", NONE),
+    ("gh-app api https://example.com/x", NONE),
+    ("gh-app api repos/o/r/pulls --verbose", NONE),
+    ("gh-app api repos/o/r/pulls -H 'Authorization: token x'", NONE),
+    ("gh-app api repos/o/r/pulls -H 'X-HTTP-Method-Override: DELETE'", NONE),
+    # A filter that could read the App's token from the environment.
+    ("gh-app api repos/o/r/pulls --jq 'env.GH_TOKEN'", NONE),
+    ("gh-app api repos/o/r/pulls -q '$ENV.GH_TOKEN'", NONE),
+    ("gh-app api repos/o/r/pulls -t '{{env \"GH_TOKEN\"}}'", NONE),
+    ("gh-app api repos/o/r/pulls --template '{{env}}'", NONE),
+    ("gh-app api repos/o/r/pulls -q.environment", NONE),
+    # An option the guard doesn't know, or a line it can't read in full.
+    ("gh-app api repos/o/r/pulls --allow-escape-sequences", NONE),
+    ("gh-app api repos/o/r/pulls --allow-escape-sequences --jq '.[] | @tsv'", ASK),
+    ("gh-app api repos/o/r/pulls --pagin", NONE),
+    ("gh-app api repos/o/r/pulls --paginate=true", NONE),
+    ("gh-app api repos/o/r/pulls extra", NONE),
+    ("gh-app api", NONE),
+    ("gh-app api -- repos/o/r/pulls", NONE),
+    ("gh-app api repos/o/r/pulls -X", NONE),
+    ("gh-app -R o/r api repos/o/r/pulls", NONE),
+    ("/nix/store/x/bin/gh-app api repos/o/r/pulls", NONE),
+    # What the shell would expand: quote it.
+    ("gh-app api repos/{owner}/{repo}/pulls", NONE),
+    ("gh-app api repos/o/r/pulls?state=open", NONE),
+    ("gh-app api repos/o/r/pulls --jq .[0].title", NONE),
+    ("gh-app api repos/o/r/pulls/$PR", NONE),
+    ("gh-app api repos/o/r/pulls/$(cat n)", NONE),
+    # A request body from a file or stdin still asks.
+    ("gh-app api repos/o/r/pulls/1/reviews --input x.json", ASK),
+    ("gh-app api graphql --input q.json", ASK),
+    ("gh-app api -X GET repos/o/r/issues -F body=@notes.md", ASK),
+    ("gh-app api -X GET repos/o/r/issues -F body=@-", ASK),
+    # GraphQL: a query, and nothing that changes anything.
+    ("gh-app api graphql -f query='{viewer{login}}'", ALLOW),
+    ("gh-app api graphql -f query='query{viewer{login}}'", ALLOW),
+    ("gh-app api graphql -F query='query { viewer { login } }'", ALLOW),
+    ("gh-app api graphql --raw-field query='query($o:String!,$n:String!){repository(owner:$o,name:$n){id}}' -f o=o -f n=r", ALLOW),
+    ("gh-app api graphql -f query='query($n:Int!){repository(owner:\"o\",name:\"r\"){pullRequest(number:$n){reviewThreads(first:50){nodes{id isResolved}}}}}' -F n=12", ALLOW),
+    ("gh-app api graphql --paginate --slurp -f query='query($endCursor:String){viewer{repositories(first:100,after:$endCursor){nodes{name} pageInfo{hasNextPage endCursor}}}}'", ALLOW),
+    ("gh-app api graphql -X POST -f query='{viewer{login}}' --jq .data.viewer.login", ALLOW),
+    ("gh-app api graphql -f query='{viewer{login}}' -f operationName=Q", ALLOW),
+    ("gh-app api graphql -f query='query($mutation:Boolean!){viewer{login}}' -F mutation=true", ALLOW),
+    ("gh-app api graphql -f query='query{repository(owner:\"o\",name:\"mutation\"){id}} # mutation'", ALLOW),
+    ("gh-app api graphql -f query='fragment F on User{login} query{viewer{...F}}'", ALLOW),
+    ("gh-app api graphql -f query='{repository(owner:\"o\",name:\"r\"){mutation:id}}'", ALLOW),
+    # An `@` that names no file: a jq format, a GraphQL directive.
+    ("gh-app api graphql -f query='query($a:Boolean!){viewer{login @include(if:$a)}}' -F a=true", ALLOW),
+    ("gh-app api graphql -f query='{viewer{login}}' --jq '.data.viewer | [.login] | @tsv'", ALLOW),
+    # A mutation, wherever it sits in the document.
+    ("gh-app api graphql -f query='mutation($t:ID!,$b:String!){addPullRequestReviewThreadReply(input:{pullRequestReviewThreadId:$t,body:$b}){comment{url}}}' -f t=X -f b=done", NONE),
+    ("gh-app api graphql -f query='mutation($t:ID!){resolveReviewThread(input:{threadId:$t}){thread{isResolved}}}' -f t=X", NONE),
+    ("gh-app api graphql -f query='query Q{viewer{login}} mutation M{addStar(input:{starrableId:\"X\"}){clientMutationId}}' -f operationName=M", NONE),
+    ("gh-app api graphql -f query='MUTATION{addStar(input:{starrableId:\"X\"}){clientMutationId}}'", NONE),
+    ("gh-app api graphql -f query='# a query\nmutation{addStar(input:{starrableId:\"X\"}){clientMutationId}}'", NONE),
+    # A block string holds an escaped \""" and ends at the next """.
+    ("gh-app api graphql -f query='query{a(x:\"\"\" \\\"\"\" \"\"\")} mutation{b(x:\"\"\" \\\"\"\" \"\"\")}'", NONE),
+    ("gh-app api graphql -f query='query{a(x:\"\"\" \\\"\"\" mutation \"\"\")}'", ALLOW),
+    # A bare carriage return ends a comment, and a string can't hold one.
+    ("gh-app api graphql -f query='# a query\rmutation{addStar(input:{starrableId:\"X\"}){clientMutationId}}'", NONE),
+    ("gh-app api graphql -f query='# a query\r\nmutation{addStar(input:{starrableId:\"X\"}){clientMutationId}}'", NONE),
+    ("gh-app api graphql -f query='# a query\r{viewer{login}}'", ALLOW),
+    ("gh-app api graphql -f query='{viewer{login(x:\"a\r\")}} mutation{addStar(input:{starrableId:\"X\"}){clientMutationId}}'", NONE),
+    ("gh-app api graphql -f query='{viewer{login}}' -f query='mutation{addStar(input:{starrableId:\"X\"}){clientMutationId}}'", NONE),
+    ("gh-app api graphql -f query='mutation{mergePullRequest(input:{pullRequestId:\"X\"}){clientMutationId}}'", DENY),
+    ("gh-app api graphql -f query='mutation{addPullRequestReview(input:{pullRequestId:\"X\",event:APPROVE}){clientMutationId}}'", DENY),
+    # A document the guard can't read, or none.
+    ("gh-app api graphql -f query='{viewer{login}'", NONE),
+    ("gh-app api graphql -f query='{viewer{login}}}'", NONE),
+    ("gh-app api graphql -f query='{repository(owner:\"o){id}}'", NONE),
+    ("gh-app api graphql", NONE),
+    ("gh-app api graphql -f o=o", NONE),
+    # Not the GraphQL endpoint as gh reads it, or not as GitHub serves it.
+    ("gh-app api graphql -X GET -f query='{viewer{login}}'", NONE),
+    ("gh-app api /graphql -f query='{viewer{login}}'", NONE),
+    ("gh-app api /graphql -X GET -f query='mutation{addStar(input:{starrableId:\"X\"}){clientMutationId}}'", NONE),
+    ("gh-app api GraphQL -X GET -f query='{viewer{login}}'", NONE),
+    # A variable read from a file, or a query from stdin, is uploaded unread.
+    ("gh-app api graphql -f query='query($b:String!){viewer{login}}' -F b=@notes.md", ASK),
+    ("gh-app api graphql -F query=@-", ASK),
+    ("gh-app api graphql -F query=@q.graphql", ASK),
+    # In a chain or a pipeline, each part on its own.
+    ("gh-app api repos/o/r/pulls | jq '.[].number'", ALLOW),
+    ("gh-app api repos/o/r/pulls --jq '.[].title' | head -5", ALLOW),
+    ("gh-app api repos/o/r/pulls 2>&1", ALLOW),
+    ("gh-app api repos/o/r/pulls > \"$TMPDIR/pulls.json\"", ALLOW),
+    ("gh-app api repos/o/r/pulls > /dev/null", ALLOW),
+    ("git status && gh-app api repos/o/r/pulls/12", ALLOW),
+    ("gh-app api repos/o/r/pulls > pulls.json", DENY),
+    ("gh-app api repos/o/r/pulls; rm -rf build", NONE),
+    ("gh-app api repos/o/r/pulls && git push --force", DENY),
+    ("gh-app api repos/o/r/pulls | sh", NONE),
+    ("cd /elsewhere && gh-app api repos/o/r/pulls", NONE),
+    # An endpoint that names a secrets file is still one (as before).
+    ("gh-app api repos/o/r/contents/.env", DENY),
+    ("gh-app api repos/o/r/actions/secrets", DENY),
+    # The user's own gh is out of scope.
+    ("gh api repos/o/r/pulls/12 --jq .mergeable", NONE),
+    ("gh api graphql -f query='{viewer{login}}'", NONE),
+    ("gh api graphql -F query=@q.graphql", ASK),
+]
+for command, expected in [(c, e) for command, e in GH_API
+                          for c in (command, "devenv shell --quiet -- " + command)]:
+    got = guard.decide("Bash", {"command": command}, module_policy)
+    checks += 1
+    got = got[0] if got else None
+    if got != expected:
+        failures += 1
+        print(f"FAIL gh-app api read {command!r}: expected {expected}, got {got}")
+
+# An ask or deny rule still wins, and a project's own allow rule for
+# `gh-app api` is not narrowed.
+for policy, command, expected in [
+    ({}, "gh-app api repos/o/r/pulls/12", ALLOW),
+    ({}, "devenv shell --quiet -- gh-app api repos/o/r/pulls/12", ALLOW),
+    ({"ask": ["gh-app api *"]}, "gh-app api repos/o/r/pulls/12", ASK),
+    ({"ask": ["gh-app api *"]}, "devenv shell --quiet -- gh-app api repos/o/r/pulls/12", ASK),
+    ({"deny": ["gh-app api *"]}, "gh-app api repos/o/r/pulls/12", DENY),
+    ({"deny": ["gh-app *"]}, "devenv shell --quiet -- gh-app api graphql -f query='{viewer{login}}'", DENY),
+    ({"ask": ["gh-app api *"]}, "git status && gh-app api repos/o/r/pulls/12", ASK),
+    ({"ask": ["gh-app api *"]}, "gh-app api repos/o/r/pulls | head -5", ASK),
+    ({"ask": ["gh-app api graphql *"]}, "gh-app api graphql -f query='{viewer{login}}'", ASK),
+    ({"allow": ["gh-app api *"]}, "gh-app api -X POST /repos/o/r/issues -f title=x", ALLOW),
+    ({"allow": ["gh-app api *"]}, "gh-app api -X PUT repos/o/r/pulls/1/merge", DENY),
+    # A method or a field in a cluster is still seen.
+    ({"allow": ["gh-app api *"]}, "gh-app api -iXPUT repos/o/r/pulls/1/merge", DENY),
+    ({"allow": ["gh-app api *"]}, "gh-app api repos/o/r/pulls/1/merge -fmerge_method=squash", DENY),
+    ({"allow": ["gh-app api *"]}, "gh-app api repos/o/r/pulls/12/reviews -fbody=x", DENY),
+    ({"allow": ["gh-app api *"]}, "gh-app api -X GET repos/o/r/pulls/12/reviews -f per_page=100", ALLOW),
+    # A filter that mentions env, in any spelling, under a project's rule.
+    ({"allow": ["gh-app api *"]}, "gh-app api repos/o/r -q env", ASK),
+    ({"allow": ["gh-app api *"]}, "gh-app api repos/o/r -qenv", ASK),
+    ({"allow": ["gh-app api *"]}, "gh-app api repos/o/r -t '{{env}}'", ASK),
+    ({"allow": ["gh-app api *"]}, "gh-app api repos/o/r --allow-escape-sequences -q '$ENV.GH_TOKEN'", ASK),
+    ({"allow": ["gh-app api *"]}, "gh-app api repos/o/r --allow-escape-sequences -t '{{env \"GH_TOKEN\"}}'", ASK),
+    ({"allow": ["gh-app api *"]}, "gh-app api repos/o/r --allow-escape-sequences -q .title", ALLOW),
+    ({"allow": ["devenv shell *"]}, "devenv shell --quiet -- gh-app api -X POST repos/o/r/issues", ASK),
+]:
+    got = guard.decide("Bash", {"command": command}, policy)
+    checks += 1
+    got = got[0] if got else None
+    if got != expected:
+        failures += 1
+        print(f"FAIL gh-app api read {policy} {command!r}: expected {expected}, got {got}")
+
+# A GraphQL query in a file: the guard reads what gh would upload. The
+# project and the scratch directory are both under the temporary directory,
+# which is itself scratch: the relative paths go through the project.
+with tempfile.TemporaryDirectory() as top:
+    top = os.path.realpath(top)
+    root = os.path.join(top, "p")
+    os.makedirs(os.path.join(root, "queries"))
+    os.makedirs(os.path.join(root, "secrets"))
+    scratch_dir = os.path.join(top, "scratch")
+    os.makedirs(scratch_dir)
+    files = {
+        os.path.join(root, "queries", "threads.graphql"):
+            "# Review threads. This is not a mutation.\nquery($n: Int!) {\n  repository(owner: \"o\", name: \"r\") {\n"
+            "    pullRequest(number: $n) { reviewThreads(first: 50) { nodes { id isResolved } } }\n  }\n}\n",
+        os.path.join(root, "queries", "reply.graphql"):
+            "mutation($t: ID!, $b: String!) {\n  addPullRequestReviewThreadReply(input: {pullRequestReviewThreadId: $t, body: $b}) { comment { url } }\n}\n",
+        os.path.join(root, "queries", "merge.graphql"):
+            "mutation { mergePullRequest(input: {pullRequestId: \"X\"}) { clientMutationId } }\n",
+        os.path.join(root, "queries", "approve.graphql"):
+            "mutation { addPullRequestReview(input: {pullRequestId: \"X\", event: APPROVE}) { clientMutationId } }\n",
+        os.path.join(root, "queries", "broken.graphql"): "query { viewer { login }\n",
+        os.path.join(root, "queries", "big.graphql"): "query { viewer { login } }\n" + "# pad\n" * 20000,
+        os.path.join(root, "queries", "binary.graphql"): None,
+        os.path.join(root, ".env"): "query { viewer { login } }\n",
+        os.path.join(root, "secrets", "q.graphql"): "query { viewer { login } }\n",
+        os.path.join(scratch_dir, "q.graphql"): "query { viewer { login } }\n",
+        os.path.join(scratch_dir, "m.graphql"): "mutation { addStar(input: {starrableId: \"X\"}) { clientMutationId } }\n",
+        os.path.join(scratch_dir, "merge.graphql"): "mutation { enablePullRequestAutoMerge(input: {pullRequestId: \"X\"}) { clientMutationId } }\n",
+    }
+    for path, text in files.items():
+        if text is None:
+            with open(path, "wb") as f:
+                f.write(b"\xff\xfe query { viewer { login } }")
+        else:
+            with open(path, "w") as f:
+                f.write(text)
+    os.symlink(os.path.join(root, ".env"), os.path.join(root, "queries", "link.graphql"))
+    os.mkdir(os.path.join(root, "queries", "dir.graphql"))
+    cases = [
+        ("gh-app api graphql -F query=@queries/threads.graphql -F n=12", ALLOW),
+        ("gh-app api graphql --field query=@queries/threads.graphql -F n=12", ALLOW),
+        ("gh-app api graphql --field=query=@queries/threads.graphql -F n=12 --jq .data", ALLOW),
+        ("gh-app api graphql -Fquery=@queries/threads.graphql -F n=12", ALLOW),
+        (f"gh-app api graphql -F query=@{root}/queries/threads.graphql -F n=12", ALLOW),
+        (f"gh-app api graphql -F query=@{scratch_dir}/q.graphql", ALLOW),
+        (f"gh-app api graphql -F query=@{scratch_dir}/q.graphql | jq .data", ALLOW),
+        # The call could write the file before gh reads it: a redirect, or
+        # a command that doesn't only read (an allow rule's may write).
+        (f"git status && gh-app api graphql -F query=@{scratch_dir}/q.graphql", NONE),
+        (f"printf x > {scratch_dir}/q.graphql && gh-app api graphql -F query=@{scratch_dir}/q.graphql", NONE),
+        (f"cp {scratch_dir}/m.graphql {scratch_dir}/q.graphql && gh-app api graphql -F query=@{scratch_dir}/q.graphql", NONE),
+        # A mutation in the file gets no allow; a merge or an approval is denied.
+        ("gh-app api graphql -F query=@queries/reply.graphql -f t=X -f b=done", NONE),
+        (f"gh-app api graphql -F query=@{scratch_dir}/m.graphql", NONE),
+        ("gh-app api graphql -F query=@queries/merge.graphql", DENY),
+        ("gh-app api graphql -F query=@queries/approve.graphql", DENY),
+        (f"gh-app api graphql -F query=@{scratch_dir}/merge.graphql", DENY),
+        # A file the guard won't or can't read keeps asking.
+        ("gh-app api graphql -F query=@queries/missing.graphql", ASK),
+        ("gh-app api graphql -F query=@queries/dir.graphql", ASK),
+        ("gh-app api graphql -F query=@queries/big.graphql", ASK),
+        ("gh-app api graphql -F query=@queries/binary.graphql", ASK),
+        ("gh-app api graphql -F query=@/etc/hosts", ASK),
+        ("gh-app api graphql -F query=@../outside.graphql", ASK),
+        ("gh-app api graphql -F query=@-", ASK),
+        ("gh-app api graphql -F query=@queries/broken.graphql", NONE),
+        # Only the query is read: any other file is uploaded unread.
+        ("gh-app api graphql -F query=@queries/threads.graphql -F n=@queries/threads.graphql", ASK),
+        ("gh-app api graphql -f query='{viewer{login}}' -F body=@queries/threads.graphql", ASK),
+        ("gh-app api graphql -f query=@queries/threads.graphql", ASK),
+        ("gh-app api -X GET repos/o/r/issues -F query=@queries/threads.graphql", ASK),
+        ("gh-app api graphql -F query=@queries/threads.graphql --input queries/threads.graphql", ASK),
+        ("gh-app api graphql -F query=@queries/threads.graphql --allow-escape-sequences", ASK),
+        # Never a secrets file.
+        ("gh-app api graphql -F query=@.env", DENY),
+        ("gh-app api graphql -F query=@secrets/q.graphql", DENY),
+        ("gh-app api graphql -F query=@queries/link.graphql", DENY),
+        ("gh-app api graphql -Fquery=@.env", DENY),
+        ("gh-app api graphql --field=query=@.env", DENY),
+        ("gh-app api -X GET repos/o/r/issues -F body=@.env", DENY),
+        # The user's own gh still asks.
+        ("gh api graphql -F query=@queries/threads.graphql", ASK),
+    ]
+    guard.WORKING.update(cwd=root, root=root)
+    try:
+        for command, expected in [(c, e) for command, e in cases
+                                  for c in (command, "devenv shell --quiet -- " + command)]:
+            got = guard.decide("Bash", {"command": command}, module_policy)
+            checks += 1
+            got = got[0] if got else None
+            if got != expected:
+                failures += 1
+                print(f"FAIL gh-app api query file {command!r}: expected {expected}, got {got}")
+        # With an ask rule the file changes nothing.
+        got = guard.decide("Bash", {"command": "gh-app api graphql -F query=@queries/threads.graphql"},
+                           {"ask": ["gh-app api *"]})
+        checks += 1
+        if not got or got[0] != ASK:
+            failures += 1
+            print(f"FAIL gh-app api query file under an ask rule: got {got}")
+    finally:
+        guard.WORKING.update(cwd=None, root=None)
+    # Where the cwd is unknown: only an absolute scratch path can be read.
+    for command, expected in [
+        (f"gh-app api graphql -F query=@{scratch_dir}/q.graphql", ALLOW),
+        (f"gh-app api graphql -F query=@{scratch_dir}/merge.graphql", DENY),
+        ("gh-app api graphql -F query=@queries/threads.graphql", ASK),
+    ]:
+        got = guard.decide("Bash", {"command": command}, module_policy)
+        checks += 1
+        got = got[0] if got else None
+        if got != expected:
+            failures += 1
+            print(f"FAIL gh-app api query file, no cwd {command!r}: expected {expected}, got {got}")
 
 total = checks
 print(f"{total - failures}/{total} passed")

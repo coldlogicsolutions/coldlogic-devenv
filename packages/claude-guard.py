@@ -46,7 +46,8 @@ lexes each command as bash would, unwraps it, then:
   in a short cluster for the programs where it writes or runs one
   (`unzip -qo`). Quoted heredoc
   bodies are data, and redirects to a device or a scratch file outside the
-  project are fine;
+  project are fine. A `gh-app api` call that only reads (a GET or HEAD, or
+  a GraphQL query with no mutation; see gh_api_reads) needs no rule;
 - otherwise leaves the call to Claude Code's own rules.
 
 The deny side is a backstop, not a boundary: a script can still do anything
@@ -1243,6 +1244,196 @@ def devenv_query(words):
             or (len(rest) == 2 and rest[0] == "help" and rest[1] in DEVENV_SUBCOMMANDS))
 
 
+# gh api's options (cli.github.com/manual/gh_api), by the name each goes
+# under: those that take no value, and those that take one. gh takes no
+# abbreviation of a long name. One missing here only means the call prompts.
+GH_API_FLAGS = {"-i": "include", "--include": "include", "--paginate": "paginate",
+                "--slurp": "slurp", "--silent": "silent", "--verbose": "verbose"}
+GH_API_VALUED = {"-X": "method", "--method": "method", "-f": "raw-field",
+                 "--raw-field": "raw-field", "-F": "field", "--field": "field",
+                 "-H": "header", "--header": "header", "-q": "jq", "--jq": "jq",
+                 "-t": "template", "--template": "template", "-p": "preview",
+                 "--preview": "preview", "--cache": "cache", "--hostname": "hostname",
+                 "--input": "input"}
+# The request headers a read may set: they choose how the answer is
+# written, not where the request goes or who makes it.
+GH_API_HEADERS = {"accept", "x-github-api-version"}
+# The largest GraphQL query file the guard reads.
+GH_QUERY_LIMIT = 65536
+# What a GraphQL document's operations can't hide in: block strings,
+# strings and comments. A comment or a string ends at either line
+# terminator, `\n` or a bare `\r`, as GraphQL's grammar has it.
+# A block string holds `\"""` escaped.
+GRAPHQL_SKIP = re.compile(r'"""(?:\\"""|[\s\S])*?"""|"(?:\\.|[^"\\\n\r])*"|#[^\n\r]*')
+
+
+def gh_api_call(args):
+    """(the endpoint, [(option name, value or None), ...]) of the gh
+    arguments `api ...`, or None when they aren't a call this reads in
+    full: `api` not first, an option not listed above, a value missing, or
+    not exactly one operand. Options are in the order given, under their
+    long names; a short one may sit in a cluster and hold its value
+    (`-iXGET`, `-X=GET`), a long one may hold it after `=`."""
+    if args[:1] != ["api"]:
+        return None
+    operands, options = [], []
+    i = 1
+    while i < len(args):
+        w = args[i]
+        i += 1
+        if w == "-" or not w.startswith("-"):
+            operands.append(w)
+            continue
+        if w.startswith("--"):
+            name, given, value = w.partition("=")
+            if name in GH_API_FLAGS and not given:
+                options.append((GH_API_FLAGS[name], None))
+                continue
+            if name not in GH_API_VALUED:
+                return None
+            if not given:
+                if i >= len(args):
+                    return None
+                value = args[i]
+                i += 1
+            options.append((GH_API_VALUED[name], value))
+            continue
+        letters = w[1:]
+        while letters:
+            flag, letters = "-" + letters[0], letters[1:]
+            if flag in GH_API_FLAGS:
+                options.append((GH_API_FLAGS[flag], None))
+                continue
+            if flag not in GH_API_VALUED:
+                return None
+            if letters:
+                value = letters[1:] if letters.startswith("=") else letters
+            elif i < len(args):
+                value = args[i]
+                i += 1
+            else:
+                return None
+            options.append((GH_API_VALUED[flag], value))
+            letters = ""
+    return (operands[0], options) if len(operands) == 1 else None
+
+
+def gh_query_file(path):
+    """The text of a GraphQL query file `-F query=@path` uploads, or None
+    when the guard won't read it: not in scratch or the project (a relative
+    path where the cwd is unknown included), not a regular file, over
+    GH_QUERY_LIMIT, unreadable, or not UTF-8."""
+    if scratch(path):
+        full = path
+    else:
+        where = resolve(path)
+        if where is None or where[1] is None:
+            return None
+        full = where[0]
+    try:
+        if not os.path.isfile(full) or os.path.getsize(full) > GH_QUERY_LIMIT:
+            return None
+        with open(full, encoding="utf-8") as f:
+            return f.read()
+    except (OSError, UnicodeDecodeError):
+        return None
+
+
+def graphql_reads(text):
+    """Whether a GraphQL document holds no mutation: with comments and
+    strings dropped, no `mutation` word outside every brace, where an
+    operation starts. A document this can't read that way (an unclosed
+    string or brace) doesn't count."""
+    text = GRAPHQL_SKIP.sub(" ", text)
+    if '"' in text:
+        return False
+    depth, top = 0, []
+    for c in text:
+        if c == "{":
+            depth += 1
+        elif c == "}":
+            depth -= 1
+            if depth < 0:
+                return False
+            top.append(" ")
+        elif depth == 0:
+            top.append(c)
+    return depth == 0 and not re.search(r"(?<![\w$@])mutation(?!\w)", "".join(top), re.I)
+
+
+def reads_query_file(words):
+    """Whether these words are a `gh-app api` call that sends a `-F` field
+    from a file, which the guard reads before any of the call runs."""
+    call = gh_api_call(words[1:]) if words[0] == "gh-app" else None
+    return bool(call) and any(n == "field" and v.partition("=")[2].startswith("@")
+                              for n, v in call[1])
+
+
+def query_file_raced(cmds, targets):
+    """Whether a call reads a query file while it could also write one: a
+    redirect, or another command that doesn't only read. The guard would
+    judge the file as it was, and gh would send it as written
+    (`printf mutation... > "$TMPDIR/q.graphql" && gh-app api graphql -F
+    query=@...`)."""
+    readers = [c for c in cmds if reads_query_file(c.words)]
+    if not readers:
+        return False
+    return bool(targets) or any(not read_only(c.words) for c in cmds if c not in readers)
+
+
+def gh_api_reads(words):
+    """Whether these words are a `gh-app api` call that only reads, with
+    the program spelled `gh-app` and every option one gh_api_call knows:
+
+    - REST: no method, or GET or HEAD in any case; fields only with an
+      explicit GET or HEAD, which sends them in the query string, and none
+      read from a file;
+    - GraphQL (the endpoint `graphql`): no method, or POST; at least one
+      `query` field, given in the word or as `-F query=@file`
+      (gh_query_file), and no mutation in any (graphql_reads). Every other
+      field is a variable, and none is read from a file;
+    - no `--hostname`, `--input` or `--verbose`, no endpoint that is a full
+      URL, no header but GH_API_HEADERS, and no jq or template filter that
+      mentions env (the App's GH_TOKEN)."""
+    if words[0] != "gh-app" or any(PLACEHOLDER in a for a in words[1:]):
+        return False
+    call = gh_api_call(words[1:])
+    if call is None:
+        return False
+    endpoint, options = call
+
+    def values(*names):
+        return [v for n, v in options if n in names]
+
+    if values("hostname", "input", "verbose"):
+        return False
+    if any(h.split(":", 1)[0].strip().lower() not in GH_API_HEADERS for h in values("header")):
+        return False
+    if any("env" in v.lower() for v in values("jq", "template")):
+        return False
+    methods = [m.upper() for m in values("method")]
+    fields = [(n, v.partition("=")[0], v.partition("=")[2]) for n, v in options
+              if n in ("field", "raw-field")]
+    if endpoint == "graphql":
+        if any(m != "POST" for m in methods):
+            return False
+        queries = []
+        for name, key, value in fields:
+            if name == "field" and value.startswith("@"):
+                text = gh_query_file(value[1:]) if key == "query" else None
+                if text is None:
+                    return False
+                queries.append(text)
+            elif key.lower() == "query":
+                queries.append(value)
+        return bool(queries) and all(graphql_reads(q) for q in queries)
+    if "://" in endpoint or endpoint.strip("/").lower() == "graphql":
+        return False
+    if any(m not in ("GET", "HEAD") for m in methods) or (fields and not methods):
+        return False
+    return not any(name == "field" and value.startswith("@") for name, _, value in fields)
+
+
 def devenv_command(words):
     """The command `devenv [flags] shell [flags] [--] command` runs, or None
     if this is another devenv subcommand or an interactive shell."""
@@ -1442,9 +1633,45 @@ def forbidden_from(head, args):
             return "the App approving a PR"
         if sub and sub[0] == "api":
             text = " ".join(lowered)
-            if api_changes_review(lowered):
+            call = gh_api_call(args)
+            if call is None:
+                # A line this can't read in full: any `@` may name a file.
+                unread = "--input" in text or "=@" in text or re.search(r"(^| )@", text)
+                bodies = []
+            else:
+                # Read in full, only `--input` and a field value starting
+                # `@` name a file (a jq `@tsv` or a GraphQL directive
+                # doesn't). gh uploads a `-F` file's contents: never a
+                # secrets file, and the guard reads only a GraphQL query
+                # (gh_query_file), judged by its text here and in
+                # gh_api_reads.
+                unread, bodies = any(n == "input" for n, _ in call[1]), []
+                for name, value in call[1]:
+                    key, _, at = (value or "").partition("=")
+                    if name not in ("field", "raw-field") or not at.startswith("@"):
+                        continue
+                    if name == "field" and secret_path(at[1:]):
+                        return f"gh-app api uploading {at[1:]}, a secrets file"
+                    body = (gh_query_file(at[1:])
+                            if name == "field" and call[0] == "graphql" and key == "query" else None)
+                    if body is None:
+                        unread = True
+                    else:
+                        bodies.append(body.lower())
+            # Read in full, whether the call writes comes from its parsed
+            # options, so a cluster (`-iXPUT`, `-fx=1`) is seen: any method
+            # but GET or HEAD, or a field with no method, which gh POSTs.
+            # With GET or HEAD a field goes in the query string (`-X GET
+            # .../reviews -f per_page=100` reads).
+            writes = None
+            if call is not None:
+                methods = [v.upper() for n, v in call[1] if n == "method"]
+                fields = any(n in ("field", "raw-field") for n, _ in call[1])
+                writes = (any(m not in ("GET", "HEAD") for m in methods)
+                          or (fields and not methods))
+            if api_changes_review(lowered, writes) or any(api_changes_review([b]) for b in bodies):
                 return "the App merging or reviewing through gh-app api; merge with gh-app pr merge, which checks the PR first"
-            if "--input" in text or "=@" in text or re.search(r"(^| )@", text):
+            if unread:
                 raise Unparsable("gh-app api reading its request from a file")
     return None
 
@@ -1468,9 +1695,10 @@ def approves(args):
     return any(a.startswith("--approve") or re.match(r"^-[A-Za-z]*a[A-Za-z]*$", a) for a in args)
 
 
-def api_changes_review(lowered):
+def api_changes_review(lowered, writes=None):
     """Whether a gh api call approves or merges a PR, rather than reading
-    one."""
+    one. `writes` is whether the call sends a write, where its options
+    were parsed (gh_api_call); None reads that roughly from the text."""
     text = " ".join(lowered)
     # addPullRequestReviewThreadReply only answers a comment thread, so the
     # review prefix doesn't catch it.
@@ -1478,7 +1706,8 @@ def api_changes_review(lowered):
         return True
     if re.search(r"mergepullrequest|enablepullrequestautomerge", text):
         return True
-    writes = re.search(r"(^| )(-x|--method)[ =]?(post|put|patch)", text) or re.search(r"(^| )-[fF] ", text)
+    if writes is None:
+        writes = re.search(r"(^| )(-x|--method)[ =]?(post|put|patch)", text) or re.search(r"(^| )-[fF] ", text)
     return bool(writes and (re.search(r"/pulls/[^/ ]+/merge", text) or "/reviews" in text))
 
 
@@ -2080,6 +2309,9 @@ def plain_args(words):
     if prog in ("gh", "gh-app") and gh_opens_editor(words[1:]):
         return False
     text_options = text_options_of(prog, words)
+    # `gh-app api`'s endpoint is a path on GitHub, not a file: `/repos/o/r`.
+    call = gh_api_call(words[1:]) if prog == "gh-app" else None
+    endpoint = call[0] if call else None
     value_next = False
     for w in words[1:]:
         # A message, title or body (`git commit -m "-o is refused"`,
@@ -2122,17 +2354,26 @@ def plain_args(words):
             return False
         if prog == "cargo" and (w.startswith("-Z") or w.startswith("+")):
             return False
-        if any(outside(c) and not scratch(c) for c in option_values(w)):
+        # reads_environment skips `gh api`'s short -q and -t; a line read in
+        # full has its filters parsed, in every spelling.
+        if call and any("env" in v.lower() for n, v in call[1] if n in ("jq", "template")):
+            return False
+        # A line not read in full could hide a filter anywhere: any word
+        # that mentions env refuses.
+        if prog == "gh-app" and call is None and words[1:2] == ["api"] and "env" in w.lower():
+            return False
+        if w != endpoint and any(outside(c) and not scratch(c) for c in option_values(w)):
             return False
         if prog == "git" and long_option(w, "--pathspec-from-file", 7):
             # A file of pathspecs, whose names aren't checked.
             return False
         if prog == "git" and not text and git_runs_program(words[1:2], w):
             return False
-        if (prog in ("gh", "gh-app") and not text
+        if (prog in ("gh", "gh-app") and not text and call is None
                 and (w.startswith("--edit") or re.match(r"^-[A-Za-z]*e", w))):
             # An editor waits for a user who isn't there: `-e`, `--editor`,
-            # `--edit-last`.
+            # `--edit-last`. A `gh-app api` line read in full has none: an
+            # `e` there is in a value (`-Xget`, `-fstate=open`).
             return False
     return True
 
@@ -2454,8 +2695,9 @@ def matches(rules, words):
 
 def read_only(words):
     """Whether this is a READ_ONLY command reading only inside the project,
-    or a devenv version or help query (devenv_query), which reads nothing."""
-    if devenv_query(words):
+    a devenv version or help query (devenv_query), which reads nothing, or
+    a `gh-app api` call that only reads GitHub (gh_api_reads)."""
+    if devenv_query(words) or gh_api_reads(words):
         return True
     if words[0] not in READ_ONLY:
         return False
@@ -2998,6 +3240,7 @@ def decide(tool, tool_input, policy):
         written = sorted(w[0][1:] for w in result.commands if w[0].startswith(">"))
         if ([c.words for c in cmds] == commands and written == sorted(targets)
                 and not result.opaque
+                and not query_file_raced(cmds, targets)
                 and all(approved(c.words, through_wrapper if c.wrapped else allow) for c in cmds)):
             return "allow", "coldlogic guard: every command in this call is one an allow rule names or only reads."
         for c in cmds:
