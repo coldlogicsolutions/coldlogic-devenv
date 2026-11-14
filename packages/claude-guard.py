@@ -1567,13 +1567,19 @@ def forbidden(words):
     the program, since package runners (`pnpm wrangler`) and global flags
     (`wrangler --env prod deploy`) move it."""
     for k, word in enumerate(words):
-        reason = forbidden_from(program(word), words[k + 1:])
+        reason = forbidden_from(program(word), words[k + 1:], runs=k == 0)
         if reason:
             return reason
     return None
 
 
-def forbidden_from(head, args):
+def forbidden_from(head, args, runs=True):
+    """Why `head args` may not run, or None. `runs` is whether head is the
+    command's own program: the words given come unwrapped (unwrap() has
+    taken off `env`, `xargs`, `sudo`, `devenv shell --` and a shell's `-c`),
+    so only the first one runs for sure. A deny that a common phrase would
+    trip fires only then: `echo gh pr create` and `grep -rn gh pr create`
+    don't run gh."""
     if head == "git" and args:
         # The subcommand, past global options this may not know and their
         # values.
@@ -1604,11 +1610,19 @@ def forbidden_from(head, args):
     if head == "gh":
         # The user's own credentials: merging skips the review the
         # organization ruleset requires, and approving counts as that review.
-        # The App's (gh-app) don't.
+        # The App's (gh-app) don't. A PR opened with them is the user's, which
+        # the App may approve (`gh-app pr approve`): a session opens its PRs
+        # as the App, whose PRs a developer approves. Its help opens nothing.
+        # "gh pr create" is a common phrase, so that deny fires only where
+        # gh is the command (`runs`), not in a message or a search pattern;
+        # merging and approving are denied wherever they appear. A command
+        # this can't parse is read roughly, not unwrapped, and asks.
         lowered = [a.lower() for a in args]
-        sub = gh_subcommand(lowered)
+        sub = gh_subcommand(args)
         if sub == ("pr", "merge"):
             return "gh pr merge with your credentials skips review; the App merges approved PRs"
+        if sub == ("pr", "create") and runs and not gh_asks_help(args):
+            return "gh pr create with your credentials opens the PR as you; open it as the App with gh-app pr create"
         if sub == ("pr", "review") and approves(args):
             return "approving with your credentials stands in for your review"
         if sub and sub[0] == "alias":
@@ -1620,17 +1634,20 @@ def forbidden_from(head, args):
             if "--input" in text or "=@" in text or re.search(r"(^| )@", text):
                 raise Unparsable("gh api reading its request from a file")
     if head == "gh-app":
-        # The App may merge a PR the developer team approved, but it must not
-        # approve one: where the ruleset's file patterns miss a path, its
-        # approval would count. It merges only through `gh-app pr merge`,
-        # whose wrapper checks the PR first (the App's own, not a draft, the
-        # ruleset, the head it was asked to merge); the API would skip that.
+        # The App's approval counts toward the ruleset's one required
+        # approval, so it approves only through `gh-app pr approve`, and
+        # merges only through `gh-app pr merge`: each wrapper checks the PR
+        # first (approve: open, not a draft, a developer team member's, the
+        # App's own review on its head; merge: the App's own, not a draft,
+        # the ruleset, the head it was asked to merge). `pr review --approve`
+        # and the API would skip that. Neither wrapper command is denied
+        # here: the rules decide.
         lowered = [a.lower() for a in args]
-        sub = gh_subcommand(lowered)
+        sub = gh_subcommand(args)
         if sub and sub[0] == "alias":
             return "gh-app aliases could hide an approval"
         if sub == ("pr", "review") and approves(args):
-            return "the App approving a PR"
+            return "the App approving through gh-app pr review; approve with gh-app pr approve, which checks the PR first"
         if sub and sub[0] == "api":
             text = " ".join(lowered)
             call = gh_api_call(args)
@@ -1670,29 +1687,117 @@ def forbidden_from(head, args):
                 writes = (any(m not in ("GET", "HEAD") for m in methods)
                           or (fields and not methods))
             if api_changes_review(lowered, writes) or any(api_changes_review([b]) for b in bodies):
-                return "the App merging or reviewing through gh-app api; merge with gh-app pr merge, which checks the PR first"
+                return "the App merging or reviewing through gh-app api; merge with gh-app pr merge and approve with gh-app pr approve, which check the PR first"
             if unread:
                 raise Unparsable("gh-app api reading its request from a file")
     return None
 
 
-def gh_subcommand(lowered):
-    """gh's command and subcommand, past global flags: ("pr", "merge")."""
-    words = []
-    k = 0
-    while k < len(lowered) and len(words) < 2:
-        a = lowered[k]
-        if a in ("-r", "-R", "--repo", "--hostname"):
+def strip_gh_globals(args):
+    """The words left once gh's global options and their values are taken
+    out: `-R o/r`, `-Ro/r`, `--repo o/r`, `--repo=o/r`, `--hostname h` and
+    `--hostname=h`. Matched as written, as gh's parser does: `-r` (a review's
+    `--request-changes`) is no repository option. One left with no value
+    stays, ending the words, so `gh pr create -h -R` isn't read as help."""
+    rest, k = [], 0
+    while k < len(args):
+        a = args[k]
+        if a in ("-R", "--repo", "--hostname"):
+            if k + 1 >= len(args):
+                rest.append(a)
+                break
             k += 2
             continue
-        if not a.startswith("-"):
-            words.append(a)
+        if a.startswith(("--repo=", "--hostname=")) or (len(a) > 2 and a.startswith("-R")):
+            k += 1
+            continue
+        rest.append(a)
         k += 1
+    return rest
+
+
+def gh_subcommand(args):
+    """gh's command and subcommand, past global flags, lowered: ("pr",
+    "merge"). `pr new`, gh's alias, is ("pr", "create"). Give the words as
+    written: the global options are matched before lowering, so `-r` isn't
+    read as `-R`."""
+    words = [a.lower() for a in strip_gh_globals(args) if not a.startswith("-")][:2]
+    if words == ["pr", "new"]:
+        words = ["pr", "create"]
     return tuple(words) or None
 
 
 def approves(args):
-    return any(a.startswith("--approve") or re.match(r"^-[A-Za-z]*a[A-Za-z]*$", a) for a in args)
+    """Whether gh's `pr review` would approve with these words, read as
+    gh's flag parser reads them: `--` ends the options, a value-taking
+    option's value is skipped (a body such as `-all good` is no option), and
+    in a cluster the letters before `=` are read in turn: `a` approves, and
+    after `b`, `F` or `R` the rest is its value (`-ab LGTM` approves, `-ba`
+    is the body `a`). Give the words as written: lowered, `-F` and `-R`
+    read as flags that take no value, which only denies more."""
+    skip = False
+    for a in args:
+        if skip:
+            skip = False
+            continue
+        if a == "--":
+            return False
+        if a == "--approve" or a.startswith("--approve="):
+            return True
+        if a in ("--body", "--body-file", "--repo"):
+            skip = True
+            continue
+        if a.startswith("--") or not a.startswith("-") or a == "-":
+            continue
+        letters = a[1:].split("=", 1)[0]
+        for i, c in enumerate(letters):
+            if c == "a":
+                return True
+            if c in "bFR":
+                skip = i + 1 == len(letters) and "=" not in a
+                break
+    return False
+
+
+def gh_asks_help(args):
+    """Whether gh would only print help: the command, the subcommand and
+    then `-h` or `--help` alone, with gh's global options and their values
+    aside (strip_gh_globals). Anything more could open a PR (`--title -h`
+    titles one), so it isn't read as help. Give the words as written:
+    lowered, `-H` (a head branch) would read as help."""
+    rest = strip_gh_globals(args)
+    return len(rest) == 3 and rest[2] in ("-h", "--help")
+
+
+# The pr subcommands whose help a session may read without a prompt, by
+# program: gh has no `pr approve`, which is gh-app's own.
+GH_HELP_SUBCOMMANDS = {"gh": {("pr", "review"), ("pr", "create")},
+                       "gh-app": {("pr", "review"), ("pr", "approve"), ("pr", "create")}}
+
+
+def gh_help_query(words):
+    """Whether these words only ask for a pr subcommand's help: the program
+    the bare word `gh` or `gh-app` (a path such as `./gh` could be a file
+    the session wrote), a subcommand in GH_HELP_SUBCOMMANDS for it (`pr new`
+    is `pr create`), and what gh_asks_help reads as help, once a single PR
+    number before or after the help word is taken out for review and
+    approve. Help approves, opens and prompts for nothing; a help word that
+    is an option's value, or comes with a body or mode (`pr review -r
+    --help`), isn't one."""
+    if not words or words[0] not in GH_HELP_SUBCOMMANDS or any(PLACEHOLDER in a for a in words):
+        return False
+    # The global options are gone, so gh_asks_help reads the same words.
+    rest = strip_gh_globals(words[1:])
+    if len(rest) < 3 or any(w.startswith("-") for w in rest[:2]):
+        return False
+    sub = gh_subcommand(rest[:2])
+    if sub not in GH_HELP_SUBCOMMANDS[words[0]]:
+        return False
+    if len(rest) == 4 and sub in (("pr", "review"), ("pr", "approve")):
+        numbers = [k for k in (2, 3) if re.fullmatch(r"[1-9][0-9]*", rest[k])]
+        if len(numbers) == 1:
+            del rest[numbers[0]]
+    return gh_asks_help(rest)
 
 
 def api_changes_review(lowered, writes=None):
@@ -2306,7 +2411,7 @@ def plain_args(words):
     prog = program(words[0])
     if prog == "git" and git_waits_or_drops(words):
         return False
-    if prog in ("gh", "gh-app") and gh_opens_editor(words[1:]):
+    if prog in ("gh", "gh-app") and gh_opens_editor(words[1:]) and not gh_help_query(words):
         return False
     text_options = text_options_of(prog, words)
     # `gh-app api`'s endpoint is a path on GitHub, not a file: `/repos/o/r`.
@@ -2384,7 +2489,8 @@ GIT_TEXT_OPTIONS = {"commit": {"-m", "--message"}, "merge": {"-m", "--message"},
                     "notes": {"-m", "--message"}, "stash": {"-m", "--message"},
                     "tag": {"-m"}}
 GH_TEXT_OPTIONS = {"-t", "--title", "-b", "--body"}
-GH_TEXT_SUBCOMMANDS = {(c, s) for c in ("issue", "pr") for s in ("create", "edit", "comment")}
+GH_TEXT_SUBCOMMANDS = ({(c, s) for c in ("issue", "pr") for s in ("create", "edit", "comment")}
+                       | {("pr", "review")})
 
 
 def text_options_of(prog, words):
@@ -2400,7 +2506,7 @@ def text_options_of(prog, words):
             return set()
         return GIT_TEXT_OPTIONS.get(sub, set())
     if prog in ("gh", "gh-app"):
-        sub = gh_subcommand([a.lower() for a in words[1:]])
+        sub = gh_subcommand(words[1:])
         return GH_TEXT_OPTIONS if sub in GH_TEXT_SUBCOMMANDS else set()
     return set()
 
@@ -2414,15 +2520,41 @@ O_CLUSTER = {"unzip", "7z", "ssh", "scp", "sftp", "curl", "wget", "cc", "gcc", "
 
 
 def gh_opens_editor(args):
-    """Whether gh would open an editor for a body it isn't given: an issue
-    or pull request created or commented on without one."""
-    sub = gh_subcommand([a.lower() for a in args])
-    if sub not in (("issue", "create"), ("pr", "create"), ("issue", "comment"), ("pr", "comment")):
+    """Whether gh would open an editor, or prompt, for a body it isn't
+    given: an issue or pull request created or commented on without one, or
+    a pull request review."""
+    sub = gh_subcommand(args)
+    if sub not in (("issue", "create"), ("pr", "create"), ("issue", "comment"), ("pr", "comment"),
+                   ("pr", "review")):
         return False
-    short = "bFf" if sub == ("pr", "create") else "bF"
-    return not any(
-        a.split("=", 1)[0] in ("--body", "--body-file", "--fill", "--fill-first", "--fill-verbose")
-        or re.match(r"^-[A-Za-z]*[" + short + "]", a) for a in args)
+    # In a cluster, the first value-taking letter takes the rest of it
+    # (`-Rbob/repo` is a repository), so a body letter counts only before
+    # one, or as it. A body option needs its value: one ending the words
+    # with none (`-cb`, `--body`) gives no body, and gh asks for it.
+    body = "bFf" if sub == ("pr", "create") else "bF"
+    valued = {("pr", "create"): "tbFBHalmprTR", ("issue", "create"): "tbFalmpTR"}.get(sub, "bFR")
+
+    def gives_body(k):
+        a = args[k]
+        follows = k + 1 < len(args)
+        name, eq, _ = a.partition("=")
+        if name in ("--fill", "--fill-first", "--fill-verbose"):
+            return True
+        if name in ("--body", "--body-file"):
+            return bool(eq) or follows
+        if not re.match(r"^-[A-Za-z]", a):
+            return False
+        letters = name[1:]
+        for i, c in enumerate(letters):
+            if c in body:
+                # `f` (--fill) takes no value; a value-taking letter has one
+                # in the rest of the cluster, after `=`, or in the next word.
+                return c not in valued or i + 1 < len(letters) or bool(eq) or follows
+            if c in valued:
+                return False
+        return False
+
+    return not any(gives_body(k) for k in range(len(args)))
 
 
 def git_waits_or_drops(words):
@@ -2529,7 +2661,8 @@ def reads_environment(words, w):
     if long_option(w, "--jq", 4) or long_option(w, "--template", 4):
         return "env" in value.lower()
     lowered = [a.lower() for a in words[1:]]
-    if (gh_subcommand(lowered) or ("",))[-1] in ("create", "edit", "comment") or lowered[:1] == ["api"]:
+    sub = gh_subcommand(words[1:])
+    if (sub or ("",))[-1] in ("create", "edit", "comment") or lowered[:1] == ["api"]:
         return False
     return bool(re.match(r"^-[A-Za-z]*[qt]", w)) and "env" in value.lower()
 
@@ -2695,9 +2828,10 @@ def matches(rules, words):
 
 def read_only(words):
     """Whether this is a READ_ONLY command reading only inside the project,
-    a devenv version or help query (devenv_query), which reads nothing, or
-    a `gh-app api` call that only reads GitHub (gh_api_reads)."""
-    if devenv_query(words) or gh_api_reads(words):
+    a devenv version or help query (devenv_query), which reads nothing, a
+    `gh-app api` call that only reads GitHub (gh_api_reads), or a request
+    for a pr subcommand's help (gh_help_query), which waits for nobody."""
+    if devenv_query(words) or gh_api_reads(words) or gh_help_query(words):
         return True
     if words[0] not in READ_ONLY:
         return False

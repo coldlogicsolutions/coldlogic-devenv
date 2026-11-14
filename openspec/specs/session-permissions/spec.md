@@ -15,9 +15,9 @@ Tested by: none.
 - **THEN** its generated settings name `sonnet`
 
 ### Requirement: Routine commands are allowed and destructive variants ask
-The module SHALL allow `scripts/check.sh`, `openspec`, git's `status`, `diff`, `log`, `add`, `commit`, `switch`, `branch`, `worktree`, `fetch` and `rev-list`, and gh-app's `pr view|checks|create|merge|list|comment` and `issue create|view|list|comment|edit`. It SHALL ask for the forcing and discarding variants of `git switch`, `git branch` and `git worktree remove`. Project rules SHALL add to these lists.
+The module SHALL allow `scripts/check.sh`, `openspec`, git's `status`, `diff`, `log`, `add`, `commit`, `switch`, `branch`, `worktree`, `fetch` and `rev-list`, and gh-app's `pr view|checks|create|merge|approve|review|list|comment` and `issue create|view|list|comment|edit`. It SHALL ask for the forcing and discarding forms of `git switch`, `git branch` and `git worktree remove`. Project rules SHALL extend both.
 
-Tested by: none for the lists; `claude-guard-test.py` tests the guard's reading of them.
+Tested by: only how the guard reads the lists, in `claude-guard-test.py`.
 
 #### Scenario: Forced branch deletion
 - **WHEN** a session runs `git branch -D feat`
@@ -34,6 +34,14 @@ Tested by: none for the lists; `claude-guard-test.py` tests the guard's reading 
 #### Scenario: Commenting on an issue as the App
 - **WHEN** a session runs `devenv shell --quiet -- gh-app issue comment 36 --body-file "$TMPDIR/body.md"`
 - **THEN** no permission prompt appears
+
+#### Scenario: Reviewing a PR as the App
+- **WHEN** a session runs `devenv shell --quiet -- gh-app pr review 36 --comment --body-file "$TMPDIR/review.md"`
+- **THEN** no permission prompt appears
+
+#### Scenario: Approving a PR as the App
+- **WHEN** a session runs `devenv shell --quiet -- gh-app pr approve 36`
+- **THEN** no permission prompt appears, and `gh-app` itself decides whether the PR may be approved
 
 ### Requirement: Forbidden commands have plain deny rules
 The module SHALL deny the plain spellings of force pushes, `git reset --hard`, `wrangler deploy`, `npx wrangler deploy` and `nix develop`, both bare and with arguments, as a fallback for when the guard hook doesn't run.
