@@ -110,9 +110,10 @@ with_tools "shellcheck" shell_scripts_lint
 with_tools "openspec validate" openspec validate --all --strict
 
 # Builds this repository's shell, which builds every module package and so
-# runs claude-guard's, session-relink's, prune-worktrees', claude-wrapper's,
-# memory-recall's and memory-migrate's build-time tests, and evaluates the
-# memory settings' self-check (memorySettingsCases) with nothing configured.
+# runs claude-guard's, gh-app's, session-relink's, prune-worktrees',
+# claude-wrapper's, memory-recall's and memory-migrate's build-time tests, and
+# evaluates the memory settings' self-check (memorySettingsCases) with nothing
+# configured.
 step "build: shell" devenv build shell
 # The same with the shared memory store configured and auto memory off, so the
 # self-check reads the configured settings too. Nothing contacts the host: the

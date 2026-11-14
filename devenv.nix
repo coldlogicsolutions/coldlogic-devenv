@@ -675,6 +675,12 @@ in
             # commit (packages/gh-app.sh); GitHub's ruleset requires the
             # approval as well.
             "gh-app pr merge *"
+            # gh-app approves only an open PR by a developer team member
+            # that the App has reviewed at its head commit, and refuses
+            # `pr review --approve` (packages/gh-app.sh); the guard denies
+            # every other way to approve.
+            "gh-app pr approve *"
+            "gh-app pr review *"
             "gh-app issue create *"
             "gh-app issue view *"
             "gh-app issue list *"
