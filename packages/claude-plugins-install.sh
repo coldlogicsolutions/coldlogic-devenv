@@ -38,6 +38,8 @@ if ! enabled=$(jq -r '(.enabledPlugins // {}) | to_entries[] | select(.value == 
   exit 0
 fi
 [ -n "$enabled" ] || exit 0
+# Plugins set to false on purpose, which a dependency never brings back.
+disabled=$(jq -r '(.enabledPlugins // {}) | to_entries[] | select(.value == false) | .key' "$settings" 2>/dev/null) || disabled=""
 
 # Prints the records' JSON, or the empty records when there is no file yet.
 read_records() {
@@ -102,13 +104,16 @@ install_plugin() {
   local plugin=$1 name market clone clone_real catalog entry source base src sha version cache tmp record dep
   case " $done_list " in *" $plugin "*) return ;; esac
   done_list="$done_list $plugin"
+  if grep -qxF -- "$plugin" <<<"$disabled"; then
+    return
+  fi
   name=${plugin%@*}
   market=${plugin##*@}
   if ! safe_component "$name" || ! safe_component "$market"; then
     warn "$plugin" "its name isn't one this can use as a folder name"
     return
   fi
-  if ! grep -qxF "$plugin" <<<"$enabled"; then
+  if ! grep -qxF -- "$plugin" <<<"$enabled"; then
     echo "Claude Code plugin $plugin is a dependency of an enabled plugin but isn't enabled in $settings; add it to enabledPlugins" >&2
   fi
 
