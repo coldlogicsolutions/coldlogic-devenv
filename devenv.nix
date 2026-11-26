@@ -816,10 +816,10 @@ in
           };
           # Hosts a dependency of the coldlogic plugin. Claude Code installs
           # a dependency only from a marketplace it knows.
-          openai-codex.source = {
-            source = "github";
-            repo = "openai/codex-plugin-cc";
-          };
+          #openai-codex.source = {
+          #  source = "github";
+          #  repo = "openai/codex-plugin-cc";
+          #};
         };
         enabledPlugins = {
           "coldlogic@coldlogic-plugins" = true;
@@ -827,7 +827,7 @@ in
           # Code would enable them as it installs the plugin, but the install
           # below writes no settings. It installs them from plugin.json, and
           # warns when one there is missing here.
-          "codex@openai-codex" = true;
+          "codex@openai-codex" = false;
           "pr-review-toolkit@claude-plugins-official" = true;
           "code-review@claude-plugins-official" = true;
           "commit-commands@claude-plugins-official" = true;
