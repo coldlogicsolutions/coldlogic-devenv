@@ -6,7 +6,7 @@ The Claude Code plugins every project's sessions load: the marketplaces and plug
 ## Requirements
 
 ### Requirement: The coldlogic plugin and its dependencies are enabled
-The generated settings SHALL add the `coldlogic-plugins` marketplace (`coldlogicsolutions/claude-plugins-coldlogic`, auto-updating) and the `openai-codex` marketplace. They SHALL enable `coldlogic@coldlogic-plugins` and its dependencies, and enable the `mcp.devenv.sh` MCP server. A profile or project SHALL be able to add plugins through the same settings key.
+The generated settings SHALL add the `coldlogic-plugins` marketplace (`coldlogicsolutions/claude-plugins-coldlogic`, auto-updating). They SHALL enable `coldlogic@coldlogic-plugins` and its dependencies, set `codex@openai-codex` to `false` (off to save cost), and enable the `mcp.devenv.sh` MCP server. A profile or project SHALL be able to add plugins through the same settings key.
 
 Tested by: none.
 
@@ -27,6 +27,10 @@ Tested by: none.
 - **WHEN** an install already covers the plugin and its files are in the cache
 - **THEN** the task changes nothing
 
+#### Scenario: Dependency disabled on purpose
+- **WHEN** an enabled plugin declares a dependency the settings set to `false`
+- **THEN** the task neither installs it nor warns about it
+
 ### Requirement: Plugin installation never fails the shell
 The install task SHALL report each problem as a warning on stderr and never fail the shell. Problems include: a marketplace Claude Code hasn't fetched yet, a plugin directory it can't write (as in a sandboxed session), a records format it doesn't know, and a dependency that isn't enabled in the settings.
 
@@ -37,5 +41,5 @@ Tested by: none.
 - **THEN** it warns that no plugins were installed, and the shell still starts
 
 #### Scenario: Dependency not enabled
-- **WHEN** an enabled plugin declares a dependency the settings don't enable
+- **WHEN** an enabled plugin declares a dependency the settings don't mention
 - **THEN** it warns to add the dependency to `enabledPlugins`
