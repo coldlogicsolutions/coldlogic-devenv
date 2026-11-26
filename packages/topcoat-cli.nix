@@ -50,6 +50,13 @@ rustPlatform.buildRustPackage (finalAttrs: {
     "-p"
     "topcoat-cli"
   ];
+  # The build writes under $HOME. Nix points it at /homeless-shelter, which a
+  # sandboxed build can't create; an unsandboxed one as root (the CI images'
+  # single-user Nix) does, and Nix then refuses every later build in that
+  # store while the directory exists.
+  preConfigure = ''
+    export HOME="$(mktemp -d)"
+  '';
   # Its tests run Topcoat projects end to end; what's needed here is the
   # binary.
   doCheck = false;
