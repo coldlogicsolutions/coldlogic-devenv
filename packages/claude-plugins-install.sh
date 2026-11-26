@@ -104,7 +104,7 @@ install_plugin() {
   local plugin=$1 name market clone clone_real catalog entry source base src sha version cache tmp record dep
   case " $done_list " in *" $plugin "*) return ;; esac
   done_list="$done_list $plugin"
-  if grep -qxF "$plugin" <<<"$disabled"; then
+  if grep -qxF -- "$plugin" <<<"$disabled"; then
     return
   fi
   name=${plugin%@*}
@@ -113,7 +113,7 @@ install_plugin() {
     warn "$plugin" "its name isn't one this can use as a folder name"
     return
   fi
-  if ! grep -qxF "$plugin" <<<"$enabled"; then
+  if ! grep -qxF -- "$plugin" <<<"$enabled"; then
     echo "Claude Code plugin $plugin is a dependency of an enabled plugin but isn't enabled in $settings; add it to enabledPlugins" >&2
   fi
 
