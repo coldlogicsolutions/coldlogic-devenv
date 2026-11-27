@@ -8,7 +8,9 @@
 # after one fails, prints a summary, and exits 1 if any check failed.
 #
 # Its tools (python3, nixfmt, shellcheck, openspec) come from the nixpkgs
-# revision devenv.lock pins (scripts/check-tools.nix), not from PATH.
+# revision devenv.lock pins (scripts/check-tools.nix), not from PATH. The
+# adoption test's tools come from the same revision through
+# scripts/adopt-test.nix.
 #
 # No `set -e`: a failing check must not stop the ones after it.
 set -uo pipefail
@@ -96,6 +98,12 @@ shell_scripts_lint() {
   files_check '*.sh' shellcheck --shell=bash
 }
 
+# Runs adopt.sh in a fresh repository and checks the .nix files it creates
+# (scripts/adopt-test.nix).
+adopt_output_formatted() {
+  nix build --impure --no-link -L -f scripts/adopt-test.nix
+}
+
 # Builds a fixture's shell on one profile, with the module's lock, as the
 # cache job does. The copy of devenv.lock is gitignored.
 fixture_builds() {
@@ -108,6 +116,7 @@ with_tools "guard tests" python3 -I packages/claude-guard-test.py
 with_tools "nixfmt" nix_files_formatted
 with_tools "shellcheck" shell_scripts_lint
 with_tools "openspec validate" openspec validate --all --strict
+step "adopt: nixfmt" adopt_output_formatted
 
 # Builds this repository's shell, which builds every module package and so
 # runs claude-guard's, gh-app's, session-relink's, prune-worktrees',

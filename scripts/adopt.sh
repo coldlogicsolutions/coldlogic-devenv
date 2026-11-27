@@ -163,7 +163,6 @@ if [[ ! -f devenv.nix ]]; then
 # Git hooks and the Claude Code setup come from coldlogic-devenv
 # (devenv.yaml). This adds only what this project needs.
 { pkgs, ... }:
-
 { }
 EOF
   changed+=("devenv.nix (new)")
