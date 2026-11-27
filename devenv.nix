@@ -731,7 +731,14 @@ in
                 "nix develop"
                 "git reset --hard"
                 "git reset * --hard"
+                # Codex is off to save cost until it is turned back on, along
+                # with the team-review skill that runs it.
+                "codex"
               ];
+          rules.Skill.deny = [
+            "team-review"
+            "codex:*"
+          ];
           # Claude Code also merges these into the sandbox, so no command can
           # read or write them either. A file a tool in the shell needs, like
           # wrangler's `.dev.vars`, can't go here: the guard hook keeps Claude's
@@ -827,6 +834,8 @@ in
           # Code would enable them as it installs the plugin, but the install
           # below writes no settings. It installs them from plugin.json, and
           # warns when one there is missing here.
+          # Off to save cost; claude-plugins-install skips a dependency set
+          # to false. Turn back on with the marketplace above.
           "codex@openai-codex" = false;
           "pr-review-toolkit@claude-plugins-official" = true;
           "code-review@claude-plugins-official" = true;
