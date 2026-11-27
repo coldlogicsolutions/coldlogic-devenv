@@ -1,6 +1,6 @@
 # nixpkgs at the revision devenv.lock pins for the root `nixpkgs` input (the
-# one the shell uses). Used by check-tools.nix and by the check workflow's
-# devenv install, so every consumer agrees on versions.
+# one the shell uses). Used by check-tools.nix, adopt-test.nix and the check
+# workflow's devenv install, so every consumer agrees on versions.
 let
   lock = builtins.fromJSON (builtins.readFile ../devenv.lock);
   ref = lock.nodes.root.inputs.nixpkgs or (throw "devenv.lock: the root has no nixpkgs input");
