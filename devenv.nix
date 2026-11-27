@@ -223,6 +223,9 @@ in
       # Whether devenv installs any hook here (empty when every enabled hook
       # is manual-stage).
       hooksExpected = config.git-hooks.enable && expectedHooks != [ ];
+      # prek's state directory in every developer shell: the user's prek
+      # cache (see env.PREK_HOME below).
+      prekHome = "${builtins.getEnv "HOME"}/.cache/prek";
       # notice <key> <text>: once per session (packages/session-shell.sh), and
       # printed anyway if the helper fails. forget <key>: when the condition is gone.
       noticeFunctions = ''
@@ -613,6 +616,25 @@ in
       ];
 
       git-hooks.hooks.nixfmt.enable = true;
+
+      # devenv's git-hooks integration keeps prek's state (its log, lock and
+      # hook environments) in the checkout's own devenv state, at plain
+      # priority, and the installed hook sets no environment. A session that
+      # moves into a worktree with EnterWorktree then commits with the main
+      # checkout's PREK_HOME, which its sandbox no longer lets it write
+      # (#135). The user's prek cache is one path from every checkout,
+      # prek's own default, and in the sandbox's allowWrite below; devenv's
+      # enterShell still creates it. mkForce: devenv's definition has plain
+      # priority, so a second plain one would conflict.
+      env.PREK_HOME = lib.mkIf config.git-hooks.enable (lib.mkForce prekHome);
+      # Fails the shell's evaluation, so the gate's shell builds, when the
+      # override above is lost or outranked.
+      assertions = lib.optional config.git-hooks.enable {
+        assertion = (config.env.PREK_HOME or null) == prekHome;
+        message = "coldlogic: PREK_HOME is ${
+          config.env.PREK_HOME or "unset"
+        }, not the user's prek cache ${prekHome}, so a session's worktree commits can't run the pre-commit hook (#135)";
+      };
 
       claude.code = {
         enable = true;
