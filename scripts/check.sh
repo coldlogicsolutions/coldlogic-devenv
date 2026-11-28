@@ -111,6 +111,16 @@ fixture_builds() {
   cp devenv.lock "$fixture" && (cd "$fixture" && devenv --profile "$profile" build shell)
 }
 
+# Runs openspec from a fixture's ci shell, which is where a project's gate
+# runs `openspec validate`. From the shell's own packages ($DEVENV_PROFILE),
+# not PATH: the shell inherits the gate's PATH, which has openspec whatever
+# the profile holds.
+fixture_ci_has_openspec() {
+  local fixture=$1
+  # shellcheck disable=SC2016  # expanded by the shell devenv starts
+  cp devenv.lock "$fixture" && (cd "$fixture" && devenv --profile ci shell --quiet -- bash -c '"$DEVENV_PROFILE/bin/openspec" --version')
+}
+
 # ------------------------------------------------------------------ checks --
 with_tools "guard tests" python3 -I packages/claude-guard-test.py
 with_tools "nixfmt" nix_files_formatted
@@ -141,6 +151,7 @@ for fixture in tests/fixtures/*/; do
   for profile in ci developer; do
     step "build: ${fixture##*/} ($profile)" fixture_builds "$fixture" "$profile"
   done
+  step "ci openspec: ${fixture##*/}" fixture_ci_has_openspec "$fixture"
 done
 
 # ----------------------------------------------------------------- summary --
