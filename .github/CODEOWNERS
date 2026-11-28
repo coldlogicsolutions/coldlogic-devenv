@@ -1,0 +1,4 @@
+# Every change requests review from the organization's developer.
+# Code-owner approval is not required (the default-branch ruleset has
+# require_code_owner_review off); this only adds the review request.
+* @derekjw
