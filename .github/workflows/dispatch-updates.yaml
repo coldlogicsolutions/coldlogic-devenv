@@ -41,11 +41,19 @@ jobs:
     permissions:
       contents: read
     strategy:
+      # One leg's failure doesn't cancel the others, so they still fill the
+      # cache.
+      fail-fast: false
       matrix:
-        # CI's platform, and the developers' machines. A failure on either
-        # holds back the dispatch to every project: rerun the failed job once
-        # it's fixed or found to be transient.
-        runner: [ubuntu-latest, macos-latest]
+        # CI's platforms (x86_64 on GitHub's runners, aarch64 on the
+        # organization's self-hosted one) and the developers' machines. The
+        # arm leg is a literal GitHub-hosted label, never vars.RUNNER_LINUX:
+        # this repository is public, so it reads that variable empty, which
+        # would run a second x86_64 leg and cache nothing for arm. Check the
+        # label again if this repository is made private. A failure on any
+        # leg holds back the dispatch to every project: rerun the failed job
+        # once it's fixed or found to be transient.
+        runner: [ubuntu-latest, ubuntu-24.04-arm, macos-latest]
     runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1

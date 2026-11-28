@@ -11,6 +11,15 @@
 # the infrastructure stack puts in a `coldlogic-ai` environment, deployable
 # only from main, in every registered repository. Only the second job sees
 # them: the first runs Nix and devenv, and hands over nothing but devenv.lock.
+#
+# Both jobs run on the organization's self-hosted runner when the RUNNER_LINUX
+# variable is set (private repositories), and on a GitHub-hosted one when it
+# is empty (public ones). The steps must pass unchanged on both: no `sudo`,
+# nothing installed into the runner's Nix profile (`nix shell`, not
+# `nix profile add`), no `if:` on the runner's kind. The self-hosted runner's
+# image provides nix, jq, git and gh, and its runners must be ephemeral (one
+# pod per job, nothing shared), since the update job's Nix code and the
+# pull-request job's App key share that runner pool.
 name: Update coldlogic-devenv
 
 on:
@@ -29,19 +38,39 @@ concurrency:
 
 jobs:
   update:
-    runs-on: ubuntu-latest
+    # The organization's self-hosted runner when RUNNER_LINUX is set, a
+    # GitHub-hosted one when it's empty (public repositories). Never the
+    # runner's label itself.
+    runs-on: ${{ vars.RUNNER_LINUX || 'ubuntu-latest' }}
+    # Nothing here builds: a few minutes at most. Counts once the job starts.
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 
+      # For the GitHub-hosted runner. The self-hosted runner's image has Nix, and
+      # the action does nothing there.
       - uses: cachix/install-nix-action@75c75c31ebece974e48ebc36b4ad125bd97bd97b # v31.11.3
 
-      - name: Install devenv
-        run: nix profile add nixpkgs#devenv
-
+      # The devenv from the nixpkgs revision the project's devenv.lock pins,
+      # not the registry's and not the runner image's. `nix shell` installs
+      # nothing: `nix profile add` would conflict with the devenv already in
+      # the self-hosted runner's image. The lock must name a GitHub revision.
+      #
+      # NIX_CONFIG gives Nix this job's read-only token for github.com:
+      # `devenv update` asks GitHub's API for the module's latest revision,
+      # and the self-hosted runner's jobs share one address and its
+      # unauthenticated rate limit. Set on this step only.
       - name: Update the pin
-        run: devenv update coldlogic-devenv
+        env:
+          NIX_CONFIG: access-tokens = github.com=${{ github.token }}
+        run: |
+          set -euo pipefail
+          ref=$(jq -r '.nodes as $n | ($n.root.inputs.nixpkgs | strings) as $k | $n[$k].locked | select(.type == "github" and (.host // "github.com") == "github.com") | "\(.owner)/\(.repo)/\(.rev)"' devenv.lock)
+          [[ $ref =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/[0-9a-f]{40}$ ]] ||
+            { echo "devenv.lock: the root nixpkgs input must be a direct github input on github.com, locked to a revision" >&2; exit 1; }
+          nix shell "github:${ref}#devenv" -c devenv update coldlogic-devenv
 
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
@@ -55,7 +84,11 @@ jobs:
     # enforces that, and this skips the job instead of failing it.
     if: github.ref == 'refs/heads/main'
     environment: coldlogic-ai
-    runs-on: ubuntu-latest
+    # As the update job. On the self-hosted runner, `gh` and `jq` come from
+    # its image.
+    runs-on: ${{ vars.RUNNER_LINUX || 'ubuntu-latest' }}
+    # A handful of API calls. Counts once the job starts.
+    timeout-minutes: 10
     # The App token does the writing; GITHUB_TOKEN only checks out.
     permissions:
       contents: read
