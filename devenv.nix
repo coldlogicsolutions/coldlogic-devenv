@@ -145,6 +145,14 @@ in
   # dispatch-updates workflow pushes the profiles' shells to.
   cachix.pull = [ "coldlogic" ];
 
+  # A project's gate runs `openspec validate` in CI, so `ci` gets openspec
+  # too, and nothing else of the module's.
+  profiles.ci.module =
+    { pkgs, ... }:
+    {
+      packages = [ pkgs.openspec ];
+    };
+
   profiles.developer.module =
     {
       config,

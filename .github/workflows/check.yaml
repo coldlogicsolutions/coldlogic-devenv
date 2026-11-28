@@ -1,7 +1,8 @@
 # Runs the gate (scripts/check.sh) on every pull request and every push to
 # main: the module's tests, formatting, shellcheck, spec validation, the
-# adoption check (adopt.sh's output is nixfmt-clean), and a build of its own
-# shell and of each fixture's ci and developer shells.
+# adoption check (adopt.sh's output is nixfmt-clean), a build of its own shell
+# and of each fixture's ci and developer shells, and a check that each
+# fixture's ci shell has openspec.
 #
 # Pull only: it substitutes from the coldlogic cache and never pushes to it, so
 # it needs no secrets. Main's cache job (dispatch-updates.yaml) fills the cache.

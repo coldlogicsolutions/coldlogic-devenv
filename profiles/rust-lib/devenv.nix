@@ -28,7 +28,8 @@
     # What scripts/check.sh needs on top of `build`, and nothing else. A CI
     # image ships this closure and every job pulls it, so an editor server, a
     # copy of the Rust docs and a pre-commit framework are paid for on every
-    # run. `developer` keeps all of that for humans.
+    # run. `developer` keeps all of that for humans. The shared module adds
+    # one thing to `ci` on purpose: `openspec`, which a project's gate runs.
     ci = {
       extends = [ "build" ];
       module = {
