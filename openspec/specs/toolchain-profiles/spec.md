@@ -8,11 +8,11 @@ The language profiles a project imports next to the module. Each supplies a tool
 ### Requirement: Profiles layer build, ci and developer
 Each profile SHALL define `build`, plus `ci` and `developer`, which both extend `build`. A project's own `devenv.nix` SHALL be able to add to any of the three. The module SHALL add its tooling and Claude Code settings to `developer` only, so `build` and `ci` shells get none of them.
 
-Tested by: the `cache` job in `.github/workflows/dispatch-updates.yaml`, which builds the `ci` and `developer` shells of each fixture in `tests/fixtures/` on Linux and macOS.
+Tested by: the `cache` job in `dispatch-updates.yaml` (each fixture's shells on x86_64 Linux, aarch64 Linux and macOS); the gate, on its own platform.
 
 #### Scenario: Fixture shells build
 - **WHEN** a commit lands on main
-- **THEN** the `ci` and `developer` shells of `tests/fixtures/rust-lib` and `tests/fixtures/rust-worker` build on both platforms, or the dispatch to projects is held back
+- **THEN** the `ci` and `developer` shells of `tests/fixtures/rust-lib` and `tests/fixtures/rust-worker` build on all three platforms, or the dispatch to projects is held back
 
 ### Requirement: rust-lib provides a pinned Rust for host and wasm32
 The `rust-lib` `build` profile SHALL provide stable Rust at the module's supported version (1.99.1, which a project can override) with the `wasm32-unknown-unknown` target, plus Node.
